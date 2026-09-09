@@ -1,0 +1,37 @@
+# dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# builds
+.next/
+out/
+build/
+dist/
+
+# environment — never commit real values
+.env
+.env.local
+.env.*.local
+.env.production
+!.env.example
+
+# supabase local
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# logs and caches
+*.log
+npm-debug.log*
+.turbo/
+.vercel/
+.cache/
+coverage/
+
+# editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
