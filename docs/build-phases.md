@@ -44,7 +44,8 @@ reports, and `00-SUMMARY.md` is the reconciled version that wins where they disa
 credentials and irreversible choices.
 
 Build the Hetzner server: SSH key first, firewall created *before* the server, Ubuntu
-24.04 in **Falkenstein**, non-root user proved in a second terminal before anything is
+24.04 on a **CX23 in Falkenstein** (4 GB — the 8 GB type is not available there, so
+development runs on the laptop and the server runs production alone), non-root user proved in a second terminal before anything is
 locked down, root and password login off, Docker configured so containers cannot
 publish to the world, automatic security updates, fail2ban, the Cloudflare Tunnel, the
 backup job.

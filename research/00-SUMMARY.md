@@ -312,3 +312,34 @@ then accounts, then adding tools, then hardening.
 The managed plan was about $20 for year one. This one adds the server, and buys
 control, no pausing, no egress cliff, and no non-commercial restriction when paid
 accounts arrive.
+
+## R2.6 Corrections after the accounts were created (10 September 2026)
+
+**The server is a CX23, not a CX33.** Falkenstein and Nuremberg both had only the
+CX23 available in the cost-optimised line: 2 vCPU, 4 GB, 40 GB NVMe, 20 TB traffic,
+**$6.49/month**. Regular Performance was the only 8 GB option and costs roughly double.
+
+**So development moves to the owner's laptop**, and the server runs production alone.
+That was the only argument for 8 GB, and the split is better isolation anyway: a
+mistake in development cannot reach the production machine at all. Use the 4 GB
+PostgreSQL configuration in `08-postgres-selfhosted.md` — `shared_buffers = 512MB`,
+`work_mem = 8MB` with `max_connections = 30`, `jit = off`, and a 2 GB swapfile, which
+is not optional on a box this size.
+
+**Real costs, now that the prices are visible rather than estimated:**
+
+| Item | Cost |
+| --- | --- |
+| Hetzner CX23 | $6.49/month |
+| Its automatic backups (+20%) | ~$1.30/month |
+| Domain `foundit.tools` | $29.35/year |
+| Cloudflare, R2 backup storage | $0 |
+| Embeddings and query parsing | ~$1/month |
+| **Year one** | **≈ $135** |
+
+The original budget was $100 and the managed free tiers would have cost about $20.
+Owning the machine costs more; the owner chose it knowing that, and the figure is
+recorded here so nobody is surprised by it later.
+
+**Apple sign-in stays deferred**, which is the single largest saving in this plan: at
+$99/year it would have cost three quarters as much as everything else combined.
