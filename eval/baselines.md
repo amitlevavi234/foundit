@@ -39,6 +39,7 @@ size of the set noted.
 | Date | Commit | Phase | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | What changed |
 | ---- | ------ | ----- | ------- | --------- | ------- | ------- | ------ | ----------- | ------------ |
 | 2026-09-10 | 364779b | 2 | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | **WITHDRAWN — see below.** Not a baseline. |
+| 2026-09-10 | 39569ba | 2 | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
 
 ### Phase 2, by slice
 
@@ -107,3 +108,41 @@ non-English slice in particular is the one Phase 4 exists to move.
 | 3 — vectors | Phase 2's nDCG@10 | `docs/build-phases.md` §Phase 3 gate |
 | 4 — sentence understanding | Phase 3, especially the non-English slice | §Phase 4 gate |
 | 5 — ranking | Phase 4, each of the three steps measured separately | §Phase 5 gate |
+
+
+---
+
+## Phase 2, the real baseline — 39569ba
+
+| Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero |
+| ----- | - | --------- | ------- | ------- | ------ | ---- |
+| all | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 |
+| english | 50 | 0.5080 | 0.5514 | 50.9 | 92.4 | 0 |
+| non-english | 10 | 0.1583 | 0.1700 | 43.7 | 84.6 | 4 |
+| constrained | 17 | 0.4588 | 0.4454 | 37.9 | 90.9 | 3 |
+| unconstrained | 43 | 0.4461 | 0.5046 | 54.3 | 92.4 | 1 |
+
+Constraint violations: **0**. Permission suites: **2 of 2 passing**.
+
+**It went down, and that is the point.** nDCG fell from a withdrawn 0.6876 to
+0.4878 and latency roughly quadrupled. Nothing got worse: the first number was
+measured against a corpus written to be found and through a connection that
+bypassed row-level security. This one is what the product does.
+
+**Non-English collapsed to 0.17, with four queries returning nothing at all.**
+That is the honest state of a search whose documents are indexed with
+`to_tsvector('english', ...)`. Hebrew, Arabic and Russian get no stemming, so
+only exact word forms can match, and the earlier 0.455 came almost entirely
+from planted statements that repeated the query. This is the single largest
+known weakness in the product and Phase 4 owns it.
+
+**Four tools carry a caveat.** The brief that commissioned the rewrite quoted
+four golden queries verbatim as examples of the problem, so the statements for
+keepassxc, home-assistant, audacity and signal were written with partial
+knowledge of the answer key. Treat their scores as the least trustworthy in the
+set. That was my error in writing the brief, not the agent's in following it.
+
+**Latency is now measured as `foundit_app`** — 49.7 ms mean, 90.9 ms p95,
+against 6.3 / 10.8 for the owner on the same queries. Phase 3's "cached
+searches under 150 ms" is set against these figures, which is what a visitor
+will experience.

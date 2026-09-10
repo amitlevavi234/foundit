@@ -38,40 +38,52 @@ Still open: the auth library's tables and the `profiles` foreign key (`0002`),
 and wiring the permission tests into CI.
 
 
-## Phase 2 — search with no AI in it — **in progress**
+## Phase 2 — search with no AI in it — **built, reviewed, re-fixed, awaiting sign-off**
 
-| Task | Status | Evidence |
+Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
+`39569ba`, measured as `foundit_app`. Recorded in `eval/baselines.md`.
+
+| Deliverable | Status | Evidence |
 | --- | --- | --- |
-| `0002_search.sql` — `search_tools()` and `log_search_event()` | done | applies cleanly to PostgreSQL 17.11; `pg_proc` shows `prosecdef = f` on both, so RLS still applies to the caller |
-| The function contract the harness calls | verified live | named-argument call executes; constraint arrays cast from the wire format; empty query takes the browse path; a stop-words-only query returns an honest empty answer rather than erroring |
-| `search_events` has no user column | verified | eight columns, none of them a person; `log_search_event` writes and computes the hash internally, and takes no user id |
-| `eval/run.mjs` + `eval/scoring.test.mjs` | written, self-test passes | 95 assertions, exit 0. The self-test caught four real defects in the harness's own arithmetic |
-| Development catalogue of 150+ tools | agent running | the 10-tool seed makes recall@10 trivially 1.0, so the eval would have measured nothing |
-| `eval/golden.jsonl` — 60 queries | agent running | written before any tuning |
-| **First real eval run and the recorded baseline** | **blocked** | see below |
-| The gate: adversarial review by a fresh agent | not started | runs after the baseline exists |
+| One SQL function, one round trip | done | `search_tools()`; all filtering, ranking, dedup and limiting inside PostgreSQL; `prosecdef = f` on it and its wrapper |
+| Constraints filter, never influence | done | 0 violations across 60 queries; the review brute-forced every `pricing_model` value and found no leak; flags are genuinely all-of |
+| 223-tool development catalogue | done | 504 statements, 48 tools with non-English text spread across all 19 categories, idempotent |
+| Golden set, 60 queries | done | 10 non-English, 17 constrained, every slug present and published |
+| `eval/run.mjs` with recall@10 and nDCG@10 | done | exits 0; 119-assertion self-test; `--baselines=` makes the regression gate testable |
+| Baseline recorded | done | and one earlier number **withdrawn** — see `eval/baselines.md` |
+| Searches logged to `search_events` | **partial** | `log_search_event()` works and the hash is now derived by trigger, but nothing calls it automatically because there is no application yet. Wiring belongs with Phase 2-UI |
+| Permission suites pass unchanged | done | 2 of 2, three consecutive runs, database byte-identical afterwards |
+| Adversarial review by a fresh agent | done | 7 confirmed findings; 6 fixed, 1 accepted with a caveat |
+| **Owner reads twenty results and agrees they are sane** | **waiting on Amit** | the last gate item |
 
-### Blocked: nothing can connect Node to the database
+### What the review found, and where each landed
 
-`eval/run.mjs` needs a socket from Node to PostgreSQL and there is not one.
+| Finding | Outcome |
+| --- | --- |
+| The corpus carried the answer key — problem statements were paraphrases of the golden queries | Fixed. All 504 rewritten from each tool's own summary with the golden set unopened. The first baseline was withdrawn |
+| `search_events` privacy was a comment, not a constraint — `foundit_app` could write `query_hash = 'user:x\|session:y'` | Fixed by a BEFORE INSERT trigger that derives the hash. Stronger than a CHECK, which cannot tell a hash of a query from a hash of a person |
+| Every profile, `is_admin` included, readable by anonymous strangers | Fixed. Public face moved to a view; `is_admin` and `plan` did not come with it |
+| Who liked what was public | Fixed. Counts public, attribution private |
+| Permission suite could not run twice | Fixed. Always rolls back; proven by content fingerprints |
+| Eval checker disagreed with the SQL it verified | Fixed. Self-test 95 to 119 assertions |
+| Baseline measured as a superuser | Fixed. Development connects as `foundit_app`; migrations use a separate owner URL with no fallback |
+| Ranking leg added in the same commit as the golden set | Accepted, recorded. The AND-to-OR change was a bug fix; the fourth fusion leg was design and should have landed separately |
 
-- Docker on the laptop is still broken, so there is no local database.
-- The server's sshd sets `AllowTcpForwarding no`, so `-L` forwarding is refused
-  (`administratively prohibited`). That is our own hardening working correctly.
+### Known weaknesses, stated rather than hidden
 
-Three ways out, best first:
-
-1. **Reboot the laptop.** Docker recovers, development runs locally, the server
-   is untouched. This is what `build-phases.md` §0b already specifies.
-2. Narrow the sshd rule to `AllowTcpForwarding local` + `PermitOpen
-   127.0.0.1:5432`. One line, tightly scoped, but still a relaxation of
-   hardening we chose deliberately — and it needs Amit, since the safety
-   classifier refused it unasked, correctly.
-3. Install Node on the production server. Worst: dev tooling on the box that
-   will face the internet.
-
-Everything that does not need a live socket is proceeding. SQL is still being
-verified through `ssh` + `docker exec`, which needs no server change.
+- **Non-English is 0.17 and four queries return nothing.** Documents are indexed
+  with `to_tsvector('english', ...)`, so Hebrew, Arabic and Russian match only on
+  exact word forms. The largest known weakness in the product. Phase 4 owns it.
+- **Four tools have contaminated statements.** The brief commissioning the rewrite
+  quoted four golden queries as examples, so keepassxc, home-assistant, audacity
+  and signal were written with partial knowledge of the answer key. My error.
+- **The 200-character cap is on the wrapper, not the implementation.**
+  `foundit_app` retains execute on `search_tools_impl` and must, since the wrapper
+  runs as the caller. Moving the check into the body deletes the wrapper.
+- **`foundit_owner` being a superuser is load-bearing** for `auth.is_admin()` and
+  `profiles_public`. Both fail closed, but no test covers the first.
+- **The ~200 remaining `languages` arrays are unverified** against vendor locale
+  lists, and the constrained slice partly measures those guesses.
 
 ## Tried and rejected
 
