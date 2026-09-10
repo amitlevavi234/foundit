@@ -76,6 +76,20 @@ export function ProblemCard({ problem, lead = false, index = 0 }: ProblemCardPro
               </>
             )
           ) : (
+            // BrowseProblems.dc.html ends this line with "31 tools →" — how
+            // many tools solve the problem — and this ends it with the one
+            // whose statement it is. The count is not available honestly.
+            //
+            // It is not a column: a card is one row of `tool_problems`, and
+            // "how many tools solve this" is the result count of running the
+            // statement as a search. That could be had in this same statement,
+            // as a lateral count per card, so the one-round-trip rule is not
+            // what stops it — what stops it is that retrieval is any-of with
+            // no relevance floor, so the number would count every tool sharing
+            // one word with the sentence. "31 tools" over a statement about
+            // splitting a hotel bill, most of them PDF splitters, is the
+            // headline version of the mistake the results screen just stopped
+            // making. It waits for Phase 5, with the fit meter.
             <>
               {problem.name}
               <Icon name="arrow" size={14} color="var(--c-violet)" strokeWidth={2.25} />

@@ -133,11 +133,18 @@ export default async function Top({ searchParams }: TopProps) {
           </div>
         )}
 
+        {/* This used to end "Every one of them links straight out to the
+            maker", and no row on this page does: a row is a link to the tool's
+            own page, which is where the address the maker entered is drawn,
+            beside the domain it goes to (components/OutboundLink.tsx). A table
+            of 25 outbound links would also be 25 chances to leave before
+            reading anything, which is not what a ranked list is for. So the
+            sentence says where the link out actually is. */}
         <p className="muted" style={{ fontSize: 'var(--t-meta)', margin: 0 }}>
           Showing {data.tools.length} of {data.total}
-          {active ? ` in ${active.name}` : ' published tools'}. Every one of them links straight out
-          to the maker — <Link href="/browse">browse by problem</Link> if a name means nothing to
-          you, which is rather the point.
+          {active ? ` in ${active.name}` : ' published tools'}. Each row opens its page here, where
+          the maker’s own address is — <Link href="/browse">browse by problem</Link> if a name means
+          nothing to you, which is rather the point.
         </p>
       </main>
 

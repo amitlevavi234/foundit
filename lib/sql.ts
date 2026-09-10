@@ -413,6 +413,16 @@ export const BROWSE_SQL = `
   )
   select (select coalesce(jsonb_agg(to_jsonb(x) order by x.sort_order), '[]'::jsonb)
             from cats x where x.tool_count > 0) as categories,
+         -- The sidebar's "where the catalogue is deepest": the same category
+         -- rows in a different order. It is a second ordering of a list the
+         -- statement already has, which is exactly the kind of thing that gets
+         -- done in JavaScript because it is small — and then the next one is
+         -- done in JavaScript because the last one was. It is an ORDER BY; it
+         -- belongs here, and it costs no extra round trip.
+         (select coalesce(jsonb_agg(to_jsonb(x) order by x.tool_count desc, x.name),
+                          '[]'::jsonb)
+            from (select * from cats where tool_count > 0
+                   order by tool_count desc, name limit 4) x) as deepest,
          (select coalesce(jsonb_agg(to_jsonb(x) order by x.like_count desc,
                                     x.rating_avg desc nulls last, x.name), '[]'::jsonb)
             from page x) as problems,
@@ -669,6 +679,7 @@ export async function runBrowse(
 ): Promise<BrowseData> {
   const { rows } = await exec.query<{
     categories: CategoryRow[];
+    deepest: CategoryRow[];
     problems: ProblemCardRow[];
     tool_count: string | number;
     problem_count: string | number;
@@ -678,6 +689,7 @@ export async function runBrowse(
   const row = rows[0];
   return {
     categories: (row?.categories ?? []).map(toCategory),
+    deepest: (row?.deepest ?? []).map(toCategory),
     problems: (row?.problems ?? []).map(toProblemCard),
     toolCount: num(row?.tool_count),
     problemCount: num(row?.problem_count),

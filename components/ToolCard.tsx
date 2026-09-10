@@ -12,9 +12,11 @@ import { ToolTile } from './ToolTile';
  * The result card, from `resultCard()` in design/canvas/build.mjs.
  *
  * Reading order down the card is the order the design puts the argument in:
- * how well it fits, what it is, why it matches, which constraints it meets and
+ * how it matched, what it is, what matched, which constraints it meets and
  * which it misses, then what other people made of it and what you can do next.
- * The fit comes first because that is the claim the product is making.
+ * The match comes first because that is the claim the product is making — and
+ * until Phase 5 calibrates a fit, that claim is a location rather than a
+ * score, so the band goes where the meter will one day sit.
  *
  * Everything below the name is optional. Phase 2's search returns a name, a
  * summary and an ordering score and nothing else, so the card has to be
@@ -37,12 +39,20 @@ export interface ToolCardProps {
   fit?: number;
   fitLabel?: string;
   /**
-   * What matched, in words, for a card that has no calibrated number to show.
-   * Drawn where the meter goes. See lib/results.ts: the label is a band, the
-   * note is the fact underneath it, and neither is a rescaled score.
+   * Where it matched, in words, for a card that has no calibrated number to
+   * show. Drawn where the meter goes. See lib/results.ts: the label names the
+   * place, the note says what turned up there, and neither is a rescaled score
+   * or a claim about how well the tool fits.
    */
-  band?: { label: string; note: string; tone: 'strong' | 'possible' | 'loose' };
+  band?: { label: string; note: string; tone: 'both' | 'one' | 'name' };
   why?: string;
+  /**
+   * The bold lead-in above `why`. It defaults to a claim — "Why it matches" —
+   * so a caller that has only a fact about *where* the words landed must say
+   * so instead: nothing on this card may assert a reason the ranking did not
+   * give. See app/results/page.tsx.
+   */
+  whyLabel?: string;
   satisfactions?: Satisfaction[];
   /**
    * Neutral facts about the tool — how it is paid for, what it promises — for
@@ -69,6 +79,7 @@ export function ToolCard({
   fitLabel,
   band,
   why,
+  whyLabel = 'Why it matches.',
   satisfactions,
   facts,
   rating,
@@ -106,7 +117,7 @@ export function ToolCard({
 
       {why ? (
         <div className="why" style={{ fontSize: big ? 'var(--t-body-lg)' : 'var(--t-body-sm)' }}>
-          <b>Why it matches.</b> {why}
+          <b>{whyLabel}</b> {why}
         </div>
       ) : null}
 
@@ -136,9 +147,17 @@ export function ToolCard({
             </span>
           ) : null}
           {likes ? (
-            <span className="ghost like" aria-label={`${likes} people found this useful`}>
+            /* A span is not a control and takes no accessible name, so an
+               aria-label here is simply dropped: a screen reader would read
+               the bare numeral with no idea what it counts. The words go in
+               the element instead, where they are read in order — "218 people
+               found this useful" — and stay invisible. */
+            <span className="ghost like">
               <Icon name="heart" size={17} strokeWidth={2} />
               {likes}
+              <span className="sr-only">
+                {likes === '1' ? ' person found this useful' : ' people found this useful'}
+              </span>
             </span>
           ) : null}
         </div>

@@ -19,8 +19,10 @@ import { getBrowse } from '@/lib/db';
  * At most one statement per tool, so a page of twelve is twelve different
  * tools rather than one thorough listing four times over.
  *
- * One round trip: the categories with their counts, the page of statements,
- * and the two totals in the standfirst all arrive together (`getBrowse`).
+ * One round trip: the categories with their counts, the same categories in
+ * depth order for the sidebar, the page of statements, and the two totals in
+ * the standfirst all arrive together (`getBrowse`). Nothing on this page is
+ * sorted, filtered or counted after it arrives.
  * ======================================================================== */
 
 export const metadata: Metadata = {
@@ -44,7 +46,6 @@ export default async function Browse({ searchParams }: BrowseProps) {
 
   const data = await getBrowse(category, PAGE_SIZE);
   const active = data.categories.find((c) => c.slug === category);
-  const busiest = [...data.categories].sort((a, b) => b.toolCount - a.toolCount).slice(0, 4);
 
   return (
     <div className="page">
@@ -150,7 +151,7 @@ export default async function Browse({ searchParams }: BrowseProps) {
               style={{ padding: 22, display: 'flex', flexDirection: 'column', gap: 12 }}
             >
               <div className="h3">Where the catalogue is deepest</div>
-              {busiest.map((c) => (
+              {data.deepest.map((c) => (
                 <Link
                   key={c.slug}
                   href={`/browse?in=${encodeURIComponent(c.slug)}`}

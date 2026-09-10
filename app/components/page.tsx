@@ -28,15 +28,25 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-const SWATCHES: Array<[name: string, value: string]> = [
-  ['Cream', '--c-bg'],
-  ['Surface', '--c-surface'],
-  ['Tint', '--c-tint'],
-  ['Ink', '--c-ink'],
-  ['Coral', '--c-coral'],
-  ['Violet', '--c-violet'],
-  ['Lime', '--c-lime'],
-  ['Amber', '--c-amber'],
+/**
+ * The eight swatches, with the hex the artboard prints under each one.
+ *
+ * The artboard prints the value, not the token name, and that was the point of
+ * the row: somebody matching a mock-up or an icon to the palette needs the
+ * number, and `--c-bg` is a name for a number they still have to go and find.
+ * The chip is still painted from the token, so the two can only disagree if
+ * this literal is wrong — which `tests/markup.test.mjs` reads styles/tokens.css
+ * to rule out, rather than trusting a comment to keep them in step.
+ */
+const SWATCHES: Array<[name: string, token: string, hex: string]> = [
+  ['Cream', '--c-bg', '#FFFCF5'],
+  ['Surface', '--c-surface', '#FFFFFF'],
+  ['Tint', '--c-tint', '#F1ECFF'],
+  ['Ink', '--c-ink', '#1C1A24'],
+  ['Coral', '--c-coral', '#FF5A3C'],
+  ['Violet', '--c-violet', '#6E4BF6'],
+  ['Lime', '--c-lime', '#B8F04A'],
+  ['Amber', '--c-amber', '#F2B84B'],
 ];
 
 function Row({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
@@ -128,7 +138,7 @@ export default function ComponentSheet() {
           note="Cream ground, one action colour, one structural colour, one reward colour. Amber for “needs attention”, red only for destructive actions."
         >
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 118px)', gap: 16 }}>
-            {SWATCHES.map(([name, token]) => (
+            {SWATCHES.map(([name, token, hex]) => (
               <div key={token} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <div
                   style={{
@@ -142,8 +152,8 @@ export default function ComponentSheet() {
                 <div style={{ fontSize: 'var(--t-micro)', fontWeight: 'var(--fw-semibold)' }}>
                   {name}
                 </div>
-                <div className="tab faint" style={{ fontSize: 'var(--t-micro-sm)' }}>
-                  {token}
+                <div className="tab faint" style={{ fontSize: 'var(--t-micro-sm)' }} title={token}>
+                  {hex}
                 </div>
               </div>
             ))}
@@ -169,14 +179,22 @@ export default function ComponentSheet() {
           </div>
         </Row>
 
+        {/* The three numerals here used to be captioned "Fits what you asked
+            — strong match", which is the sentence the homepage illustration
+            refuses to draw (components/Contraption.tsx: "the badge is not
+            drawn rather than drawn with an invented 92 in it"). A component
+            sheet is a live route, and 92 under that caption is the same
+            invented number, so the caption says what these are: the component,
+            drawn at three widths. The meter itself stays, because Phase 5 is
+            where it gets a number worth captioning. */}
         <Row
-          title="Fit score"
-          note="The signature element. A gradient meter from violet through coral to lime, with the numeral riding its end and counting up. CSS only, and it honours prefers-reduced-motion."
+          title="Fit meter"
+          note="The signature element, waiting on Phase 5. A gradient meter from violet through coral to lime, with the numeral riding its end and counting up. CSS only, and it honours prefers-reduced-motion. Nothing computes a fit yet, so the three numerals below are specimen widths and no screen draws this over a result."
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 22, width: 560 }}>
-            <FitMeter fit={92} />
-            <FitMeter fit={74} />
-            <FitMeter fit={48} />
+            <FitMeter fit={92} caption="Specimen, no tool" label="drawn at 92" />
+            <FitMeter fit={74} caption="Specimen, no tool" label="drawn at 74" />
+            <FitMeter fit={48} caption="Specimen, no tool" label="drawn at 48" />
           </div>
         </Row>
 
@@ -233,6 +251,37 @@ export default function ComponentSheet() {
           <OutboundButton url="http://splitwise.com" size="sm">
             Never rendered
           </OutboundButton>
+        </Row>
+
+        {/* Components.dc.html has this row between the link out and the status
+            pills, and the sheet was missing it. Both actions are Phase 6 and
+            neither is wired up, so these are drawn as spans rather than
+            buttons: a sheet may show what a control looks like in each of its
+            states without offering a control that does nothing when pressed.
+            The note says which is which, because "like" and "save" differ in
+            who they are for rather than in how they look. */}
+        <Row
+          title="Likes and saves"
+          note="Like is a light public signal that feeds ranking. Save is the private, primary action. Both arrive with accounts in Phase 6; these are the four states, not working controls."
+        >
+          <span className="ghost like">
+            <Icon name="heart" size={17} strokeWidth={2} />
+            218
+            <span className="sr-only"> people found this useful</span>
+          </span>
+          <span className="ghost like on">
+            <Icon name="heart" size={17} strokeWidth={2} />
+            219
+            <span className="sr-only"> people found this useful, including you</span>
+          </span>
+          <span className="btn btn-sm">
+            <Icon name="bookmark" size={16} />
+            Save
+          </span>
+          <span className="btn btn-sm btn-tint">
+            <Icon name="bookmark" size={18} color="var(--c-violet)" strokeWidth={2} />
+            Saved
+          </span>
         </Row>
 
         <Row title="Status pills">
@@ -295,8 +344,13 @@ export default function ComponentSheet() {
               slug="splid"
               summary="Splits shared expenses across a group and tells everyone who owes what."
               url="https://splid.app"
-              fit={92}
-              why="Built specifically for splitting trip costs across a group, with a full Spanish interface and free core features."
+              band={{
+                label: 'Matched: problem + description',
+                note: 'Your words turned up in a problem this tool lists and in its own description.',
+                tone: 'both',
+              }}
+              whyLabel="The statement your words matched."
+              why="“Six of us went away and now there are twenty small debts flying about”"
               satisfactions={[
                 { label: 'Free', met: true },
                 { label: 'Spanish, full interface', met: true },
@@ -311,7 +365,12 @@ export default function ComponentSheet() {
               name="Settle Up"
               slug="settle-up"
               summary="Shared expenses with offline entry and later sync."
-              fit={74}
+              band={{
+                label: 'Matched: description',
+                note: 'Your words turned up in this tool’s own description.',
+                tone: 'one',
+              }}
+              likes="1"
               satisfactions={[
                 { label: 'Free tier', met: true },
                 { label: 'Spanish, partial', met: false },

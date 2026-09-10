@@ -115,3 +115,46 @@ test('the fit meter is never fed the search score', () => {
     );
   }
 });
+
+test('and no card carries a fit, because no card has one to carry', () => {
+  // The homepage illustration already refuses this: components/Contraption.tsx
+  // draws no badge rather than a badge with an invented 92 in it. A result
+  // card is the same claim with a real tool's name beside it, so `fit` may not
+  // be handed to a ToolCard anywhere in the application — including the
+  // component sheet, which is a live route. The meter itself survives for
+  // Phase 5 and is shown there as a captioned specimen with no tool attached.
+  for (const path of SOURCES) {
+    const source = read(path);
+    if (!/<ToolCard/.test(source)) continue;
+    for (const card of source.split('<ToolCard').slice(1)) {
+      const props = card.slice(0, card.indexOf('/>') + 1 || card.length);
+      assert.doesNotMatch(
+        props,
+        /\bfit=\{/,
+        `${rel(path)} draws a fit meter over a named tool before Phase 5 calibrated one`,
+      );
+    }
+  }
+});
+
+test('the component sheet prints the palette’s real values', () => {
+  // The artboard prints hex under each swatch, not the token name, because the
+  // number is what somebody matching a mock-up needs. Printing a literal means
+  // it can drift from the token that paints the chip beside it, so the two are
+  // compared here rather than trusted.
+  const tokens = readFileSync(join(ROOT, 'styles', 'tokens.css'), 'utf8');
+  const sheet = read(join(ROOT, 'app', 'components', 'page.tsx'));
+
+  const swatches = [...sheet.matchAll(/\['[^']+', '(--c-[a-z-]+)', '(#[0-9A-Fa-f]{6})'\]/g)];
+  assert.ok(swatches.length >= 8, 'the sheet still lists the eight swatches');
+
+  for (const [, token, hex] of swatches) {
+    const declared = new RegExp(`${token}:\\s*(#[0-9A-Fa-f]{3,8})`).exec(tokens);
+    assert.ok(declared, `${token} is not declared in styles/tokens.css`);
+    assert.equal(
+      hex.toLowerCase(),
+      declared[1].toLowerCase(),
+      `the sheet prints ${hex} for ${token}, which styles/tokens.css sets to ${declared[1]}`,
+    );
+  }
+});

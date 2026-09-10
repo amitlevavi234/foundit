@@ -57,6 +57,30 @@ interface Rule {
 }
 
 /**
+ * A word boundary that knows about the rest of the alphabet.
+ *
+ * `\b` is defined on `[A-Za-z0-9_]`, so it does not sit between a space and a
+ * Cyrillic or Hebrew letter: `/\bбесплатн\w*\b/` and `/\bחינם\b/` match nothing
+ * at all, and did not, in every Russian and Hebrew sentence this file has ever
+ * been given. These two say the same thing about every alphabet.
+ */
+const OPEN = String.raw`(?<![\p{L}\p{N}])`;
+const CLOSE = String.raw`(?![\p{L}\p{N}])`;
+
+/**
+ * The shape a platform requirement takes: a preposition, then optionally an
+ * article or a possessive.
+ *
+ * "on windows", "for a mac", "on my pc" name the machine somebody has. The
+ * bare nouns do not: "arrange windows", "a PC game launcher", "mac and cheese"
+ * are ordinary English, and reading a platform out of them removes every tool
+ * that does not run on that platform — which for "a PC game launcher" is the
+ * answer. `phone` has asked for this shape since the rule was written; the rest
+ * of the desktop platforms had not, and that is defect 1.
+ */
+const ON = String.raw`(?:on|for|in|to|under|running)\s+(?:my\s+|our\s+|your\s+|a\s+|an\s+|the\s+)?`;
+
+/**
  * "Free" means a person can use it without paying, which includes a tool whose
  * paid tier exists — the artboards show exactly that, a "Free" chip met by a
  * freemium listing. `free_trial` is not in the list: a trial ends.
@@ -109,19 +133,53 @@ const LANGUAGES: ReadonlyArray<readonly [code: string, name: string, pattern: Re
     name,
     new RegExp(
       [
-        `\\b(?:in|into|only in)\\s+(?:${names})\\b`,
-        `\\b(?:${names})\\s+(?:interface|ui|version|language|localis(?:ation|ed)|localiz(?:ation|ed))\\b`,
-        `\\b(?:speaks?|translated into)\\s+(?:${names})\\b`,
+        `${OPEN}(?:in|into|only in)\\s+(?:${names})${CLOSE}`,
+        `${OPEN}(?:${names})\\s+(?:interface|ui|version|language|localis(?:ation|ed)|localiz(?:ation|ed))${CLOSE}`,
+        `${OPEN}(?:speaks?|translated into)\\s+(?:${names})${CLOSE}`,
         ...(native ? [native.source] : []),
       ].join('|'),
+      'u',
     ),
   ]);
 
 const RULES: Rule[] = [
   {
-    // "free" and its most common translations. Not "freelance", not "free
-    // trial" — the boundary and the negative lookahead keep both out.
-    test: /\b(free(?!\s*trial)|gratis|gratuito|gratuit|kostenlos|бесплатн\w*|חינם)\b/,
+    // "free" and its most common translations, in the one sense this rule is
+    // allowed to read: without paying.
+    //
+    //   free trial      a trial ends.
+    //   free up         "free up space on my phone" is a verb. It was being
+    //                   read as a price and its object was being deleted from
+    //                   the search text, leaving "app to up space".
+    //   free time,      "free" meaning unoccupied, not unpaid.
+    //   free space
+    //   ad-free,        the compound adjective: "free" here means "without
+    //   hands free,     ads", "without hands", "without a watermark". Every
+    //   watermark-free  one of these was being read as a price.
+    //   freelance       no boundary after "free", so it never matched.
+    //
+    // The hyphen is its own case: `\b` sits happily between "-" and "free",
+    // which is how "ad-free" became a pricing filter.
+    test: new RegExp(
+      `${OPEN}(?:` +
+        [
+          '(?<![-–—])' +
+            '(?<!\\b(?:ad|ads|hands|watermark|distraction|risk|spam|drm|sugar|gluten|carbon)\\s)' +
+            'free(?!\\s*trial)(?!\\s+up)(?!\\s+(?:time|space|disk|storage))',
+          'gratis',
+          // Both inflect for gender and number — "una app gratuita", "eine
+          // kostenlose App" — and neither matched while the ending had to be
+          // nothing at all. Not English "gratuitous".
+          'gratuit(?!ous)\\p{L}*',
+          'kostenlos\\p{L}*',
+          // Cyrillic and Hebrew need `OPEN`/`CLOSE` rather than `\b` to match
+          // at all; the stem plus any ending is how both languages inflect it.
+          'бесплатн\\p{L}*',
+          'חינ[מם]\\p{L}*',
+        ].join('|') +
+        `)${CLOSE}`,
+      'u',
+    ),
     constraint: { key: 'free', label: 'Free', kind: 'pricing', pricing: FREE_PRICING },
   },
   {
@@ -138,7 +196,11 @@ const RULES: Rule[] = [
     constraint: { key: 'offline', label: 'Works offline', kind: 'flag', flag: 'works_offline' },
   },
   {
-    test: /\b(no (account|sign[- ]?up|login|registration)|without (an? )?(account|sign[- ]?up|login)|without signing up|sin cuenta|anonymous)\b/,
+    // "anonymous" is gone. It is the subject of "anonymous feedback form for my
+    // team" — the thing being collected, not a statement about signing in — and
+    // reading it as a filter removed every form builder that has accounts,
+    // which is all of them.
+    test: /\b(no (account|sign[- ]?up|login|registration)|without (an? )?(account|sign[- ]?up|login)|without signing up|sin cuenta)\b/,
     constraint: {
       key: 'no-account',
       label: 'No account',
@@ -151,7 +213,20 @@ const RULES: Rule[] = [
     constraint: { key: 'no-ads', label: 'No ads', kind: 'flag', flag: 'no_ads' },
   },
   {
-    test: /\b(end[- ]to[- ]end|e2ee?|encrypted|encryption)\b/,
+    // The flag is `e2e_encrypted`, so the rule may only read the sentences that
+    // say end-to-end.
+    //
+    //   encryption      "how to remove encryption from a PDF" was being
+    //                   filtered *to* end-to-end-encrypted tools — the exact
+    //                   opposite of the question.
+    //   encrypted       on its own it describes a file, not a tool: "open an
+    //                   encrypted zip". Kept only in front of the thing the
+    //                   encryption is of — "encrypted messaging", "encrypted
+    //                   notes" — which is a claim about the tool.
+    //   end-to-end,     both are testing jargon before they are anything else:
+    //   e2e             "end to end testing framework", "e2e test runner".
+    //                   They now have to be followed by the word "encrypted".
+    test: /\b(end[- ]?to[- ]?end[- ]encrypt(ed|ion)|e2ee|e2e[- ]?encrypt(ed|ion)|encrypted (messag\w+|chat|messenger|notes?|e-?mail|backups?|storage|cloud|drive|vault|calls?))\b/,
     constraint: {
       key: 'encrypted',
       label: 'End-to-end encrypted',
@@ -160,11 +235,21 @@ const RULES: Rule[] = [
     },
   },
   {
-    test: /\b(export|exports|take my data|own my data)\b/,
+    // "export" and "exports" are gone. "software to export my Kindle
+    // highlights" is a person describing the job, not requiring a feature, and
+    // the rule was deleting the verb out of the sentence as well as filtering
+    // on it. What is left is the two phrasings that are only ever a
+    // requirement — a person says "I want to own my data" about a tool and
+    // about nothing else.
+    test: /\b(take my data|own my data)\b/,
     constraint: { key: 'exports', label: 'Exports my data', kind: 'flag', flag: 'exports_data' },
   },
   {
-    test: /\b(self[- ]?host(ed|ing)?|on my own server|my own machine)\b/,
+    // "my own machine" is gone with them: it means a desktop app far more often
+    // than it means a server somebody administers, and `self_hosted` as a
+    // platform filter removes every desktop app there is — including KeePassXC,
+    // which is the answer to "keep my passwords in a file on my own machine".
+    test: /\b(self[- ]?host(ed|ing)?|on my own server)\b/,
     constraint: {
       key: 'self-hosted',
       label: 'Self-hosted',
@@ -176,7 +261,12 @@ const RULES: Rule[] = [
     // "on my phone", "for a phone", "en el móvil". Not "phone calls", which is
     // a subject rather than a requirement — a wrong constraint filters good
     // answers out, so this rule asks for the preposition.
-    test: /\b(on|for|from|to)\s+(my\s+|a\s+|the\s+)?phone\b|\b(mobile|smartphone|m[oó]vil)\b/,
+    //
+    // "mobile" carries the same distinction one word further on: "on mobile" is
+    // the platform, "no mobile data" is the network, and "maps I can use when I
+    // have no mobile data" is a sentence about being offline that was being
+    // read as a phone and having the word "mobile" cut out of it.
+    test: /\b(on|for|from|to)\s+(my\s+|a\s+|the\s+)?phone\b|\b(mobile(?!\s+(data|network|signal|internet|coverage|number|plan))|smartphone|m[oó]vil)\b/,
     constraint: {
       key: 'mobile',
       label: 'On a phone',
@@ -185,27 +275,51 @@ const RULES: Rule[] = [
     },
   },
   {
-    test: /\b(iphone|ipad|ios)\b/,
+    // These three are only ever the platform — no English noun collides with
+    // them, which is the whole difference between them and "windows" or "mac".
+    // The preposition is optional and only there to be *consumed*: "for iphone"
+    // leaves "for" hanging in the text the ranker sees.
+    test: new RegExp(`\\b(${ON})?(iphone|ipad|ios)\\b`),
     constraint: { key: 'ios', label: 'iPhone or iPad', kind: 'platform', platforms: ['ios'] },
   },
   {
-    test: /\b(android)\b/,
+    test: new RegExp(`\\b(${ON})?(android)\\b`),
     constraint: { key: 'android', label: 'Android', kind: 'platform', platforms: ['android'] },
   },
   {
-    test: /\b(in (the )?browser|web app|website)\b/,
+    // "website" is gone. It is the commonest object in the language for the
+    // tools this catalogue lists — "a tool to build a website for my bakery",
+    // "check whether the website I built is accessible" — and reading it as
+    // "the tool must run in a browser" both filtered out every desktop site
+    // builder and left "a tool to build a for my bakery" to rank on.
+    //
+    // "web app" stays, minus the possessive: "a web app to sign a PDF" asks for
+    // one, "monitoring for my web app" is talking about the asker's own.
+    test: /\b(in (the |a |my )?browser|browser[- ]based|web[- ]based|(?<!\b(my|our|your|their|his|her|its)\s)web app)\b/,
     constraint: { key: 'web', label: 'In a browser', kind: 'platform', platforms: ['web'] },
   },
   {
-    test: /\b(mac|macos|macbook)\b/,
+    // Bare "mac" is a name and half of a sandwich. The preposition, the
+    // possessive, or one of the spellings that is only ever the computer.
+    test: new RegExp(
+      `\\b(${ON}(mac|macos|macbook)|macos|mac ?os ?x?|macbook|(my|our) (mac|macbook)|mac (version|app))\\b`,
+    ),
     constraint: { key: 'macos', label: 'macOS', kind: 'platform', platforms: ['macos'] },
   },
   {
-    test: /\b(windows|pc)\b/,
+    // Bare "windows" is a plural noun — "a tool to arrange windows on my
+    // desktop" is a window manager, and the Windows filter removed the macOS
+    // and Linux ones that were the answer. Bare "pc" is an adjective at least
+    // as often as it is a machine: "a PC game launcher".
+    test: new RegExp(
+      `\\b(${ON}(windows|pc)( (pc|laptop|desktop|machine|computer))?|windows ?(10|11)|windows (pc|laptop|desktop|machine|computer|version|app)|(my|our) (windows )?pc)\\b`,
+    ),
     constraint: { key: 'windows', label: 'Windows', kind: 'platform', platforms: ['windows'] },
   },
   {
-    test: /\b(linux|ubuntu)\b/,
+    // Same: an operating system and a distribution of it, and nothing else in
+    // the language. The preposition is optional and consumed with them.
+    test: new RegExp(`\\b(${ON})?(linux|ubuntu)\\b`),
     constraint: { key: 'linux', label: 'Linux', kind: 'platform', platforms: ['linux'] },
   },
 ];
@@ -223,10 +337,58 @@ const LANGUAGE_SPANS: ReadonlyArray<readonly [RegExp, ReadConstraint]> = LANGUAG
   ],
 );
 
-/** Half-open `[start, end)` of the lower-cased sentence that a rule consumed. */
+/** Half-open `[start, end)` of the sentence, as typed, that a rule consumed. */
 interface Span {
   start: number;
   end: number;
+}
+
+/**
+ * The lower-cased sentence, and where each character of it came from.
+ *
+ * Rules match against lower case; the text search ranks on what a person typed.
+ * That is only the same string twice as long as lower-casing is
+ * length-preserving, and for one letter in daily use it is not: Turkish "İ"
+ * lower-cases to "i" plus a combining dot above, two characters for one. Every
+ * offset after it in the sentence is then one out.
+ *
+ * The old code noticed the mismatch and searched, filtered *and returned* the
+ * lower-cased copy, which is worse than the arithmetic it was avoiding:
+ * "İnternet olmadan çalışan" came back as "i̇nternet …", and `to_tsvector` stems
+ * "i" + U+0307 to itself, never to "internet". The word is then unfindable in a
+ * catalogue that spells it the ordinary way. Proved against the database:
+ * `to_tsvector('simple','İnternet')` is `'internet'`, and the decomposed form
+ * is `'i̇nternet'`.
+ *
+ * So keep the map instead. `startOf[i]` and `endOf[i]` say which characters of
+ * the original produced `lower[i]`, and a span that lands part-way through an
+ * expansion widens to the whole character rather than splitting it.
+ */
+interface Folded {
+  lower: string;
+  startOf: number[];
+  endOf: number[];
+}
+
+function fold(query: string): Folded {
+  const parts: string[] = [];
+  const startOf: number[] = [];
+  const endOf: number[] = [0];
+  let at = 0;
+
+  // By code point: a surrogate pair is one character and lower-cases as one.
+  for (const ch of query) {
+    const low = ch.toLowerCase();
+    parts.push(low);
+    for (let k = 0; k < low.length; k += 1) {
+      startOf.push(at);
+      endOf.push(at + ch.length);
+    }
+    at += ch.length;
+  }
+  startOf.push(query.length);
+
+  return { lower: parts.join(''), startOf, endOf };
 }
 
 /** What a sentence said, and what is left of it once that has been taken out. */
@@ -276,14 +438,28 @@ const EDGE_JUNK = /^[\s,;:.!?/\-–—]+|[\s,;:.!?/\-–—]+$/gu;
  * `dropped` is the set of keys switched off on the results screen; a dropped
  * constraint is read and then discarded rather than never read, so the chip can
  * still be drawn as removed and the count of what was understood stays honest.
+ *
+ * **Every constraint the sentence stated is returned, including one a narrower
+ * one covers.** "A free open source password manager" states two, and the
+ * reader used to keep only "open source" — so no Free chip was ever drawn,
+ * `?drop=free` named a chip that did not exist, and dropping "open source" left
+ * the search with no pricing filter at all: a paid tool, for a sentence that
+ * said free. Narrowing happens where narrowing belongs, in
+ * `toSearchConstraints`, which asks for `open_source` while that constraint is
+ * still standing and for the whole free list the moment it is not. The two
+ * chips are drawn side by side because they are two things a person said and
+ * each can be switched off on its own; "Free" looks redundant next to "Open
+ * source" precisely until the moment it is the only one left, which is the
+ * moment it matters.
  */
 export function readQuery(query: string, dropped: readonly string[] = []): QueryReading {
-  const lower = query.toLowerCase();
-  // Lower-casing is length-preserving for nearly everything, but not for all of
-  // Unicode ("İ" grows a character). Slice the original when the offsets line
-  // up — a person's capitals are theirs — and the lower-cased copy when they do
-  // not, which costs nothing: to_tsvector lower-cases anyway.
-  const source = lower.length === query.length ? query : lower;
+  const folded = fold(query);
+  // Whole-string lower-casing is what `to_tsvector` does and is the more
+  // faithful of the two where they differ at all (Greek final sigma), so match
+  // against it — but only while it lines up with the map, which is what makes
+  // the offsets translatable back to the sentence as typed.
+  const whole = query.toLowerCase();
+  const lower = whole.length === folded.lower.length ? whole : folded.lower;
 
   const found: ReadConstraint[] = [];
   const spans: Span[] = [];
@@ -293,7 +469,13 @@ export function readQuery(query: string, dropped: readonly string[] = []): Query
       let matched = false;
       for (const match of lower.matchAll(pattern)) {
         matched = true;
-        spans.push({ start: match.index, end: match.index + match[0].length });
+        // Back into the original's coordinates before anything is cut. Both
+        // ends are in range by construction; the fallback is the offset itself,
+        // which is the right answer for every sentence that folded to its own
+        // length anyway.
+        const from = match.index;
+        const to = match.index + match[0].length;
+        spans.push({ start: folded.startOf[from] ?? from, end: folded.endOf[to] ?? to });
       }
       if (matched) found.push(constraint);
     }
@@ -302,17 +484,12 @@ export function readQuery(query: string, dropped: readonly string[] = []): Query
   collect(RULE_SPANS);
   collect(LANGUAGE_SPANS);
 
-  // "Open source" already says everything "free" would, and two pricing
-  // constraints cannot both be true of one row: the narrower one wins. Both
-  // phrases still come out of the text — "free" was a constraint word here
-  // whether or not it survived as a constraint.
-  const openSource = found.some((c) => c.key === 'open-source');
-  const kept = openSource ? found.filter((c) => c.key !== 'free') : found;
-
-  const text = strip(source, spans);
+  // Both phrases come out of the text either way — "free" was a constraint word
+  // here whether or not it is the one that narrows the search.
+  const text = strip(query, spans);
 
   return {
-    constraints: kept.filter((c) => !dropped.includes(c.key)),
+    constraints: found.filter((c) => !dropped.includes(c.key)),
     text,
     emptyText: text === '',
   };
@@ -379,11 +556,15 @@ export function toSearchConstraints(constraints: readonly ReadConstraint[]): Sea
 
   // A narrower pricing rule and a broader one cannot both apply: any-of would
   // widen "open source" back out to "anything free", which is not what was
-  // asked. `readConstraints` already drops the broader one; this is the second
-  // half of that rule, for a caller assembling constraints by hand. It keys off
-  // the constraint that was stated, not off the set — "free" alone expands to
-  // four pricing models, one of which is open_source, and reading the set
-  // would silently turn every free search into an open-source one.
+  // asked. So this is the *only* place the narrowing happens — the reader keeps
+  // both constraints, and this asks for `open_source` while "open source" is
+  // one of them and for the full free list as soon as it is dropped. Losing the
+  // broader claim any earlier is how "a free open source password manager",
+  // loosened by one chip, came back with paid tools in it.
+  //
+  // It keys off the constraint that was stated, not off the set — "free" alone
+  // expands to four pricing models, one of which is open_source, and reading
+  // the set would silently turn every free search into an open-source one.
   const saidOpenSource = constraints.some((c) => c.key === 'open-source');
   const pricingList: PricingModel[] = saidOpenSource ? ['open_source'] : [...pricing];
 
@@ -476,6 +657,19 @@ export function satisfactionsFor(
   tool: ToolFacts,
   constraints: readonly ReadConstraint[],
 ): Satisfaction[] {
+  const said = new Set<string>();
+  return chipsFor(tool, constraints).filter((chip) => {
+    // "A free open source password manager" states both, and both are kept so
+    // that dropping either leaves the other filtering. On an open-source row
+    // they say the same word, and a card does not tell a person "Open source ·
+    // Open source". The chip row is what was met, not a receipt of the parse.
+    if (said.has(chip.label)) return false;
+    said.add(chip.label);
+    return true;
+  });
+}
+
+function chipsFor(tool: ToolFacts, constraints: readonly ReadConstraint[]): Satisfaction[] {
   return constraints.map((c) => {
     switch (c.kind) {
       case 'pricing':

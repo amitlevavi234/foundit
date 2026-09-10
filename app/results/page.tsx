@@ -205,7 +205,7 @@ function Loading() {
           Matching against the catalogue…
         </span>
         <span className="faint" style={{ fontSize: 'var(--t-meta)' }}>
-          Read your request · ranking what fits
+          Read your request · ordering by text match
         </span>
       </div>
       <SkeletonGrid />
@@ -264,10 +264,28 @@ async function Answer({
     // and `public.search_events` has no user column.
     after(() => {
       logSearchEvent({
+        // `had_good_match` is deliberately not passed.
+        //
+        // db/migrations/0002_search.sql calls it a quality metric and says a
+        // caller that omits it under-reports success, "which is the safe
+        // direction for a quality metric to fail in". Passing
+        // `results.length > 0` redefined it as "the page was not empty", which
+        // is `result_count > 0` under a name that promises more: the flagship
+        // query above returns a PDF splitter first and would have been logged
+        // as a good match. That would empty the one panel on the operator
+        // dashboard that is worth having (docs/product-decisions.md §10:
+        // searches that returned nothing good) by filling it with successes
+        // nobody measured.
+        //
+        // Nothing available here measures "good": `score` is an RRF ordering
+        // number, and `match_source` is a location — retrieval is any-of with
+        // no relevance floor, so 'both' is what a single shared word earns.
+        // The column's `false` default therefore stands, and every search
+        // reads as "not known to be good" until Phase 5 defines the word and
+        // fills this in from something judged.
         query,
         resultCount: results.length,
         topScore: top ? top.score : null,
-        hadGoodMatch: results.length > 0,
         latencyMs,
       });
     });
@@ -360,13 +378,25 @@ async function Answer({
               source and offline" — leaves nothing to rank, so these rows are
               the catalogue in its own order with the filters applied. Saying
               "the 12 that fit best" over them would claim a match nobody
-              made. */}
+              made.
+
+              Neither may a search say it. "The 12 that fit best" is two
+              claims, and both are false: retrieval is any-of with no relevance
+              floor, so a row is here because one of its words was one of
+              yours, and nothing has measured whether it fits at all — let
+              alone that these are the best twelve of 223. What is true is that
+              they matched, and that this is the first page of them. */}
           <span className="disp" style={{ fontSize: 'var(--t-display-lg)', fontWeight: 800 }}>
             {browse
-              ? `${results.length} ${results.length === 1 ? 'tool meets' : 'tools meet'} this.`
+              ? results.length >= RESULT_LIMIT
+                ? // Twelve is the ceiling here too. "12 tools meet this" over a
+                  // full page is a count of the page: there are 223 published
+                  // tools and "free" matches a great many more than twelve.
+                  `The first ${results.length} that meet this.`
+                : `${results.length} ${results.length === 1 ? 'tool meets' : 'tools meet'} this.`
               : results.length >= RESULT_LIMIT
-                ? `The ${results.length} that fit best.`
-                : `${results.length} ${results.length === 1 ? 'tool fits' : 'tools fit'}.`}
+                ? `The first ${results.length} matches.`
+                : `${results.length} ${results.length === 1 ? 'match' : 'matches'}.`}
           </span>{' '}
           {category ? (
             <span className="muted" style={{ fontSize: 'var(--t-body-lg)' }}>
@@ -384,11 +414,15 @@ async function Answer({
               </strong>
             </>
           ) : (
+            /* "Sorted by best match" is the same claim in smaller type. The
+               order is real and it is the database's, but what it ranks is
+               text overlap, so that is what it is called. */
             <>
-              Sorted by{' '}
+              Ordered by{' '}
               <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
-                best match
-              </strong>
+                text match
+              </strong>{' '}
+              — where your words turned up, not how well anything fits
             </>
           )}
         </div>
@@ -397,6 +431,12 @@ async function Answer({
       <div className="results-grid">
         {results.map((result, i) => {
           const band = matchBand(result.matchSource);
+          // The card's default lead-in is "Why it matches", and this is not
+          // that. What comes back here is whichever of the tool's own problem
+          // statements the sentence's lexemes ranked highest against — where
+          // the words landed, not a reason. Left under "Why it matches", the
+          // flagship query prints a note about a two-hundred-page scan as its
+          // explanation of a question about splitting holiday costs.
           const problem = matchedProblemOf(result);
           const satisfactions = satisfactionsFor(result, constraints);
 
@@ -410,7 +450,9 @@ async function Answer({
               big={i === 0}
               index={i}
               {...(band ? { band } : {})}
-              {...(problem ? { why: `They list this problem: “${problem}”` } : {})}
+              {...(problem
+                ? { whyLabel: 'The statement your words matched.', why: `“${problem}”` }
+                : {})}
               {...(satisfactions.length > 0
                 ? { satisfactions }
                 : { facts: factsOf(result).slice(0, 3) })}

@@ -17,7 +17,12 @@
 // Usage:
 //   DATABASE_URL=... node eval/run.mjs [--json] [--baseline] [--limit=N]
 //                                      [--timeout=MS] [--golden=PATH]
-//                                      [--baselines=PATH]
+//                                      [--baselines=PATH] [--read-query]
+//
+// --read-query adds a second, opt-in slice that derives each query's
+// constraints and search text from lib/constraints.ts instead of reading them
+// out of golden.jsonl, and reports the two side by side. See eval/README.md,
+// "Measuring the reader". Nothing about the default run changes.
 //
 // Exit codes (see eval/README.md):
 //   0  success
@@ -609,11 +614,13 @@ function parseArgs(argv) {
     golden: GOLDEN_PATH,
     baselines: BASELINES_PATH,
     baselinesExplicit: false,
+    readQuery: false,
     help: false,
   };
   for (const arg of argv) {
     if (arg === '--json') opts.json = true;
     else if (arg === '--baseline') opts.baseline = true;
+    else if (arg === '--read-query') opts.readQuery = true;
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg.startsWith('--limit=')) opts.limit = Number.parseInt(arg.slice(8), 10);
     else if (arg.startsWith('--timeout=')) opts.timeout = Number.parseInt(arg.slice(10), 10);
@@ -648,6 +655,10 @@ const USAGE = `Foundit search evaluation harness
   --golden=PATH   golden set to read (default eval/golden.jsonl)
   --baselines=PATH  baselines table to compare against with --baseline
                   (default eval/baselines.md)
+  --read-query    also run every query through lib/constraints.ts — derived
+                  constraints, residual text — and print both slices and the
+                  divergence between them. Off by default; changes nothing
+                  about the headline numbers or the regression gate.
 
 Exit: 0 ok, 1 usage, 2 constraint violation, 3 database, 4 regression.`;
 
@@ -667,6 +678,154 @@ const FACTS_SQL = `
          platforms::text[] as platforms, flags::text[] as flags, languages
     from public.tools
    where slug = any($1::citext[])`;
+
+/**
+ * Thrown to abandon a run from inside a helper. `main` opens the pool in a
+ * `try/finally`, so a helper cannot simply `return EXIT.DATABASE` — it has to
+ * unwind through that `finally` and hand the exit code back at the top.
+ */
+class EvalExit extends Error {
+  constructor(code) {
+    super(`eval exit ${code}`);
+    this.name = 'EvalExit';
+    this.code = code;
+  }
+}
+
+/**
+ * A "plan" answers, for one golden entry, the two questions a search takes:
+ * what text to rank on, and what to filter by.
+ *
+ * The golden set read literally. The full sentence goes to full-text search
+ * and the hand-written constraints go to the WHERE clause. This is what the
+ * harness has always done and what it still does by default, and it measures
+ * the ranker with the reading held constant and correct.
+ *
+ * Note what it does *not* measure: nothing here ever calls the code that turns
+ * a sentence into constraints, so no change to that code can move this number
+ * in either direction. `--read-query` and DERIVED plans exist because of that.
+ */
+const AUTHORED_PLAN = (q) => ({ text: q.query, constraints: q.constraints });
+
+/**
+ * Run every golden query once under one plan and return the raw results.
+ *
+ * @throws EvalExit on any database error, after reporting it.
+ */
+async function runPass(client, queries, opts, plan, redact) {
+  const entries = [];
+
+  for (const q of queries) {
+    const planned = plan(q);
+    const constraints = planned.constraints ?? {};
+    const params = [
+      planned.text,
+      constraints.pricing ?? null,
+      constraints.platforms ?? null,
+      constraints.flags ?? null,
+      constraints.languages ?? null,
+      opts.limit,
+    ];
+
+    const t0 = performance.now();
+    let rows;
+    try {
+      ({ rows } = await client.query(SEARCH_SQL, params));
+    } catch (err) {
+      const message = redact(err.message);
+      process.stderr.write(`\nERROR running query ${q.id} (golden line ${q.line}).\n  ${message}\n`);
+      if (/does not exist/i.test(message) && /search_tools/i.test(message)) {
+        process.stderr.write(
+          '  public.search_tools is missing. Apply db/migrations/0002_search.sql first.\n',
+        );
+      }
+      if (/statement timeout|canceling statement/i.test(message)) {
+        process.stderr.write(`  The query exceeded the ${opts.timeout} ms timeout.\n`);
+      }
+      if (/invalid input value for enum/i.test(message)) {
+        process.stderr.write(
+          [
+            '  A constraint value is not one of the database enum labels.',
+            '  If this is the --read-query pass, the reader produced a value the',
+            '  schema does not have — that is a defect in the reader, not here.',
+            '',
+          ].join('\n'),
+        );
+      }
+      if (/read-only transaction/i.test(message)) {
+        process.stderr.write(
+          [
+            '  The session is read-only and search_tools tried to write.',
+            '  That is the harness working as intended, not a configuration problem:',
+            '  a benchmark run must not write rows, and logging to search_events in',
+            '  particular would pollute the analytics this number exists to inform.',
+            '  Move the logging out of search_tools and into the caller.',
+            '',
+          ].join('\n'),
+        );
+      }
+      throw new EvalExit(EXIT.DATABASE);
+    }
+    const latencyMs = performance.now() - t0;
+
+    const results = rows.map((r, i) => ({
+      rank: i + 1,
+      toolId: r.tool_id === null ? null : String(r.tool_id),
+      slug: String(r.slug),
+      name: r.name,
+      pricing: r.pricing,
+      score: r.score === null ? null : Number(r.score),
+      matchSource: r.match_source,
+    }));
+
+    entries.push({
+      query: q,
+      searchText: planned.text,
+      constraints,
+      // Only the derived plan sets these; they are reported, never asserted on.
+      readerKeys: planned.keys ?? null,
+      results,
+      latencyMs,
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Score one pass in place.
+ *
+ * Both passes go through this same function, so the only thing that can make
+ * their numbers differ is the text and the constraints each was run with.
+ * Judgements never move: a query's `relevant` map is the ground truth about
+ * that question, not about how the question was phrased to the database.
+ *
+ * Constraints are checked against the constraints *that pass actually sent*,
+ * which is the only honest check. Checking the derived pass against the
+ * hand-written constraints would report a violation every time the reader
+ * failed to read one, and a violation means "the SQL let through a row its
+ * arguments excluded" — a different failure entirely, and one worth keeping
+ * distinguishable from "the reader did not ask".
+ */
+function scorePass(entries, factsBySlug) {
+  for (const entry of entries) {
+    const q = entry.query;
+    const slugs = entry.results.map((r) => r.slug);
+    const grades = slugs.map((s) => q.relevant[s] ?? 0);
+    const judged = Object.values(q.relevant);
+
+    entry.resultCount = entry.results.length;
+    entry.ndcg = ndcg(grades, judged, K);
+    entry.recall = recall(slugs, q.relevant, K);
+    entry.judgedCount = judged.length;
+    entry.constrained = isConstrained({ constraints: entry.constraints });
+    entry.violations = checkConstraints(
+      { id: q.id, constraints: entry.constraints },
+      entry.results,
+      factsBySlug,
+    );
+  }
+}
 
 async function main(argv) {
   const { opts, error: argError } = parseArgs(argv);
@@ -755,9 +914,36 @@ async function main(argv) {
   // process without a usable message.
   pool.on('error', () => {});
 
+  // --- The reader, when it was asked for ---------------------------------
+  // Loaded here, before a connection is opened, so a broken import fails as a
+  // configuration error rather than half-way through a run. It is a dynamic
+  // import on purpose: the default run must not so much as touch
+  // lib/constraints.ts, which is TypeScript and needs Node's type stripping.
+  let derivedPlan = null;
+  if (opts.readQuery) {
+    try {
+      const { readForSearch } = await import('./reader.mjs');
+      derivedPlan = (q) => readForSearch(q.query);
+    } catch (err) {
+      process.stderr.write(
+        [
+          'ERROR: --read-query could not load the sentence reader.',
+          `  ${redact(err?.message ?? err)}`,
+          '',
+          'eval/reader.mjs imports lib/constraints.ts directly, which needs a Node',
+          `that strips TypeScript types (this repository requires >= 26; running ${process.version}).`,
+          '',
+        ].join('\n'),
+      );
+      return EXIT.USAGE;
+    }
+  }
+
   const startedAt = new Date();
-  const perQuery = [];
+  let perQuery = [];
+  let derivedPerQuery = null;
   const allViolations = [];
+  const derivedViolations = [];
   let client;
 
   try {
@@ -773,64 +959,27 @@ async function main(argv) {
     process.stdout.write(
       `Foundit eval — ${queries.length} queries, metrics @${K}, fetching ${opts.limit} rows each.\n`,
     );
+    if (derivedPlan) {
+      process.stdout.write(
+        '  --read-query: running each query twice — once as written in the golden\n' +
+          '  set, once as lib/constraints.ts reads it.\n',
+      );
+    }
 
     // --- Run every query, sequentially ------------------------------------
-    for (const q of queries) {
-      const params = [
-        q.query,
-        q.constraints.pricing ?? null,
-        q.constraints.platforms ?? null,
-        q.constraints.flags ?? null,
-        q.constraints.languages ?? null,
-        opts.limit,
-      ];
-
-      const t0 = performance.now();
-      let rows;
-      try {
-        ({ rows } = await client.query(SEARCH_SQL, params));
-      } catch (err) {
-        const message = redact(err.message);
-        process.stderr.write(`\nERROR running query ${q.id} (golden line ${q.line}).\n  ${message}\n`);
-        if (/does not exist/i.test(message) && /search_tools/i.test(message)) {
-          process.stderr.write(
-            '  public.search_tools is missing. Apply db/migrations/0002_search.sql first.\n',
-          );
-        }
-        if (/statement timeout|canceling statement/i.test(message)) {
-          process.stderr.write(`  The query exceeded the ${opts.timeout} ms timeout.\n`);
-        }
-        if (/read-only transaction/i.test(message)) {
-          process.stderr.write(
-            [
-              '  The session is read-only and search_tools tried to write.',
-              '  That is the harness working as intended, not a configuration problem:',
-              '  a benchmark run must not write rows, and logging to search_events in',
-              '  particular would pollute the analytics this number exists to inform.',
-              '  Move the logging out of search_tools and into the caller.',
-              '',
-            ].join('\n'),
-          );
-        }
-        return EXIT.DATABASE;
-      }
-      const latencyMs = performance.now() - t0;
-
-      const results = rows.map((r, i) => ({
-        rank: i + 1,
-        toolId: r.tool_id === null ? null : String(r.tool_id),
-        slug: String(r.slug),
-        name: r.name,
-        pricing: r.pricing,
-        score: r.score === null ? null : Number(r.score),
-        matchSource: r.match_source,
-      }));
-
-      perQuery.push({ query: q, results, latencyMs });
+    perQuery = await runPass(client, queries, opts, AUTHORED_PLAN, redact);
+    if (derivedPlan) {
+      derivedPerQuery = await runPass(client, queries, opts, derivedPlan, redact);
     }
 
     // --- One lookup for the ground truth about every returned tool --------
-    const returnedSlugs = [...new Set(perQuery.flatMap((r) => r.results.map((x) => x.slug)))];
+    // Both passes are covered by the one lookup: a slug is a slug, and the
+    // facts about it do not depend on which query brought it back.
+    const returnedSlugs = [
+      ...new Set(
+        [...perQuery, ...(derivedPerQuery ?? [])].flatMap((r) => r.results.map((x) => x.slug)),
+      ),
+    ];
     const factsBySlug = new Map();
     if (returnedSlugs.length > 0) {
       try {
@@ -851,20 +1000,17 @@ async function main(argv) {
     }
 
     // --- Score -------------------------------------------------------------
-    for (const entry of perQuery) {
-      const q = entry.query;
-      const slugs = entry.results.map((r) => r.slug);
-      const grades = slugs.map((s) => q.relevant[s] ?? 0);
-      const judged = Object.values(q.relevant);
-
-      entry.resultCount = entry.results.length;
-      entry.ndcg = ndcg(grades, judged, K);
-      entry.recall = recall(slugs, q.relevant, K);
-      entry.judgedCount = judged.length;
-      entry.constrained = isConstrained(q);
-      entry.violations = checkConstraints(q, entry.results, factsBySlug);
-      allViolations.push(...entry.violations);
+    scorePass(perQuery, factsBySlug);
+    for (const entry of perQuery) allViolations.push(...entry.violations);
+    if (derivedPerQuery) {
+      scorePass(derivedPerQuery, factsBySlug);
+      for (const entry of derivedPerQuery) derivedViolations.push(...entry.violations);
     }
+  } catch (err) {
+    // runPass reports the detail and throws this to unwind past the `finally`
+    // that closes the pool. Anything else is a real bug and keeps its stack.
+    if (err instanceof EvalExit) return err.code;
+    throw err;
   } finally {
     if (client) client.release();
     await pool.end(); // so the process actually exits
@@ -879,11 +1025,28 @@ async function main(argv) {
 
   printReport({ overall, slices, worst, perQuery, unjudged, opts, startedAt });
 
+  // --- The reader, when it was asked for ------------------------------------
+  let readerComparison = null;
+  if (derivedPerQuery) {
+    readerComparison = compareReadings(perQuery, derivedPerQuery);
+    process.stdout.write(`${buildReaderReport(readerComparison)}\n`);
+  }
+
   // --- Hard failures --------------------------------------------------------
   let exitCode = EXIT.OK;
 
   if (allViolations.length > 0) {
     printViolations(allViolations);
+    exitCode = EXIT.CONSTRAINT_VIOLATION;
+  }
+
+  // A violation in the derived pass is the same kind of failure as one in the
+  // authored pass — search_tools returned a row its own arguments excluded —
+  // so it fails the run too. It cannot affect anything that does not ask for
+  // it: --read-query is opt-in and npm test does not pass it.
+  if (derivedViolations.length > 0) {
+    process.stdout.write('\n(the violations below are from the --read-query derived pass)\n');
+    printViolations(derivedViolations);
     exitCode = EXIT.CONSTRAINT_VIOLATION;
   }
 
@@ -959,6 +1122,22 @@ async function main(argv) {
       slices,
       constraintViolations: allViolations,
       regression,
+      // Null unless --read-query was passed, so the shape of a default run's
+      // JSON is unchanged and anything reading it keeps working.
+      readQuery: readerComparison
+        ? {
+            authored: readerComparison.authored,
+            derived: readerComparison.derived,
+            divergence: readerComparison.divergence,
+            worseCount: readerComparison.worseCount,
+            betterCount: readerComparison.betterCount,
+            unchangedCount: readerComparison.unchangedCount,
+            relations: readerComparison.relations,
+            emptiedText: readerComparison.emptiedText,
+            constraintViolations: derivedViolations,
+            queries: readerComparison.rows,
+          }
+        : null,
       exitCode,
       queries: perQuery.map((e) => ({
         id: e.query.id,
@@ -1006,6 +1185,261 @@ export function buildSlices(perQuery) {
     of('constrained', perQuery.filter((e) => e.constrained)),
     of('unconstrained', perQuery.filter((e) => !e.constrained)),
   ];
+}
+
+// ===========================================================================
+// --read-query: the reader, measured.
+//
+// Everything above this point scores a search that was handed its constraints.
+// Nobody types constraints. A visitor types a sentence, lib/constraints.ts
+// decides what in that sentence is a filter, removes those words, and the rest
+// is what gets ranked. That whole first step sat outside the instrument: a bug
+// that put Proton Mail, Proton VPN and PDFsam Basic above every expense
+// splitter for any query containing the word "free" was fixed without the
+// recorded score moving by a single point, because the harness had never read
+// a sentence in its life. A separate review found the reader turning "a
+// website builder" into a web-only filter ranked on the word "builder" — also
+// invisible here.
+//
+// So: run the same queries twice. Once as written (the ranker, in isolation),
+// once as read (the ranker with the reader in front of it, which is the thing
+// that is deployed). The gap between the two is the part of the shipped
+// product that the default number does not cover, and it is the figure this
+// section prints largest.
+// ===========================================================================
+
+/** `pricing=[a,b] platforms=[c]`, keys and values sorted so two are comparable. */
+export function canonicalConstraints(constraints) {
+  const c = constraints ?? {};
+  const keys = Object.keys(c)
+    .filter((k) => Array.isArray(c[k]) && c[k].length > 0)
+    .sort();
+  if (keys.length === 0) return '';
+  return keys.map((k) => `${k}=[${[...c[k]].map(String).sort().join(',')}]`).join(' ');
+}
+
+/**
+ * How a golden entry's hand-written constraints and its derived ones relate.
+ *
+ * Four outcomes, and the two asymmetric ones are the interesting ones. "more"
+ * is the reader inventing a filter nobody asked for, which silently deletes
+ * correct answers; "less" is the reader missing one that was stated, which
+ * lets wrong answers back in. They fail in opposite directions and are worth
+ * counting separately.
+ */
+export function readingRelation(authored, derived) {
+  const a = canonicalConstraints(authored);
+  const d = canonicalConstraints(derived);
+  if (a === d) return 'same';
+  if (a === '') return 'more';
+  if (d === '') return 'less';
+  return 'other';
+}
+
+/** Pair the two passes up query by query and work out where they part company. */
+export function compareReadings(authored, derived) {
+  const derivedById = new Map(derived.map((e) => [e.query.id, e]));
+
+  const rows = authored.map((a) => {
+    const d = derivedById.get(a.query.id);
+    return {
+      id: a.query.id,
+      lang: a.query.lang,
+      query: a.query.query,
+      authoredNdcg: a.ndcg,
+      derivedNdcg: d.ndcg,
+      ndcgDelta: d.ndcg - a.ndcg,
+      authoredRecall: a.recall,
+      derivedRecall: d.recall,
+      recallDelta: d.recall - a.recall,
+      authoredText: a.searchText,
+      derivedText: d.searchText,
+      authoredConstraints: canonicalConstraints(a.constraints),
+      derivedConstraints: canonicalConstraints(d.constraints),
+      readerKeys: d.readerKeys ?? [],
+      authoredCount: a.resultCount,
+      derivedCount: d.resultCount,
+      relation: readingRelation(a.constraints, d.constraints),
+    };
+  });
+
+  const overallAuthored = aggregate(authored);
+  const overallDerived = aggregate(derived);
+
+  // 1e-9: these are ratios of small sums of floats, and a query whose ranking
+  // did not move can still differ in the last bit or two. Anything at that
+  // scale is arithmetic noise, not a change in the search.
+  const EPS = 1e-9;
+
+  return {
+    authored: overallAuthored,
+    derived: overallDerived,
+    divergence: {
+      recallAt10: overallDerived.recallAt10 - overallAuthored.recallAt10,
+      ndcgAt10: overallDerived.ndcgAt10 - overallAuthored.ndcgAt10,
+      meanLatencyMs: overallDerived.meanLatencyMs - overallAuthored.meanLatencyMs,
+      zeroResultQueries: overallDerived.zeroResultQueries - overallAuthored.zeroResultQueries,
+    },
+    worseCount: rows.filter((r) => r.ndcgDelta < -EPS).length,
+    betterCount: rows.filter((r) => r.ndcgDelta > EPS).length,
+    unchangedCount: rows.filter((r) => Math.abs(r.ndcgDelta) <= EPS).length,
+    relations: {
+      same: rows.filter((r) => r.relation === 'same').length,
+      more: rows.filter((r) => r.relation === 'more').length,
+      less: rows.filter((r) => r.relation === 'less').length,
+      other: rows.filter((r) => r.relation === 'other').length,
+    },
+    // Text the reader emptied completely: search_tools reads that as browse,
+    // so the sentence stops selecting anything at all.
+    emptiedText: rows.filter((r) => r.derivedText.trim() === '').length,
+    rows,
+    worst: rows
+      .filter((r) => r.ndcgDelta < -EPS)
+      .sort((x, y) => x.ndcgDelta - y.ndcgDelta || x.id.localeCompare(y.id)),
+  };
+}
+
+const WORST_READINGS = 10;
+
+export function buildReaderReport(cmp) {
+  const out = [];
+  const signed4 = (v) => `${v >= 0 ? '+' : ''}${n4(v)}`;
+  const signed1 = (v) => `${v >= 0 ? '+' : ''}${n1(v)}`;
+  const signedInt = (v) => `${v >= 0 ? '+' : ''}${v}`;
+
+  out.push('');
+  out.push('=== The reader, measured (--read-query) ===================================');
+  out.push('Two slices. Same queries, same database, same judgements. They differ in');
+  out.push('one thing: where the constraints and the search text came from.');
+  out.push('');
+  out.push('  authored   constraints written by hand in eval/golden.jsonl, and the whole');
+  out.push('             sentence given to full-text search. Measures the ranker, with');
+  out.push('             the reading held correct by assumption.');
+  out.push('  derived    constraints read out of the sentence by lib/constraints.ts, and');
+  out.push('             the residual text given to full-text search. Measures the reader');
+  out.push('             and the ranker together — the path a visitor actually takes.');
+  out.push('');
+  out.push(
+    renderTable(
+      ['slice', 'n', 'recall@10', 'nDCG@10', 'mean ms', 'p95 ms', 'zero'],
+      [
+        [
+          'authored',
+          String(cmp.authored.queries),
+          n4(cmp.authored.recallAt10),
+          n4(cmp.authored.ndcgAt10),
+          n1(cmp.authored.meanLatencyMs),
+          n1(cmp.authored.p95LatencyMs),
+          String(cmp.authored.zeroResultQueries),
+        ],
+        [
+          'derived',
+          String(cmp.derived.queries),
+          n4(cmp.derived.recallAt10),
+          n4(cmp.derived.ndcgAt10),
+          n1(cmp.derived.meanLatencyMs),
+          n1(cmp.derived.p95LatencyMs),
+          String(cmp.derived.zeroResultQueries),
+        ],
+        [
+          'DIVERGENCE',
+          '',
+          signed4(cmp.divergence.recallAt10),
+          signed4(cmp.divergence.ndcgAt10),
+          signed1(cmp.divergence.meanLatencyMs),
+          '',
+          signedInt(cmp.divergence.zeroResultQueries),
+        ],
+      ],
+      ['l', 'r', 'r', 'r', 'r', 'r', 'r'],
+    ),
+  );
+  out.push('');
+  out.push('--- The divergence --------------------------------------------------------');
+  out.push('DIVERGENCE is the number this mode exists for. It is not a second opinion on');
+  out.push('the ranker; it is the size of the part of the shipped search that the default');
+  out.push('run cannot see. A ranking fix that only helps queries the reader mangles');
+  out.push('first will move the derived row and leave the authored row exactly where it');
+  out.push('was — which is what happened, unmeasured, the last time one landed.');
+  out.push('');
+  out.push(
+    `  nDCG@10   ${n4(cmp.authored.ndcgAt10)} authored -> ${n4(cmp.derived.ndcgAt10)} derived ` +
+      `(${signed4(cmp.divergence.ndcgAt10)})`,
+  );
+  out.push(
+    `  recall@10 ${n4(cmp.authored.recallAt10)} authored -> ${n4(cmp.derived.recallAt10)} derived ` +
+      `(${signed4(cmp.divergence.recallAt10)})`,
+  );
+  out.push(
+    `  per query ${cmp.worseCount} worse, ${cmp.betterCount} better, ${cmp.unchangedCount} unchanged ` +
+      `(of ${cmp.rows.length})`,
+  );
+  out.push('');
+  out.push('--- What the reader did to the constraints --------------------------------');
+  out.push(
+    renderTable(
+      ['reading', 'queries', 'meaning'],
+      [
+        ['same', String(cmp.relations.same), 'derived constraints match the hand-written ones'],
+        ['more', String(cmp.relations.more), 'golden set states none; the reader filtered anyway'],
+        ['less', String(cmp.relations.less), 'golden set states some; the reader read none'],
+        ['other', String(cmp.relations.other), 'both state constraints, and they differ'],
+        ['(text emptied)', String(cmp.emptiedText), 'nothing left to rank on; search_tools browses'],
+      ],
+      ['l', 'r', 'l'],
+    ),
+  );
+  out.push('');
+
+  if (cmp.worst.length === 0) {
+    out.push('--- Where the reading costs the most --------------------------------------');
+    out.push('No query scored worse when read than when handed its constraints.');
+    out.push('');
+    return out.join('\n');
+  }
+
+  const shown = cmp.worst.slice(0, WORST_READINGS);
+  out.push(
+    `--- Where the reading costs the most (${shown.length} of ${cmp.worst.length}) ` +
+      '-'.repeat(Math.max(0, 30 - String(cmp.worst.length).length)),
+  );
+  out.push(
+    renderTable(
+      ['id', 'lang', 'rel', 'authored', 'derived', 'delta', 'query'],
+      shown.map((r) => [
+        r.id,
+        r.lang,
+        r.relation,
+        n4(r.authoredNdcg),
+        n4(r.derivedNdcg),
+        signed4(r.ndcgDelta),
+        truncate(r.query, 44),
+      ]),
+      ['l', 'l', 'l', 'r', 'r', 'r', 'l'],
+    ),
+  );
+  out.push('');
+
+  for (const r of shown) {
+    out.push(`  ${r.id}  ${r.query}`);
+    out.push(
+      `    authored  nDCG ${n4(r.authoredNdcg)}  n=${r.authoredCount}  ` +
+        `filters ${r.authoredConstraints || '(none)'}`,
+    );
+    out.push(`              text "${r.authoredText}"`);
+    out.push(
+      `    derived   nDCG ${n4(r.derivedNdcg)}  n=${r.derivedCount}  ` +
+        `filters ${r.derivedConstraints || '(none)'}`,
+    );
+    out.push(
+      `              text "${r.derivedText}"` +
+        (r.readerKeys.length ? `   read: ${r.readerKeys.join(', ')}` : ''),
+    );
+    out.push(`    delta     ${signed4(r.ndcgDelta)} nDCG@10, ${signed4(r.recallDelta)} recall@10`);
+    out.push('');
+  }
+
+  return out.join('\n');
 }
 
 /**

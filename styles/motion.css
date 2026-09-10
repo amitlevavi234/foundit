@@ -162,6 +162,24 @@
  * `both` fill, so anything whose final state is set by its keyframes — the fit
  * meter's width, the badge's position, the counted numeral — lands on that
  * final state instead of being stuck at zero.
+ *
+ * `animation-delay` and `transition-delay` are zeroed for the same reason the
+ * durations are, and leaving them out was a real bug rather than an omission
+ * that did not matter. `.rise` is `both`-filled and every caller staggers it
+ * with an inline delay — `index * 90 + 100` ms on a result card, `i * 40` on a
+ * browse or top row, 120–300 ms on the homepage. `both` fill means the element
+ * holds the keyframe's *from* state for the whole delay, which for `rise` is
+ * `opacity: 0`. Zero the duration but not the delay and a reader who asked for
+ * reduced motion gets the twelfth result card invisible for 1.09 seconds and
+ * then snapping in — strictly worse than the animation they switched off, and
+ * inflicted on exactly the person least able to absorb it.
+ *
+ * The same omission is still in `RM` in design/canvas/build.mjs, and therefore
+ * in every generated design/canvas/*.dc.html. It never showed there because an
+ * artboard is a 900px still: nothing on it is mid-delay when it is screenshot.
+ * The canvas needs these two lines added to `RM` and the artboards rebuilt;
+ * that is a canvas change, not an app one, so it is recorded here rather than
+ * made here.
  */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -169,7 +187,9 @@
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+    animation-delay: 0s !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
   }
 }
 

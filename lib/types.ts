@@ -132,6 +132,12 @@ export interface HomeData {
 /** Everything /browse draws, in one round trip. */
 export interface BrowseData {
   categories: CategorySummary[];
+  /**
+   * The same categories, the four with the most tools first — the sidebar's
+   * "where the catalogue is deepest". Ordered by PostgreSQL, like every other
+   * list on every screen; nothing re-sorts a list after it arrives.
+   */
+  deepest: CategorySummary[];
   problems: ProblemCard[];
   toolCount: number;
   problemCount: number;
@@ -215,6 +221,14 @@ export interface SearchEvent {
   query: string;
   resultCount: number;
   topScore?: number | null;
+  /**
+   * Whether the answer was any good. A quality judgement, and nothing in
+   * Phase 3 makes one: `result_count > 0` is a different column, and passing
+   * it here turns the operator dashboard's most useful panel — searches that
+   * returned nothing good — into a list of four empty searches. Leave it unset
+   * until Phase 5 has something judged to set it from; the column defaults to
+   * false, and under-reporting is the safe direction (0002_search.sql).
+   */
   hadGoodMatch?: boolean;
   latencyMs?: number | null;
 }

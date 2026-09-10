@@ -981,9 +981,15 @@ dl.facts dd {
   bottom: var(--s-1);
 }
 
-/* Where the fit meter goes until Phase 5 has a number worth printing: what
- * matched, said in words. Legible without colour — the tone changes the fill,
- * the wording says the same thing on its own. */
+/* Where the fit meter goes until Phase 5 has a number worth printing: *where*
+ * it matched, said in words. Legible without colour — the tone changes the
+ * fill, the wording says the same thing on its own.
+ *
+ * Lime is the reward colour and is deliberately not used here. A match in two
+ * places is two places, not a better tool, and painting it the colour the rest
+ * of the interface reserves for a good outcome would put back the claim the
+ * wording was changed to remove. Violet is structure, which is what these are:
+ * a note about where in a listing the words landed. */
 .band {
   display: flex;
   align-items: center;
@@ -1005,17 +1011,17 @@ dl.facts dd {
   white-space: nowrap;
 }
 
-.band-strong .band-label {
-  background: var(--c-lime);
-  color: var(--c-ink);
-}
-
-.band-possible .band-label {
+.band-both .band-label {
   background: var(--c-tint);
   color: var(--c-violet);
 }
 
-.band-loose .band-label {
+.band-one .band-label {
+  background: var(--c-surface);
+  color: var(--c-muted);
+}
+
+.band-name .band-label {
   background: var(--c-sunk);
   color: var(--c-muted);
   border-color: var(--c-rule);

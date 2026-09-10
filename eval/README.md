@@ -55,6 +55,7 @@ loaded catalogue. Without the function it exits 3 and says so.
 | `npm run eval` | Run and print the table |
 | `npm run eval:json` | Also write `eval/results/<timestamp>.json` |
 | `npm run eval:baseline` | Check for regression against `eval/baselines.md`, write JSON |
+| `npm run eval:read-query` | Run both slices and print the divergence (see below) |
 | `npm test` | The scoring self-test, then the eval with the regression check |
 
 | Flag | Default | Meaning |
@@ -65,6 +66,7 @@ loaded catalogue. Without the function it exits 3 and says so.
 | `--timeout=MS` | 5000 | Per-query statement timeout |
 | `--golden=PATH` | `eval/golden.jsonl` | Which golden set to read |
 | `--baselines=PATH` | `eval/baselines.md` | Which baselines table `--baseline` compares against |
+| `--read-query` | off | Also run every query as the app reads it, and print both slices side by side |
 
 `--baselines=` exists so the regression gate can be exercised against a
 fixture. Without it the only way to see the gate fire was to edit a tracked
@@ -233,6 +235,112 @@ semantics fails the self-test rather than passing quietly.
 Violations are checked across every row returned, not just the top ten. A hard
 filter that leaks at rank 17 is exactly as broken as one that leaks at rank 1.
 
+## Measuring the reader: `--read-query`
+
+### Why this exists
+
+Nobody types constraints.
+
+The harness's default run takes `constraints` straight out of `eval/golden.jsonl`
+and hands them to `search_tools`, and gives it the whole sentence as the search
+text. That is a legitimate measurement — it isolates the ranker, with the reading
+held correct by assumption — but it is not the product. A visitor types one
+sentence. `lib/constraints.ts` decides which phrases in it are filters, turns
+those into typed arguments, **removes them from the text**, and only the residue
+is ranked on. Until this flag existed, that entire first step was outside the
+instrument, and so was every defect in it.
+
+That is not a hypothetical gap. Two examples, both real:
+
+- A bug that put Proton Mail, Proton VPN and PDFsam Basic above every expense
+  splitter for any query containing the word "free" was found and fixed, and the
+  recorded score did not move by a single point. The harness had never read a
+  sentence in its life, so it could not have moved.
+- A review found the reader turning "a website builder" into a web-only filter,
+  then ranking on the word "builder". Also invisible here, for the same reason.
+
+A quality gate that cannot see the code that ships is not a quality gate for
+that code. `--read-query` closes that.
+
+### What it does
+
+It runs every golden query **twice**, against the same database, scored by the
+same functions, against the same judgements. The two runs differ in exactly one
+thing — where the text and the constraints came from:
+
+| Slice | Search text | Constraints | Measures |
+| --- | --- | --- | --- |
+| `authored` | the whole sentence | hand-written in `golden.jsonl` | the ranker, alone |
+| `derived` | `readQuery(sentence).text` | `toSearchConstraints(readQuery(sentence).constraints)` | the reader **and** the ranker — what ships |
+
+Then it prints both, and the difference between them:
+
+```
+slice        n  recall@10  nDCG@10  mean ms  p95 ms  zero
+authored    60     0.4497   0.4878    209.5   342.0     4
+derived     60     0.4600   0.4816    251.0   404.5     4
+DIVERGENCE        +0.0103  -0.0062    +41.5            +0
+```
+
+**`DIVERGENCE` is the interesting number, not the two rows above it.** It is not
+a second opinion on the ranker; it is the size of the part of the shipped search
+that the default run cannot see. A ranking fix that mostly helps queries the
+reader mangles first will move the `derived` row and leave `authored` exactly
+where it was — which is precisely what happened, unmeasured, the last time one
+landed.
+
+Underneath, three more things are reported:
+
+- **Per-query counts** — how many queries scored worse, better, or unchanged.
+  A divergence near zero in aggregate can still be two large errors cancelling.
+- **What the reader did to the constraints**, in four buckets. `same`, then
+  `more` (the golden set states no filter and the reader applied one anyway —
+  this silently deletes correct answers), `less` (a stated filter went unread —
+  this lets wrong answers back in), and `other` (both filter, differently). The
+  two asymmetric buckets fail in opposite directions and are counted separately.
+- **Every query where the reading costs nDCG**, worst first, showing both
+  readings of that sentence side by side: the filters each pass sent, the text
+  each pass searched, and which constraint keys the reader says it understood.
+  That is enough to tell a reader bug from a ranker bug without a second run.
+
+### What it does not do
+
+- **It changes nothing by default.** Without the flag, not one query, not one
+  line of output, not one field of the JSON differs; `lib/constraints.ts` is not
+  even imported (the import is dynamic for exactly that reason).
+- **It needs no edit to `eval/golden.jsonl`.** The derived slice reads the same
+  `query` string the authored slice reads. The golden set stays the golden set.
+- **It does not touch the regression gate.** `--baseline` still compares the
+  `authored` nDCG@10 against `eval/baselines.md`. Gating builds on the derived
+  number would be gating on two moving parts at once, and Phase 4 is about to
+  move one of them a long way.
+- **It asserts nothing about the reader's rules.** It never checks that a
+  particular rule exists, matches a particular phrase, or produces a particular
+  key. Constraint keys are carried through as opaque strings that are only ever
+  printed.
+
+A constraint violation in the derived slice **does** fail the run (exit 2), for
+the same reason one in the authored slice does: it means `search_tools` returned
+a row that the arguments it was given exclude, which is a `WHERE` clause leaking.
+A reader that fails to read a constraint is not a violation — nothing was asked,
+so nothing leaked — and shows up as `less` in the buckets and as lost nDCG.
+
+### The one seam, and how to keep it
+
+`eval/reader.mjs` is the only file in `eval/` that names the reader. It depends
+on **two exported functions and nothing else**:
+
+```js
+readQuery(sentence)      -> { constraints, text, emptyText }
+toSearchConstraints(cs)  -> { pricing, platforms, flags, languages }
+```
+
+composed in the same order `app/results/page.tsx` composes them. **Phase 4
+replaces `lib/constraints.ts` wholesale.** When it does, this mode survives if
+those two names still mean those two things; if Phase 4 renames or reshapes them,
+`eval/reader.mjs` is the single file to update, and the numbers it reports change
+on their own — which is the whole point.
+
 ## Regressions
 
 `--baseline` reads the last row of the recorded-baselines table in
@@ -259,6 +367,12 @@ across phases or diffing two runs.
 
 The filename flattens the ISO timestamp (`2026-09-10T09-15-00-000Z`) because
 colons are illegal in Windows filenames; the true timestamp is inside the file.
+
+With `--read-query` the payload carries an extra top-level `readQuery` object:
+both slices' aggregates, the divergence, the bucket counts, any derived-slice
+violations, and a per-query row with both readings of the sentence. Without the
+flag that field is `null`, so the shape of a default run's JSON is unchanged and
+anything already reading it keeps working.
 
 ## If you are about to change something here
 

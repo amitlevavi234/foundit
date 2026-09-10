@@ -402,11 +402,25 @@ export default async function ToolPage({ params }: ToolProps) {
                     fontSize: 'var(--t-body-sm)',
                   }}
                 >
+                  {/* A bare "100%" beside the word Ratings reads as
+                      confidence, and here it is one person ticking one box.
+                      The percentage is real, so it stays; what was missing is
+                      its denominator, which is the only thing that says
+                      whether it means anything. `solved_count` comes back on
+                      the same row as the average (lib/sql.ts, `aspects`), so
+                      showing it costs nothing. */}
                   <Aspect
                     label="Solved my problem"
                     value={
                       tool.aspects.solvedCount > 0 && tool.aspects.solvedPct !== null
                         ? `${tool.aspects.solvedPct}%`
+                        : null
+                    }
+                    of={
+                      tool.aspects.solvedCount > 0
+                        ? `of ${tool.aspects.solvedCount} ${
+                            tool.aspects.solvedCount === 1 ? 'review' : 'reviews'
+                          }`
                         : null
                     }
                   />
@@ -647,18 +661,40 @@ function Point({ children, met }: { children: ReactNode; met: boolean }) {
   );
 }
 
-function Aspect({ label, value }: { label: string; value: string | null }) {
+/**
+ * One aspect average. `of` is how many people it is an average of — a figure
+ * that changes what the number means, so it is drawn beside it rather than
+ * left for the reader to assume.
+ */
+function Aspect({
+  label,
+  value,
+  of,
+}: {
+  label: string;
+  value: string | null;
+  of?: string | null;
+}) {
   return (
     <div
       style={{
         display: 'flex',
         justifyContent: 'space-between',
+        gap: 10,
         borderBottom: 'var(--border-quiet)',
         paddingBottom: 6,
       }}
     >
       <span className="muted">{label}</span>
-      <strong style={{ fontWeight: 700 }}>{value ?? 'Not rated'}</strong>
+      <span style={{ whiteSpace: 'nowrap' }}>
+        <strong style={{ fontWeight: 700 }}>{value ?? 'Not rated'}</strong>
+        {value && of ? (
+          <span className="muted" style={{ fontWeight: 400 }}>
+            {' '}
+            {of}
+          </span>
+        ) : null}
+      </span>
     </div>
   );
 }

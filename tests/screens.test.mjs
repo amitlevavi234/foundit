@@ -281,10 +281,10 @@ test('a search that returns nothing renders the empty state, not a blank page', 
 });
 
 test('the match band is a fact about where it matched, never a rescaled score', () => {
-  assert.equal(matchBand('both').tone, 'strong');
-  assert.equal(matchBand('problem').tone, 'possible');
-  assert.equal(matchBand('tool').tone, 'possible');
-  assert.equal(matchBand('name').tone, 'loose');
+  assert.equal(matchBand('both').tone, 'both');
+  assert.equal(matchBand('problem').tone, 'one');
+  assert.equal(matchBand('tool').tone, 'one');
+  assert.equal(matchBand('name').tone, 'name');
   // No sentence was typed, so there is nothing to claim about relevance.
   assert.equal(matchBand('browse'), null);
 
@@ -295,6 +295,26 @@ test('the match band is a fact about where it matched, never a rescaled score', 
   }
 });
 
+test('and it grades nothing: `match_source` says where, so the words say where', () => {
+  // Retrieval is any-of with no relevance floor, so one shared word earns
+  // `match_source = 'both'` — the word "split" puts a PDF splitter at the top
+  // of a question about holiday expenses. Any wording that ranks the result
+  // ("strong", "best", "good", a percentage) is the interface asserting a
+  // quality nothing measured. The band may name a place and nothing else.
+  const GRADED = /\b(strong|weak|good|best|poor|excellent|high|low|close|top)\b/i;
+
+  for (const source of ['both', 'problem', 'tool', 'name']) {
+    const band = matchBand(source);
+    assert.doesNotMatch(band.label, GRADED, `the band label grades the result: "${band.label}"`);
+    assert.doesNotMatch(band.note, GRADED, `the band note grades the result: "${band.note}"`);
+    assert.match(band.label, /^Matched:/, 'the label names where it matched');
+  }
+
+  // 'name' is the one source that says something limiting rather than
+  // grading, and it is allowed to: it is a fact about what did not match.
+  assert.match(matchBand('name').label, /name only/);
+});
+
 test('a problem statement is only shown when it is the one that matched', () => {
   const matched = { ...DETAIL_ROW, matchedProblem: 'a statement', matchedStrength: 0.04 };
   const unmatched = { ...DETAIL_ROW, matchedProblem: 'a statement', matchedStrength: 0 };
@@ -302,15 +322,22 @@ test('a problem statement is only shown when it is the one that matched', () => 
   assert.equal(matchedProblemOf(unmatched), null);
 });
 
-test('the clarifier asks once, and only when the answer really is scattered', () => {
-  const spread = (categories) =>
-    categories.map((slug, i) => ({
-      ...DETAIL_ROW,
-      slug: `tool-${i}`,
-      categorySlug: slug,
-      categoryName: slug[0].toUpperCase() + slug.slice(1),
-    }));
+/** `['money', 'money', 'audio']` -> three results in those categories. */
+function spread(categories) {
+  return categories.map((slug, i) => ({
+    ...DETAIL_ROW,
+    slug: `tool-${i}`,
+    categorySlug: slug,
+    categoryName: slug[0].toUpperCase() + slug.slice(1),
+  }));
+}
 
+/** `{ money: 6, audio: 2 }` -> eight results, six of them in Money. */
+function withCounts(counts) {
+  return spread(Object.entries(counts).flatMap(([slug, n]) => Array(n).fill(slug)));
+}
+
+test('the clarifier asks once, and only when the answer really is scattered', () => {
   const scattered = spread(['money', 'travel', 'files', 'money', 'audio', 'travel']);
 
   const asked = clarifier({ query: 'track spending', results: scattered, answered: false });
@@ -343,5 +370,72 @@ test('the clarifier asks once, and only when the answer really is scattered', ()
     clarifier({ query: 'track spending', results: scattered, answered: false, constraintCount: 2 }),
     null,
     'a sentence that stated constraints has already said what it wants',
+  );
+});
+
+test('a category holding half the answer is the answer, not an ambiguity', () => {
+  // Measured against the running app. Five of six two-word queries used to
+  // fire the question; on all four of these the catalogue had already picked a
+  // corner, and interrupting spends the one question a search gets on a choice
+  // that had already been made.
+  const decided = {
+    notes: { writing: 6, audio: 2, health: 1, privacy: 1 },
+    'track money': { money: 6, audio: 2, focus: 2, documents: 1 },
+    'record audio': { audio: 6, video: 2, health: 1, money: 1 },
+  };
+
+  for (const [query, counts] of Object.entries(decided)) {
+    assert.equal(
+      clarifier({ query, results: withCounts(counts), answered: false }),
+      null,
+      `"${query}" is answered by ${Object.keys(counts)[0]}, not scattered across four`,
+    );
+  }
+
+  // Genuinely spread: the largest corner holds four of ten.
+  const shared = clarifier({
+    query: 'share files',
+    results: withCounts({ files: 4, money: 3, privacy: 2, audio: 1 }),
+    answered: false,
+  });
+  assert.ok(shared, 'four of ten in the largest category is a real spread');
+  assert.deepEqual(
+    shared.options.map((o) => o.slug),
+    ['files', 'money', 'privacy'],
+    'the stray single result is not offered as a way to narrow anything',
+  );
+
+  // Exactly half is not "less than about half".
+  assert.equal(
+    clarifier({ query: 'split bill', results: withCounts({ money: 5, files: 3, audio: 2 }), answered: false }),
+    null,
+    'half the answer in one category decides it',
+  );
+});
+
+test('an option holding one result is that result, so it is not an option', () => {
+  // Every category but one holds a single tool: there is a spread, but no
+  // corner of the catalogue to steer towards, and "Health · 1" is a link to a
+  // tool dressed up as a way to narrow a search.
+  assert.equal(
+    clarifier({
+      query: 'notes',
+      results: withCounts({ writing: 2, audio: 1, health: 1, privacy: 1, focus: 1, money: 1 }),
+      answered: false,
+    }),
+    null,
+    'one surviving option is not a choice',
+  );
+
+  const two = clarifier({
+    query: 'notes',
+    results: withCounts({ writing: 2, audio: 2, health: 1, privacy: 1, focus: 1 }),
+    answered: false,
+  });
+  assert.ok(two, 'two corners with more than one tool each is a choice');
+  assert.deepEqual(
+    two.options.map((o) => `${o.slug}:${o.count}`),
+    ['audio:2', 'writing:2'],
+    'and only those two are offered',
   );
 });
