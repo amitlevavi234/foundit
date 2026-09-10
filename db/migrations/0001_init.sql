@@ -48,31 +48,18 @@ create or replace function auth.uid()
 returns text
 language sql
 stable
-as $$
+as $fn$
+  -- The inner nullif matters: an anonymous request leaves the setting as an
+  -- empty string, and casting that to jsonb raises rather than returning
+  -- null. A stranger must be nobody, never an error.
   select nullif(
-    current_setting('request.jwt.claims', true)::jsonb ->> 'sub',
+    nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub',
     ''
   );
-$$;
+$fn$;
 
 comment on function auth.uid() is
   'The signed-in user id for this request, or null for a stranger.';
-
--- Security definer so the policy can read profiles.is_admin without the
--- caller needing rights on profiles. search_path is pinned to nothing so a
--- caller cannot shadow the objects this function resolves.
-create or replace function auth.is_admin()
-returns boolean
-language sql
-stable
-security definer
-set search_path = ''
-as $$
-  select coalesce(
-    (select p.is_admin from public.profiles p where p.id = auth.uid()),
-    false
-  );
-$$;
 
 -- --- Shared updated_at ----------------------------------------------------
 create or replace function public.set_updated_at()
@@ -124,6 +111,22 @@ create table public.profiles (
 );
 create trigger profiles_touch before update on public.profiles
   for each row execute function public.set_updated_at();
+
+-- Security definer so the policy can read profiles.is_admin without the
+-- caller needing rights on profiles. search_path is pinned to nothing so a
+-- caller cannot shadow the objects this function resolves.
+create or replace function auth.is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $fn$
+  select coalesce(
+    (select p.is_admin from public.profiles p where p.id = auth.uid()),
+    false
+  );
+$fn$;
 
 -- ===========================================================================
 -- categories — small editorial taxonomy, edited by a human, so a table.
