@@ -19,7 +19,7 @@ Read at the start of every tick, updated before the end of it.
 | Docker with published ports bound to localhost | done | proved for both plain `-p` and a Compose network |
 | **Cloudflare Tunnel** | **not started** | needs a browser login on the owner's side |
 | **PostgreSQL as a permanent service, tuned for 4 GB** | not started | config is in `research/08` |
-| **Backups to Cloudflare R2, plus a restore test** | not started | needs an R2 bucket and token |
+| Backups to Cloudflare R2, plus a restore test | **deferred by the owner, 10 Sep** | database is empty; Hetzner snapshots cover development. **Launch gate — must exist before the first real user** |
 | **External port scan from another network** | not started | the gate for this phase |
 
 ## Phase 1 — the database — **GATE PASSED**
@@ -51,4 +51,4 @@ and wiring the permission tests into CI.
 ## Blocked on Amit
 
 - The Cloudflare Tunnel needs him to authorise `cloudflared` in a browser.
-- Cloudflare R2 needs a bucket and an API token for the backups.
+- Cloudflare R2, when he wants it. Deferred for now, blocking launch not development.
