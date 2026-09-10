@@ -15,13 +15,14 @@ import {
   flagLabel,
   pricingLabel,
   readConstraints,
+  readQuery,
   satisfactionsFor,
   toSearchConstraints,
   type ReadConstraint,
 } from '@/lib/constraints';
 import { logSearchEvent, searchToolsDetailed } from '@/lib/db';
 import { clarifier, matchBand, matchedProblemOf } from '@/lib/results';
-import { QueryTooLongError } from '@/lib/sql';
+import { MAX_QUERY_LENGTH, QueryTooLongError } from '@/lib/sql';
 import type { ToolResultDetail } from '@/lib/types';
 
 /* ===========================================================================
@@ -102,7 +103,12 @@ export default async function Results({ searchParams }: ResultsProps) {
   const category = one(params.in) ?? null;
   const skipped = one(params.skip) === '1';
 
-  const constraints = readConstraints(query, dropped);
+  // Two different strings come out of one sentence, and they are not
+  // interchangeable. `constraints` become WHERE clauses. `searchText` is the
+  // sentence with those phrases taken out, and is the only thing full-text
+  // search ranks on — leaving "free" in it would make the word a hint as well
+  // as a filter, which is the one thing a constraint must never be.
+  const { constraints, text: searchText } = readQuery(query, dropped);
   const droppedConstraints = readConstraints(query).filter((c) => dropped.includes(c.key));
 
   return (
@@ -165,6 +171,7 @@ export default async function Results({ searchParams }: ResultsProps) {
             <Suspense key={`${query}|${dropped.join(',')}|${category}`} fallback={<Loading />}>
               <Answer
                 query={query}
+                searchText={searchText}
                 constraints={constraints}
                 dropped={dropped}
                 category={category}
@@ -207,25 +214,40 @@ function Loading() {
 }
 
 interface AnswerProps {
+  /** What the person typed. Displayed, logged, and measured against the cap. */
   query: string;
+  /** What is left of it once the constraint phrases are out. Searched on. */
+  searchText: string;
   constraints: ReadConstraint[];
   dropped: string[];
   category: string | null;
   skipped: boolean;
 }
 
-async function Answer({ query, constraints, dropped, category, skipped }: AnswerProps) {
+async function Answer({
+  query,
+  searchText,
+  constraints,
+  dropped,
+  category,
+  skipped,
+}: AnswerProps) {
   let results: ToolResultDetail[] = [];
-  let tooLong = false;
+  // The cap is on the sentence somebody typed, not on the shorter string that
+  // reaches Postgres: stripping "free" out of a 202-character question must not
+  // quietly let it through a limit the screen has already promised.
+  let tooLong = query.length > MAX_QUERY_LENGTH;
 
   const startedAt = performance.now();
   try {
-    results = await searchToolsDetailed(
-      query,
-      toSearchConstraints(constraints),
-      RESULT_LIMIT,
-      category,
-    );
+    if (!tooLong) {
+      results = await searchToolsDetailed(
+        searchText,
+        toSearchConstraints(constraints),
+        RESULT_LIMIT,
+        category,
+      );
+    }
   } catch (error) {
     if (error instanceof QueryTooLongError) {
       tooLong = true;
@@ -264,12 +286,24 @@ async function Answer({ query, constraints, dropped, category, skipped }: Answer
     return <Nothing query={query} constraints={constraints} dropped={dropped} />;
   }
 
-  const question = clarifier({
-    query,
-    results,
-    answered: skipped || Boolean(category),
-    constraintCount: constraints.length,
-  });
+  // Nothing was left to search on: `search_tools` read the empty query as
+  // browse, so every row here is the catalogue's own editorial order with the
+  // constraints applied, and match_source says 'browse' on all of them. The
+  // cards already draw no band; the heading must not claim one either.
+  const browse = searchText === '';
+
+  // Judged on the text the results actually came from. With nothing left to
+  // search on the rows are the catalogue in editorial order, and a spread
+  // across categories is that order's shape rather than an ambiguity worth
+  // asking about — so there is no question to ask.
+  const question = searchText
+    ? clarifier({
+        query: searchText,
+        results,
+        answered: skipped || Boolean(category),
+        constraintCount: constraints.length,
+      })
+    : null;
 
   return (
     <>
@@ -320,11 +354,19 @@ async function Answer({ query, constraints, dropped, category, skipped }: Answer
         <div>
           {/* The page asks for twelve. Saying "12 tools fit" when twelve is
               also the ceiling would be a count of the page rather than of the
-              answer, so a full page says so instead. */}
+              answer, so a full page says so instead.
+
+              A sentence that was nothing but constraints — "free", "open
+              source and offline" — leaves nothing to rank, so these rows are
+              the catalogue in its own order with the filters applied. Saying
+              "the 12 that fit best" over them would claim a match nobody
+              made. */}
           <span className="disp" style={{ fontSize: 'var(--t-display-lg)', fontWeight: 800 }}>
-            {results.length >= RESULT_LIMIT
-              ? `The ${results.length} that fit best.`
-              : `${results.length} ${results.length === 1 ? 'tool fits' : 'tools fit'}.`}
+            {browse
+              ? `${results.length} ${results.length === 1 ? 'tool meets' : 'tools meet'} this.`
+              : results.length >= RESULT_LIMIT
+                ? `The ${results.length} that fit best.`
+                : `${results.length} ${results.length === 1 ? 'tool fits' : 'tools fit'}.`}
           </span>{' '}
           {category ? (
             <span className="muted" style={{ fontSize: 'var(--t-body-lg)' }}>
@@ -334,10 +376,21 @@ async function Answer({ query, constraints, dropped, category, skipped }: Answer
           ) : null}
         </div>
         <div className="muted" style={{ fontSize: 'var(--t-body-sm)' }}>
-          Sorted by{' '}
-          <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
-            best match
-          </strong>
+          {browse ? (
+            <>
+              You gave constraints and no question, so these are in the catalogue’s own order,{' '}
+              <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
+                best rated first
+              </strong>
+            </>
+          ) : (
+            <>
+              Sorted by{' '}
+              <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
+                best match
+              </strong>
+            </>
+          )}
         </div>
       </div>
 

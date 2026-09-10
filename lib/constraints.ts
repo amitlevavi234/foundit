@@ -25,6 +25,14 @@ import type {
  * a rule that is left out — a missed constraint returns too much, a wrong one
  * returns the wrong thing, and only the first of those is recoverable by the
  * person typing another word.
+ *
+ * The other half of that rule is `readQuery`: a phrase read as a constraint is
+ * *removed* from the text full-text search then ranks on. A constraint that is
+ * both a WHERE clause and a search term is a hint again — retrieval is any-of,
+ * so "free" would match every summary that happens to contain the word, and
+ * "a free tool to split expenses … in Spanish" would rank a mail client above
+ * anything that splits a bill. Filtering and ranking see different strings on
+ * purpose: the typed arguments, and the sentence with those phrases taken out.
  * ======================================================================== */
 
 export type ConstraintKind = 'pricing' | 'flag' | 'platform' | 'language';
@@ -202,34 +210,151 @@ const RULES: Rule[] = [
   },
 ];
 
+/** Every rule's pattern again, global, so a match reports where it matched. */
+const RULE_SPANS: ReadonlyArray<readonly [RegExp, ReadConstraint]> = RULES.map((rule) => [
+  new RegExp(rule.test.source, rule.test.flags.includes('g') ? rule.test.flags : `${rule.test.flags}g`),
+  rule.constraint,
+]);
+
+const LANGUAGE_SPANS: ReadonlyArray<readonly [RegExp, ReadConstraint]> = LANGUAGES.map(
+  ([code, name, pattern]) => [
+    new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`),
+    { key: `lang-${code}`, label: name, kind: 'language', language: code } as ReadConstraint,
+  ],
+);
+
+/** Half-open `[start, end)` of the lower-cased sentence that a rule consumed. */
+interface Span {
+  start: number;
+  end: number;
+}
+
+/** What a sentence said, and what is left of it once that has been taken out. */
+export interface QueryReading {
+  /** The constraints, minus anything in `dropped`. The chips are drawn from this. */
+  constraints: ReadConstraint[];
+  /**
+   * The sentence with every phrase a rule consumed removed: the text — and the
+   * only text — full-text search should rank on.
+   *
+   * Empty when the sentence was nothing but constraints ("free", "open source
+   * and offline"). Empty is a real answer, not a failure: `search_tools` reads
+   * an empty query as browse — the catalogue in editorial order with the hard
+   * constraints still applied — and every row it returns says `match_source =
+   * 'browse'`, so no card claims to have matched anything. See `emptyText`.
+   */
+  text: string;
+  /**
+   * True when stripping emptied the sentence. The caller does not need it to
+   * search — an empty `text` is already the right thing to send — but the
+   * screen may want to word itself differently for a browse.
+   */
+  emptyText: boolean;
+}
+
+/** A letter or a digit anywhere: the difference between a query and punctuation. */
+const HAS_WORD = /[\p{L}\p{N}]/u;
+
+/** Junk a removed phrase can leave hanging at either end. */
+const EDGE_JUNK = /^[\s,;:.!?/\-–—]+|[\s,;:.!?/\-–—]+$/gu;
+
 /**
- * Read the constraints a sentence states outright.
+ * Read a sentence: the constraints it states, and the text that is left.
  *
- * `dropped` is the set of keys the person has switched off on the results
- * screen; a dropped constraint is read and then discarded rather than never
- * read, so the chip can still be drawn as removed and the count of what was
- * understood stays honest.
+ * Removal is by span, not by word. A rule that matched reports the exact
+ * characters it matched and only those are taken out — "free" in "free tool"
+ * goes because the pricing rule matched it there; "free" in "Freedom
+ * Scientific" stays because no rule ever matched it. The same rule matching
+ * twice removes both, and nothing else.
+ *
+ * A dropped constraint is still stripped from the text. Dropping is the person
+ * saying "stop filtering on that", not "rank on that word": putting "free"
+ * back into the query would hand the ranker the exact word this function
+ * exists to keep out of it, and would make a loosened search noisier than the
+ * one it loosened.
+ *
+ * `dropped` is the set of keys switched off on the results screen; a dropped
+ * constraint is read and then discarded rather than never read, so the chip can
+ * still be drawn as removed and the count of what was understood stays honest.
  */
-export function readConstraints(query: string, dropped: readonly string[] = []): ReadConstraint[] {
-  const text = query.toLowerCase();
+export function readQuery(query: string, dropped: readonly string[] = []): QueryReading {
+  const lower = query.toLowerCase();
+  // Lower-casing is length-preserving for nearly everything, but not for all of
+  // Unicode ("İ" grows a character). Slice the original when the offsets line
+  // up — a person's capitals are theirs — and the lower-cased copy when they do
+  // not, which costs nothing: to_tsvector lower-cases anyway.
+  const source = lower.length === query.length ? query : lower;
+
   const found: ReadConstraint[] = [];
+  const spans: Span[] = [];
 
-  for (const rule of RULES) {
-    if (rule.test.test(text)) found.push(rule.constraint);
-  }
-
-  for (const [code, name, pattern] of LANGUAGES) {
-    if (pattern.test(text)) {
-      found.push({ key: `lang-${code}`, label: name, kind: 'language', language: code });
+  const collect = (patterns: ReadonlyArray<readonly [RegExp, ReadConstraint]>) => {
+    for (const [pattern, constraint] of patterns) {
+      let matched = false;
+      for (const match of lower.matchAll(pattern)) {
+        matched = true;
+        spans.push({ start: match.index, end: match.index + match[0].length });
+      }
+      if (matched) found.push(constraint);
     }
-  }
+  };
+
+  collect(RULE_SPANS);
+  collect(LANGUAGE_SPANS);
 
   // "Open source" already says everything "free" would, and two pricing
-  // constraints cannot both be true of one row: the narrower one wins.
+  // constraints cannot both be true of one row: the narrower one wins. Both
+  // phrases still come out of the text — "free" was a constraint word here
+  // whether or not it survived as a constraint.
   const openSource = found.some((c) => c.key === 'open-source');
   const kept = openSource ? found.filter((c) => c.key !== 'free') : found;
 
-  return kept.filter((c) => !dropped.includes(c.key));
+  const text = strip(source, spans);
+
+  return {
+    constraints: kept.filter((c) => !dropped.includes(c.key)),
+    text,
+    emptyText: text === '',
+  };
+}
+
+/** The sentence with the matched spans cut out, tidied but not rewritten. */
+function strip(source: string, spans: readonly Span[]): string {
+  if (spans.length === 0) return source.trim();
+
+  const ordered = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
+  const pieces: string[] = [];
+  let cursor = 0;
+
+  for (const span of ordered) {
+    // Two rules can match overlapping phrases ("open source" and "source").
+    // Merging as we go keeps the span arithmetic honest.
+    if (span.start > cursor) pieces.push(source.slice(cursor, span.start));
+    cursor = Math.max(cursor, span.end);
+  }
+  if (cursor < source.length) pieces.push(source.slice(cursor));
+
+  const rest = pieces
+    .join(' ')
+    .replace(/\s+/gu, ' ')
+    .replace(EDGE_JUNK, '')
+    .trim();
+
+  // "a free app in Spanish" minus its constraints is "a app" — words, but no
+  // subject. That is still a query and is left alone; only a residue with no
+  // letter or digit left in it counts as nothing to search on.
+  return HAS_WORD.test(rest) ? rest : '';
+}
+
+/**
+ * Read the constraints a sentence states outright.
+ *
+ * The chips, the empty state's offer to loosen one, and `?drop=` are all drawn
+ * from this. What search ranks on is `readQuery(...).text`, which is this
+ * sentence with these phrases taken back out.
+ */
+export function readConstraints(query: string, dropped: readonly string[] = []): ReadConstraint[] {
+  return readQuery(query, dropped).constraints;
 }
 
 /**

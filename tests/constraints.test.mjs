@@ -10,12 +10,14 @@ import assert from 'node:assert/strict';
 
 import {
   readConstraints,
+  readQuery,
   toSearchConstraints,
   satisfactionsFor,
   pricingLabel,
 } from '../lib/constraints.ts';
 
 const keys = (query, dropped) => readConstraints(query, dropped).map((c) => c.key).sort();
+const residual = (query, dropped) => readQuery(query, dropped).text;
 
 test('the words people actually type', () => {
   assert.deepEqual(keys('a free tool to split expenses'), ['free']);
@@ -114,6 +116,80 @@ test('a satisfaction chip states a fact about the tool, not a hope', () => {
     paid.map((c) => c.met),
     [false, false, false],
     'an unmet constraint reads as unmet rather than quietly disappearing',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A constraint is a WHERE clause, so the words that stated it must not also be
+// ranking terms. Retrieval is any-of: "free" left in the text matches every
+// summary that happens to contain it, and the sentence's actual subject gets
+// out-ranked by the word that was supposed to narrow it.
+// ---------------------------------------------------------------------------
+
+test('what stated a constraint is not what search ranks on', () => {
+  assert.equal(
+    residual('a free tool to split expenses with friends while travelling, in Spanish'),
+    'a tool to split expenses with friends while travelling',
+  );
+  assert.equal(residual('habit tracker that works offline'), 'habit tracker that works');
+  assert.equal(residual('note taking app with no ads'), 'note taking app with');
+});
+
+test('the span a rule matched comes out, not every occurrence of the word', () => {
+  // No rule ever matched these, so nothing is removed from them.
+  assert.equal(residual('screen reader by Freedom Scientific'), 'screen reader by Freedom Scientific');
+  assert.equal(residual('something with a free trial'), 'something with a free trial');
+  assert.equal(residual('invoicing for a freelance designer'), 'invoicing for a freelance designer');
+  // A language named as a subject is a subject: the words stay in the query.
+  assert.equal(
+    residual('learn Spanish vocabulary with spaced repetition'),
+    'learn Spanish vocabulary with spaced repetition',
+  );
+  // The rule matched "in Spanish" — the preposition it consumed goes with it.
+  assert.equal(residual('flashcards in Spanish'), 'flashcards');
+});
+
+test('the same rule matching twice removes both spans and nothing else', () => {
+  assert.equal(residual('free notes and a free password vault'), 'notes and a password vault');
+});
+
+test('a phrase read as a constraint leaves even when the constraint is dropped', () => {
+  // Dropping says "stop filtering on that", never "rank on that word": putting
+  // it back in the text is how a loosened search gets noisier than the one it
+  // loosened.
+  const reading = readQuery('free offline notes', ['free']);
+  assert.deepEqual(reading.constraints.map((c) => c.key), ['offline']);
+  assert.equal(reading.text, 'notes');
+
+  // Same reason: "free" lost to "open source" as a constraint, but it was
+  // still a constraint word, so it is not a ranking term either.
+  assert.equal(residual('a free open source password manager'), 'a password manager');
+});
+
+test('a sentence that was nothing but constraints searches on nothing, not on itself', () => {
+  // An empty query is browse: the catalogue in editorial order with the hard
+  // constraints still applied, every row flagged match_source = 'browse'. That
+  // is a real answer to "free"; ranking on the word "free" is not.
+  const bare = readQuery('free');
+  assert.equal(bare.text, '');
+  assert.equal(bare.emptyText, true);
+  assert.deepEqual(bare.constraints.map((c) => c.key), ['free']);
+
+  const two = readQuery('open source, offline');
+  assert.equal(two.text, '');
+  assert.deepEqual(two.constraints.map((c) => c.key).sort(), ['offline', 'open-source']);
+
+  // Nothing stated is nothing stripped.
+  const plain = readQuery('somewhere to keep recipes');
+  assert.equal(plain.text, 'somewhere to keep recipes');
+  assert.equal(plain.emptyText, false);
+});
+
+test('readConstraints still answers exactly what it used to', () => {
+  const query = 'free offline note taking in German with no account';
+  assert.deepEqual(
+    readConstraints(query).map((c) => c.key),
+    readQuery(query).constraints.map((c) => c.key),
   );
 });
 
