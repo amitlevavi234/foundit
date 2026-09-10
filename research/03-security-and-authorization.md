@@ -1704,3 +1704,199 @@ git diff | grep -inE "disable row level|using \(true\)|with check \(true\)|servi
 9. **Write down what happened** — the date, which key, how it got out, what you rotated, what you found in the logs. Four sentences in a file. If it ever matters, it matters a great deal, and you will not remember.
 
 **One reassurance and one warning.** The reassurance: leaking the **publishable/anon key** is not an incident. It is designed to be public, and if your RLS is right it grants exactly what an anonymous visitor already has (§3.2). The warning: that is only true *if your RLS is right* — which is why mistake #2 in the table above is the one that turns a non-event into a breach.
+
+---
+
+## 9. Pre-launch security checklist
+
+Ordered by severity, not by effort. Each line is one action you can verify — if you cannot see the result yourself, it is not done. Tier 1 is not optional; shipping without it means shipping a public database.
+
+### Tier 1 — Blockers. Do not deploy to a public URL until every one of these is true.
+
+- [ ] **1. RLS is enabled on every table in `public`.** Run this and confirm it returns **zero rows**:
+      ```sql
+      select tablename from pg_tables
+      where schemaname = 'public' and rowsecurity = false;
+      ```
+- [ ] **2. Every RLS-enabled table has at least one policy, and none of them is `true`.** Confirm this returns **zero rows**:
+      ```sql
+      select tablename, policyname, cmd, qual, with_check from pg_policies
+      where schemaname = 'public'
+        and (qual = 'true' or with_check = 'true');
+      ```
+- [ ] **3. The Security Advisor is clean.** Dashboard → **Advisors → Security Advisor** → run → resolve every ERROR-level finding. Re-run against the **production** project after your final deploy, not just locally.
+- [ ] **4. No secret is in the client bundle.** Build and grep — this must return nothing:
+      ```bash
+      npm run build && grep -rn "sb_secret_\|service_role\|SUPABASE_SECRET" .next/static/ || echo "CLEAN"
+      ```
+- [ ] **5. No secret is in git, including history.** Must return nothing:
+      ```bash
+      git log --all -p | grep -inE "sb_secret_|service_role|eyJhbGciOiJIUzI1NiIs" || echo "CLEAN"
+      git ls-files | grep -E "^\.env" || echo "CLEAN"
+      ```
+      If either finds something, stop and work §8.4 — rotate first.
+- [ ] **6. `SUPABASE_SECRET_KEY` is read in exactly one file, and that file starts with `import 'server-only'`.** Verify:
+      ```bash
+      grep -rln "SUPABASE_SECRET_KEY" --include="*.ts" --include="*.tsx" . | grep -v node_modules
+      ```
+- [ ] **7. No environment variable name contains both `NEXT_PUBLIC_` and a secret.** Vercel → Settings → Environment Variables: read every name. `NEXT_PUBLIC_` may appear only on `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`.
+- [ ] **8. Every route handler and every `'use server'` export begins with an auth check.** Enumerate them and read each one's first ten lines:
+      ```bash
+      grep -rln "'use server'" app/ ; find app/api -name "route.ts"
+      ```
+- [ ] **9. No user id, owner id or author id is read from a request body, query string or form field.** Must return nothing suspicious:
+      ```bash
+      grep -rnE "(user_?[Ii]d|owner_?[Ii]d|author_?[Ii]d)\s*[:=].*(body|searchParams|formData|params)" app/ lib/
+      ```
+- [ ] **10. A hard monthly spend cap is set in the LLM/embeddings provider's billing console.** This is the only control that survives a bug in your own code. Set the number, then set a usage alert at 50% of it.
+- [ ] **11. `SUPABASE_SECRET_KEY` is scoped to Production only** in Vercel (not Preview, not Development), and marked as a **Sensitive** environment variable. Previews point at a separate Supabase project.
+- [ ] **12. The Supabase project region is a specific EU region, not the "Europe" grouping.** Verify in Settings → General. Recommended: `eu-central-1` (Frankfurt). This cannot be changed later without migrating to a new project.
+
+### Tier 2 — High. Do these before you tell anyone the URL.
+
+- [ ] **13. The URL-preview fetch validates against the SSRF checklist in §6.1** — protocol allowlist, no credentials in URL, ports 80/443 only, all resolved A/AAAA records checked against the blocklist, validation inside the connector `lookup`, `redirect: 'manual'` with re-validation per hop (max 3), `maxResponseSize`, `headersTimeout`/`bodyTimeout`, generic error text. **Or the feature is not shipped.** Test with `http://169.254.169.254/`, `http://127.0.0.1/`, `http://[::ffff:127.0.0.1]/`, `file:///etc/passwd`, `http://user@127.0.0.1/`, and a host you control that redirects to `127.0.0.1` — all six must be rejected identically.
+- [ ] **14. Rate limits are live on the four write paths and on search.** Search 20/min per IP, submit 5/hour per user, review 10/hour per user, email-code request 3/hour per address and per IP (§5.3). Verify by exceeding one and seeing a 429.
+- [ ] **15. Turnstile is enabled** on the email-OTP request and on tool submission: Supabase → Authentication → Settings → *Bot and Abuse Protection → Enable CAPTCHA protection*, plus server-side `siteverify` on your own endpoints (§5.2).
+- [ ] **16. A daily global circuit breaker caps embedding calls** and falls back to Postgres full-text search when it trips (§5.5, item 5). Verify by setting the cap to 1 in staging and confirming search still returns results.
+- [ ] **17. `dangerouslySetInnerHTML`, `rehype-raw` and `urlTransform` appear nowhere.** Must return nothing:
+      ```bash
+      grep -rnE "dangerouslySetInnerHTML|rehype-raw|urlTransform" app/ components/ lib/ || echo "CLEAN"
+      ```
+- [ ] **18. Outbound links render only `http:`/`https:` URLs**, with `rel="noopener noreferrer nofollow"`. Test by submitting a tool whose URL is `javascript:alert(1)` and confirming it is rejected at write and not rendered as an `href`.
+- [ ] **19. No SVG is ever served from the app origin.** Icons are rasterised to PNG/WebP on ingest, or content-type-sniffed and rejected. Test by uploading an SVG containing `<script>`.
+- [ ] **20. Storage buckets: every bucket's public flag is deliberate**, and `storage.objects` has upload policies. Dashboard → Storage → each bucket. Then open a private window and try an object URL from a bucket you believe is private.
+- [ ] **21. LLM output is schema-validated with enums, and the model never emits ids, SQL or URLs** (§6.3). Run the ten hostile inputs from §6.3 item 7 and confirm none changes an extracted field.
+- [ ] **22. Account deletion works end to end**, including the reviews decision, `owner_id` orphaning of tools, and the Storage sweep (§7.3). Create a throwaway account, use it, delete it, then confirm in SQL that nothing identifying remains.
+- [ ] **23. `.gitignore` contains `.env*`** with an `!.env.example` exception, and GitHub **secret scanning + push protection** are on: repo → Settings → Code security → enable both.
+- [ ] **24. A privacy notice exists**, linked in the footer and at signup, naming every processor (Supabase, Vercel, Cloudflare, the model provider, the email provider), the region, retention, and how to delete and export (§7.4).
+
+### Tier 3 — Medium. Do these in the first week.
+
+- [ ] **25. A Content-Security-Policy is set with a per-request nonce**, `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`, and **no `unsafe-inline` in `script-src`** (§6.2).
+- [ ] **26. Vercel function region matches the database region**: `{"regions": ["fra1"]}` in `vercel.json`.
+- [ ] **27. Per-role statement timeouts are unchanged from the defaults** — `anon` 3s, `authenticated` 8s (§5.1). Verify:
+      ```sql
+      select rolname, rolconfig from pg_roles
+      where rolname in ('anon','authenticated','service_role');
+      ```
+- [ ] **28. Length limits are enforced in the database, not only the form:**
+      ```sql
+      alter table public.reviews  add constraint reviews_body_len  check (char_length(body) <= 4000);
+      alter table public.tools    add constraint tools_desc_len    check (char_length(description) <= 2000);
+      ```
+- [ ] **29. IP addresses are stored as a keyed hash, not raw**, wherever you keep them for rate limiting (§7.2).
+- [ ] **30. Search queries are not logged against user ids.** Only the normalized query hash plus aggregates (§7.1).
+- [ ] **31. `CLAUDE.md` contains the security rules block from §8.3**, and you have run the danger-word diff grep at least once.
+- [ ] **32. The moderation queue exists**: new listings from accounts younger than your threshold land in `status = 'draft'` (§5.4).
+- [ ] **33. A data-export endpoint exists** returning the user's profile, collections, reviews and tools as JSON (§7.3, step 5).
+- [ ] **34. Legacy `anon`/`service_role` keys are disabled** in Settings → API Keys, with only `sb_publishable_`/`sb_secret_` in use (§3.1).
+- [ ] **35. DPAs are signed** with Supabase and Vercel (§7.5).
+
+### Tier 4 — Low, but cheap.
+
+- [ ] **36. A honeypot field is in the submission form** (§5.4, item 6).
+- [ ] **37. Disposable email domains are blocked at signup, with `@privaterelay.appleid.com` explicitly allowlisted** (§5.4, item 4).
+- [ ] **38. Security headers are set**: `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` denying camera/microphone/geolocation.
+- [ ] **39. Dependabot or `npm audit` runs weekly**, and you actually read it.
+- [ ] **40. A one-page incident note template exists** (§8.4, step 9), so that at 2 a.m. you are following a list rather than inventing one.
+
+---
+
+## 10. What I could not confirm
+
+Everything below is either unverified, verified from a secondary source, or time-sensitive enough that it should be re-checked before you rely on it. This list covers the whole report, sections 0–9.
+
+**Not tested against a live system — the largest caveat in the document.**
+
+1. **None of the SQL in §1.3, §2 or §9 has been executed.** The policies are written from the documented semantics of Postgres RLS and Supabase's helper functions; they have not been run against a real project, and they have not been tested with the `pgTAP`/impersonation harness described in §2.8. Treat them as a starting point to test, not as tested code.
+2. **The SSRF implementation in §6.1 has not been run.** Three specific things need verifying in your own environment:
+   - **The exact callback contract for undici's `connect.lookup`.** Whether it is invoked with `options.all` set, and the precise shape the callback expects in the `all` case, is not stated in the undici docs I read. Log the arguments once and adapt. If in doubt, use approach (B) — resolve, validate, connect to the literal IP with `Host` and `servername` set — which has no ambiguity.
+   - **Whether Node's global `fetch` on Vercel honours the non-standard `dispatcher` option.** It does in stock Node; I did not verify it on Vercel's runtime. If it does not, call `undici.request()` directly.
+   - **`net.BlockList.PRIVATE_RANGES`** is documented as available from a Node version far newer than anything Vercel currently offers (24.x/22.x/20.x), so §6.1 writes the CIDRs by hand. Check your Node version rather than assuming the constant exists.
+3. **I could not confirm what a Vercel function can actually reach on its network** — specifically whether `169.254.169.254` or any internal service responds. Vercel does not document its egress topology. Do **not** read this as "SSRF is not exploitable here": the third-party-abuse, port-scanning and internal-endpoint vectors are real regardless, and platform network topology changes without notice.
+
+4. **The `CLAUDE.md` rules block in §8.3 has not been tested against an actual assistant session.** It is written to be unambiguous, but whether a given assistant reliably respects "STOP and explain the policy" when it is three attempts deep in a permission error is an empirical question I have not answered. Treat it as a tripwire that makes a bad diff obvious in review, not as a guarantee the bad diff is never written.
+
+**Supabase specifics that move.**
+
+5. **The end-of-2026 deprecation date for legacy `anon`/`service_role` keys** (§3.1) is from Supabase's migration guide and is a plan, not a guarantee. Re-check.
+6. **The exact secret-key rotation flow in the dashboard** (§8.4, step 3) — that you can create a second secret key, deploy, and revoke the old one with no downtime — follows from the documented multi-key model but I did not perform it.
+7. **Default per-role `statement_timeout` values** (`anon` 3s, `authenticated` 8s, §5.1) and the **Auth rate-limit defaults table** (§4.3) are dashboard defaults that Supabase has changed before. Verify in your own project rather than trusting the numbers.
+8. **Supabase log retention by plan, and whether auth logs contain IP addresses**, I could not confirm — the log-drains page does not cover it. This matters for §8.4 step 5 (how far back you can investigate) and for §7.1 (what personal data your logs hold).
+9. **Whether a Supabase project's region can be changed after creation** is not stated in the regions documentation. §7.5 assumes it cannot and that a change means migrating to a new project. Verify before you pick, because the assumption is what makes the choice irreversible.
+10. **Storage `storage.objects` policy behaviour for public buckets** — the access-control page implies public buckets bypass read policies but does not state it as a definition. Test the actual object URL in a private window rather than reasoning about it.
+
+**Vercel specifics.**
+
+11. **The claim in §5.1 that the WAF gives you one custom rule on the free plan** should be re-checked against current pricing; Vercel changes plan limits regularly.
+12. **`x-forwarded-for` semantics** (§5.3) — that the leftmost entry is the client because the platform proxy is the last hop — is the standard behaviour but I did not verify it against Vercel's current documentation. Test it by logging the header from a known IP.
+13. **Vercel log retention** — same gap as (8), on the other side of the stack.
+
+**Third parties and costs.**
+
+14. **Upstash free-tier numbers** (§5.3: 500k commands/month, 256 MB, 1 database) are from the pricing page and change.
+15. **Cloudflare Turnstile's client-side storage** — whether it sets any cookie or writes to the device — I did not verify. This is load-bearing for §7.4's conclusion that Foundit does not need a consent banner. Check it before publishing that claim in your privacy notice.
+16. **LLM/embeddings provider retention terms** (§7.3, step 4) depend entirely on which provider and which plan you choose, neither of which is decided. Read the terms for your actual provider; "zero retention" is often a plan option rather than a default.
+17. **Link-unfurl services** (Microlink, Iframely, urlbox, §6.1) are named as a category. I did not evaluate any of their security postures, pricing, or whether they themselves validate URLs sensibly.
+
+**Legal and regulatory — where the uncertainty is highest and the stakes are not technical.**
+
+18. **Everything in §7 is an engineering baseline, not legal advice**, and I am not qualified to give the latter.
+19. **Israel's Amendment 13** (§7.4) is sourced from a **secondary** source (IAPP) because the Privacy Protection Authority's own English pages returned 403 to automated fetching. The in-force date (14 August 2025), the expanded definition of personal data, and the ~100,000-data-subject registration threshold should all be confirmed against the primary text or with an Israeli lawyer. Thresholds and their triggers are exactly the detail secondary summaries get subtly wrong.
+20. **The conclusion that no consent banner is required** (§7.4) is a reading of the ePrivacy Article 5(3) necessity exemptions applied to a specific stack. It depends on (15), on Vercel Analytics behaving as documented, and on national implementations that differ between member states. It is a defensible engineering default, not a compliance determination.
+21. **Breach-notification duties and deadlines** in the EU and Israel (§8.4, step 6) are stated as "may apply" deliberately. I did not verify the clocks.
+22. **GDPR Article references are deliberately absent.** I did not verify article numbers against the official text, so §7 argues from principles (minimisation, erasure, transparency) rather than citing articles I have not read in the primary source.
+
+**Product-shaped unknowns that change the analysis.**
+
+23. **Whether search queries are logged at all, and against what identifier**, is a design decision that has not been made. §7.1's assessment of this as the most sensitive data in the product assumes the obvious implementation; if you never persist raw query text, several conclusions in §7 relax considerably.
+24. **Whether reviews render markdown** determines whether §6.2's markdown analysis applies or is moot.
+25. **Whether the icon fetched in §6.1 is re-hosted or hot-linked** determines whether the SVG problem in §6.2 exists at all.
+26. **The one-click claim flow with no verification** (stated in the brief) is a deliberate product decision whose abuse potential I analysed structurally in §1 and §5.4, but I have no data on how often unverified claim flows are abused in practice. If claiming a listing ever unlocks anything of value — analytics, a badge, an edit right that affects ranking — revisit that decision.
+
+---
+
+## Sources
+
+Cited in sections 6–10 of this report. (Sections 0–5 carry their own inline citations.)
+
+**OWASP**
+- Server Side Request Forgery Prevention Cheat Sheet — https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
+- Cross Site Scripting Prevention Cheat Sheet — https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html
+- Secrets Management Cheat Sheet — https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html
+- Insecure Direct Object Reference Prevention Cheat Sheet — https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html
+- OWASP Top 10 for LLM Applications — LLM01:2025 Prompt Injection — https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+
+**Node.js and undici**
+- Node.js `net` module — `net.BlockList` — https://nodejs.org/api/net.html
+- undici `Client` API — `connect`/`lookup`, `bodyTimeout`, `headersTimeout`, `maxResponseSize` — https://github.com/nodejs/undici/blob/main/docs/docs/api/Client.md
+- undici `Dispatcher` API — https://github.com/nodejs/undici/blob/main/docs/docs/api/Dispatcher.md
+
+**Vercel**
+- Using the Node.js Runtime with Vercel Functions — https://vercel.com/docs/functions/runtimes/node-js
+- Supported Node.js versions — https://vercel.com/docs/functions/runtimes/node-js/node-js-versions
+- Vercel Web Analytics — Privacy and Compliance — https://vercel.com/docs/analytics/privacy-policy
+- Redacting sensitive data in Web Analytics — https://vercel.com/docs/analytics/redacting-sensitive-data
+
+**Next.js / React**
+- How to think about data security in Next.js — https://nextjs.org/docs/app/guides/data-security
+- Content Security Policy — https://nextjs.org/docs/app/guides/content-security-policy
+- Security and Server Actions (blog) — https://nextjs.org/blog/security-nextjs-server-components-actions
+- react-markdown — Security — https://github.com/remarkjs/react-markdown#security
+- rehype-sanitize — https://github.com/rehypejs/rehype-sanitize
+
+**Supabase**
+- User management / the user object — https://supabase.com/docs/guides/auth/users
+- `auth.admin.deleteUser` reference — https://supabase.com/docs/reference/javascript/auth-admin-deleteuser
+- Storage access control — https://supabase.com/docs/guides/storage/security/access-control
+- Available regions — https://supabase.com/docs/guides/platform/regions
+- GDPR compliance and Supabase — https://supabase.com/docs/guides/security/gdpr-compliance
+- Data Processing Addendum — https://supabase.com/legal/dpa
+
+**GitHub**
+- About secret scanning — https://docs.github.com/en/code-security/secret-scanning/introduction/about-secret-scanning
+
+**Privacy and regulation**
+- EDPB Guidelines 2/2023 on the Technical Scope of Art. 5(3) of the ePrivacy Directive (adopted 14 November 2023) — https://www.edpb.europa.eu/system/files/2024-10/edpb_guidelines_202302_technical_scope_art_53_eprivacydirective_v2_en_0.pdf
+- EDPB — guidelines landing page — https://www.edpb.europa.eu/our-work-tools/documents/public-consultations/2023/guidelines-22023-technical-scope-art-53-eprivacy_en
+- IAPP — "Israel marks a new era in privacy law: Amendment 13 ushers in sweeping reform" *(secondary source — see §10.19)* — https://iapp.org/news/a/israel-marks-a-new-era-in-privacy-law-amendment-13-ushers-in-sweeping-reform
