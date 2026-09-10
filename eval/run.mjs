@@ -1,0 +1,1093 @@
+#!/usr/bin/env node
+// ===========================================================================
+// Foundit — search evaluation harness.
+//
+// Runs every query in eval/golden.jsonl through public.search_tools() and
+// reports recall@10, nDCG@10, latency, and constraint compliance.
+//
+// This file is the measuring instrument. Every later phase has to beat the
+// number it produces, so it is deliberately boring: no network beyond
+// PostgreSQL, no model calls, no colour codes, no spinners, no cleverness in
+// the arithmetic that a reader cannot check by hand.
+//
+// It never writes to the database. In particular it does not log to
+// search_events — the app does that in production, and a benchmark run must
+// not pollute the analytics it is meant to inform.
+//
+// Usage:
+//   DATABASE_URL=... node eval/run.mjs [--json] [--baseline] [--limit=N]
+//                                      [--timeout=MS] [--golden=PATH]
+//
+// Exit codes (see eval/README.md):
+//   0  success
+//   1  usage / configuration error (no DATABASE_URL, no golden set, bad JSONL)
+//   2  constraint violation — a returned tool broke a hard filter
+//   3  connection or query error
+//   4  regression against the recorded baseline
+// ===========================================================================
+
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { performance } from 'node:perf_hooks';
+
+// --- Tunables, all in one place --------------------------------------------
+
+/** Cutoff for both metrics. recall@K and nDCG@K. */
+export const K = 10;
+
+/**
+ * How many rows we ask search_tools for. Larger than K on purpose: scoring
+ * only ever looks at the first K, but fetching a few more lets the "worst
+ * queries" report say "the right answer was sitting at rank 14", which is the
+ * difference between a number and a lead. Constraint checking applies to
+ * every row returned, not just the first K — a hard filter is a WHERE clause,
+ * so a violation at rank 17 is exactly as wrong as one at rank 1.
+ */
+const DEFAULT_FETCH_LIMIT = 20;
+
+/** Per-query statement timeout, milliseconds. Also enforced server-side. */
+const DEFAULT_TIMEOUT_MS = 5000;
+
+/**
+ * Regression tolerance on nDCG@10, absolute.
+ *
+ * 0.005 — half a point of nDCG. The harness is deterministic (same database,
+ * same golden set, same SQL gives the same ranking), so in principle any drop
+ * is real. The tolerance exists for the one source of genuine noise: ties in
+ * ts_rank broken by whatever order the planner happened to produce. A change
+ * that costs more than half a point is a regression and someone has to say
+ * why. Raise this only with a written reason in eval/baselines.md.
+ */
+const REGRESSION_TOLERANCE = 0.005;
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const EVAL_DIR = path.join(ROOT, 'eval');
+const GOLDEN_PATH = path.join(EVAL_DIR, 'golden.jsonl');
+const BASELINES_PATH = path.join(EVAL_DIR, 'baselines.md');
+const RESULTS_DIR = path.join(EVAL_DIR, 'results');
+
+export const EXIT = {
+  OK: 0,
+  USAGE: 1,
+  CONSTRAINT_VIOLATION: 2,
+  DATABASE: 3,
+  REGRESSION: 4,
+};
+
+/** The constraint keys the golden set may carry, and the SQL type of each. */
+const CONSTRAINT_KEYS = ['pricing', 'platforms', 'flags', 'languages'];
+
+// ===========================================================================
+// Scoring. Pure functions, no I/O — eval/scoring.test.mjs checks these
+// against cases worked out by hand.
+// ===========================================================================
+
+/**
+ * Graded gain for one result.
+ *
+ *   gain(rel) = 2^rel - 1
+ *
+ * So rel 3 -> 7, rel 2 -> 3, rel 1 -> 1, unjudged -> 0. The exponential is
+ * the standard Järvelin & Kekäläinen formulation: it says a 3 is worth more
+ * than two 2s, which is the behaviour we want from a search that is supposed
+ * to put the one right tool first.
+ */
+export function gain(rel) {
+  return Math.pow(2, rel) - 1;
+}
+
+/**
+ * Discounted cumulative gain over an ordered list of relevance grades.
+ *
+ *   DCG@k = SUM over i = 1..min(k, n) of  (2^rel_i - 1) / log2(i + 1)
+ *
+ * i is 1-based rank, so the first result is divided by log2(2) = 1 (no
+ * discount) and the tenth by log2(11) ~ 3.459.
+ */
+export function dcg(grades, k = K) {
+  let total = 0;
+  const upto = Math.min(k, grades.length);
+  for (let i = 0; i < upto; i += 1) {
+    total += gain(grades[i]) / Math.log2(i + 2); // i is 0-based -> rank i+1
+  }
+  return total;
+}
+
+/**
+ * nDCG@k for one query.
+ *
+ *   nDCG@k = DCG@k(what came back) / DCG@k(the best possible ordering)
+ *
+ * The ideal ordering comes from *this query's own judgements*: take every
+ * graded slug, sort the grades descending, and score the top k of them. That
+ * is the ceiling a perfect search could reach for this query, so nDCG is 1.0
+ * only when the top k are the k best judged tools in the right order.
+ *
+ * A query with no judgements has an ideal DCG of 0. There is no meaningful
+ * ratio there, so this returns 0 and the caller flags the query — a golden
+ * entry with an empty `relevant` map is a bug in the golden set, not a score
+ * of zero for the search.
+ */
+export function ndcg(retrievedGrades, judgedGrades, k = K) {
+  const ideal = [...judgedGrades].sort((a, b) => b - a);
+  const idcg = dcg(ideal, k);
+  if (idcg <= 0) return 0;
+  return dcg(retrievedGrades, k) / idcg;
+}
+
+/**
+ * recall@k — of every tool judged relevant for this query (any grade >= 1),
+ * what fraction turned up in the top k?
+ *
+ *   recall@k = |relevant AND retrieved-in-top-k| / |relevant|
+ *
+ * Ungraded (grade 0) entries are not "relevant" and never count toward the
+ * denominator. A query with no judged tools has no denominator; this returns
+ * 0 and the caller flags it, same as nDCG.
+ */
+export function recall(retrievedSlugs, relevantMap, k = K) {
+  const relevantSlugs = Object.keys(relevantMap).filter((s) => relevantMap[s] >= 1);
+  if (relevantSlugs.length === 0) return 0;
+  const top = new Set(retrievedSlugs.slice(0, k));
+  let hits = 0;
+  for (const slug of relevantSlugs) if (top.has(slug)) hits += 1;
+  return hits / relevantSlugs.length;
+}
+
+/** Unweighted mean. Every query counts the same, whatever its difficulty. */
+export function mean(values) {
+  if (values.length === 0) return 0;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+/**
+ * p95 by the nearest-rank method: sort ascending, take the value at
+ * ceil(0.95 * n). No interpolation — with 60 queries interpolating invents
+ * precision that is not there, and nearest-rank always returns a latency that
+ * was actually observed.
+ */
+export function percentile(values, p) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.ceil((p / 100) * sorted.length);
+  return sorted[Math.min(Math.max(rank, 1), sorted.length) - 1];
+}
+
+/**
+ * Check one query's results against its hard constraints.
+ *
+ * Semantics, and they matter because a false alarm here fails a build:
+ * a constraint array is ANY-OF. `pricing: ["free","freemium"]` means the tool's
+ * pricing must be one of those two. `platforms: ["ios","android"]` means the
+ * tool must run on at least one of them — that is what "on my phone" means,
+ * and it matches the array-overlap (&&) a SQL WHERE clause would use.
+ *
+ * `pricing` is scalar on the tool and is tested with membership. `platforms`,
+ * `flags` and `languages` are arrays on the tool and are tested with overlap.
+ * A tool with an empty array cannot satisfy an overlap constraint, and that is
+ * correct: if a query asked for Spanish and the tool declares no languages,
+ * the catalogue does not support the claim that it fits.
+ *
+ * @param facts  {pricing, platforms, flags, languages} read from public.tools
+ * @returns array of violation objects, empty when clean
+ */
+export function checkConstraints(query, results, factsBySlug) {
+  const constraints = query.constraints ?? {};
+  const violations = [];
+
+  for (const row of results) {
+    const facts = factsBySlug.get(row.slug);
+    if (!facts) {
+      violations.push({
+        queryId: query.id,
+        slug: row.slug,
+        rank: row.rank,
+        key: '(lookup)',
+        wanted: [],
+        got: 'not found in public.tools',
+        detail: 'search_tools returned a slug that does not exist in the tools table',
+      });
+      continue;
+    }
+
+    // Cross-check: the function must not report a pricing different from the
+    // row it came from. If these disagree, one of them is lying to the user.
+    if (row.pricing !== facts.pricing) {
+      violations.push({
+        queryId: query.id,
+        slug: row.slug,
+        rank: row.rank,
+        key: 'pricing',
+        wanted: [String(facts.pricing)],
+        got: String(row.pricing),
+        detail: 'search_tools reported a pricing that disagrees with public.tools',
+      });
+    }
+
+    for (const key of CONSTRAINT_KEYS) {
+      const wanted = constraints[key];
+      if (!Array.isArray(wanted) || wanted.length === 0) continue;
+
+      if (key === 'pricing') {
+        if (!wanted.includes(facts.pricing)) {
+          violations.push({
+            queryId: query.id,
+            slug: row.slug,
+            rank: row.rank,
+            key,
+            wanted,
+            got: String(facts.pricing),
+            detail: 'pricing is not one of the requested values',
+          });
+        }
+      } else {
+        const have = Array.isArray(facts[key]) ? facts[key] : [];
+        const overlaps = have.some((v) => wanted.includes(v));
+        if (!overlaps) {
+          violations.push({
+            queryId: query.id,
+            slug: row.slug,
+            rank: row.rank,
+            key,
+            wanted,
+            got: have.length ? have.join(',') : '(none declared)',
+            detail: `tool.${key} does not overlap the requested values`,
+          });
+        }
+      }
+    }
+  }
+
+  return violations;
+}
+
+/** True when the query carries at least one non-empty constraint array. */
+export function isConstrained(query) {
+  const c = query.constraints;
+  if (!c || typeof c !== 'object') return false;
+  return CONSTRAINT_KEYS.some((k) => Array.isArray(c[k]) && c[k].length > 0);
+}
+
+/** Aggregate a list of per-query results into the numbers we report. */
+export function aggregate(perQuery) {
+  const latencies = perQuery.map((q) => q.latencyMs);
+  return {
+    queries: perQuery.length,
+    recallAt10: mean(perQuery.map((q) => q.recall)),
+    ndcgAt10: mean(perQuery.map((q) => q.ndcg)),
+    meanLatencyMs: mean(latencies),
+    p95LatencyMs: percentile(latencies, 95),
+    zeroResultQueries: perQuery.filter((q) => q.resultCount === 0).length,
+  };
+}
+
+// ===========================================================================
+// Golden set
+// ===========================================================================
+
+/**
+ * Parse golden.jsonl. One JSON object per line; blank lines and lines whose
+ * first non-space character is # are skipped. Every problem is reported with
+ * its line number, because a silent skip in the measuring instrument is how
+ * you end up confidently reporting a number for 43 of your 60 queries.
+ */
+export function parseGolden(text) {
+  const queries = [];
+  const errors = [];
+  const seenIds = new Set();
+  const lines = text.split(/\r?\n/);
+
+  lines.forEach((raw, index) => {
+    const lineNo = index + 1;
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) return;
+
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (err) {
+      errors.push(`line ${lineNo}: not valid JSON — ${err.message}`);
+      return;
+    }
+    if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+      errors.push(`line ${lineNo}: expected a JSON object`);
+      return;
+    }
+    if (typeof obj.id !== 'string' || obj.id === '') {
+      errors.push(`line ${lineNo}: missing "id"`);
+      return;
+    }
+    if (seenIds.has(obj.id)) {
+      errors.push(`line ${lineNo}: duplicate id "${obj.id}"`);
+      return;
+    }
+    seenIds.add(obj.id);
+    if (typeof obj.query !== 'string' || obj.query.trim() === '') {
+      errors.push(`line ${lineNo} (${obj.id}): missing "query"`);
+      return;
+    }
+    if (obj.relevant === null || typeof obj.relevant !== 'object' || Array.isArray(obj.relevant)) {
+      errors.push(`line ${lineNo} (${obj.id}): "relevant" must be an object of slug -> grade`);
+      return;
+    }
+    // From here on, problems are collected rather than returned early, so one
+    // bad line reports everything wrong with it at once. An entry with any
+    // problem is not returned — `queries` only ever holds fully valid entries,
+    // and the run aborts on the first error anyway.
+    const entryErrors = [];
+
+    for (const [slug, grade] of Object.entries(obj.relevant)) {
+      if (!Number.isInteger(grade) || grade < 1 || grade > 3) {
+        entryErrors.push(`line ${lineNo} (${obj.id}): grade for "${slug}" must be 1, 2 or 3 — got ${JSON.stringify(grade)}`);
+      }
+    }
+
+    const constraints = {};
+    if (obj.constraints !== undefined) {
+      if (obj.constraints === null || typeof obj.constraints !== 'object' || Array.isArray(obj.constraints)) {
+        errors.push(`line ${lineNo} (${obj.id}): "constraints" must be an object`);
+        return;
+      }
+      for (const [key, value] of Object.entries(obj.constraints)) {
+        if (!CONSTRAINT_KEYS.includes(key)) {
+          entryErrors.push(`line ${lineNo} (${obj.id}): unknown constraint "${key}" (expected one of ${CONSTRAINT_KEYS.join(', ')})`);
+          continue;
+        }
+        if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+          entryErrors.push(`line ${lineNo} (${obj.id}): constraint "${key}" must be an array of strings`);
+          continue;
+        }
+        // An empty array is treated as "no constraint": passing '{}' to an
+        // overlap test would match nothing and silently zero the query.
+        if (value.length > 0) constraints[key] = value;
+      }
+    }
+
+    if (entryErrors.length > 0) {
+      errors.push(...entryErrors);
+      return;
+    }
+
+    queries.push({
+      id: obj.id,
+      query: obj.query,
+      lang: typeof obj.lang === 'string' && obj.lang ? obj.lang : 'en',
+      note: typeof obj.note === 'string' ? obj.note : '',
+      constraints,
+      relevant: obj.relevant,
+      line: lineNo,
+    });
+  });
+
+  return { queries, errors };
+}
+
+// ===========================================================================
+// Baselines
+// ===========================================================================
+
+/**
+ * Read eval/baselines.md and return every row that actually has numbers in it,
+ * oldest first.
+ *
+ * Header-driven on purpose. baselines.md holds more than one markdown table,
+ * and a positional parser would happily read the per-slice table's nDCG column
+ * as if it were a headline baseline and then fail builds against it. So: a
+ * table is only the recorded-baselines table if its header row carries both
+ * "Commit" and "nDCG@10", and cells are looked up by column name, not index.
+ * Rows still in template form — the empty Phase 2 row — have no parseable
+ * nDCG and are skipped.
+ */
+export function parseBaselines(markdown) {
+  const rows = [];
+  let columns = null; // {name -> index} for the table currently being read
+
+  const splitRow = (line) => {
+    const t = line.trim();
+    return t
+      .slice(1, t.endsWith('|') ? -1 : undefined)
+      .split('|')
+      .map((c) => c.trim());
+  };
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) {
+      // Any non-table line ends the current table.
+      if (trimmed !== '') columns = null;
+      continue;
+    }
+    const cells = splitRow(trimmed);
+    if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === '')) continue; // separator
+
+    const lower = cells.map((c) => c.toLowerCase());
+    const looksLikeHeader = lower.includes('ndcg@10');
+    if (looksLikeHeader) {
+      if (lower.includes('commit') && lower.includes('phase')) {
+        columns = {};
+        lower.forEach((name, i) => {
+          columns[name] = i;
+        });
+      } else {
+        columns = null; // some other table that happens to report nDCG
+      }
+      continue;
+    }
+    if (!columns) continue;
+
+    const cell = (name) => {
+      const i = columns[name];
+      return i === undefined ? '' : (cells[i] ?? '');
+    };
+    const ndcgValue = Number.parseFloat(cell('ndcg@10'));
+    if (!Number.isFinite(ndcgValue)) continue; // template / not yet recorded
+
+    rows.push({
+      date: cell('date') || '(no date)',
+      commit: cell('commit') || '(no commit)',
+      phase: cell('phase') || '?',
+      queries: Number.parseInt(cell('queries'), 10),
+      recallAt10: Number.parseFloat(cell('recall@10')),
+      ndcgAt10: ndcgValue,
+      note: cell('what changed'),
+    });
+  }
+  return rows;
+}
+
+/**
+ * A run regresses when nDCG@10 falls more than REGRESSION_TOLERANCE below the
+ * most recently recorded baseline. Improvements and small wobbles pass.
+ */
+export function checkRegression(current, baseline, tolerance = REGRESSION_TOLERANCE) {
+  const delta = current - baseline.ndcgAt10;
+  // 1e-12 guard: a drop of exactly the tolerance computes as -0.005000000000000004
+  // in binary floating point and would otherwise fail a build on a rounding
+  // artefact. The boundary is inclusive — a drop *of* the tolerance passes, a
+  // drop *past* it does not.
+  return {
+    regressed: -delta > tolerance + 1e-12,
+    delta,
+    tolerance,
+    baseline,
+  };
+}
+
+// ===========================================================================
+// Plain text table. Aligned with spaces only — no ANSI, no box drawing,
+// nothing that turns into mojibake when someone pastes the log into a chat
+// window as evidence.
+// ===========================================================================
+
+export function renderTable(headers, rows, aligns = []) {
+  const all = [headers, ...rows].map((r) => r.map((c) => (c === null || c === undefined ? '' : String(c))));
+  const widths = headers.map((_, i) => Math.max(...all.map((r) => (r[i] ?? '').length)));
+  const pad = (cell, i) => (aligns[i] === 'r' ? cell.padStart(widths[i]) : cell.padEnd(widths[i]));
+  const line = (r) => r.map(pad).join('  ').trimEnd();
+  const rule = widths.map((w) => '-'.repeat(w)).join('  ');
+  return [line(all[0]), rule, ...all.slice(1).map(line)].join('\n');
+}
+
+const n4 = (v) => v.toFixed(4);
+const n1 = (v) => v.toFixed(1);
+// Plain ASCII dots, not U+2026: the report is meant to be pasted anywhere,
+// including a console that is not speaking UTF-8.
+const truncate = (s, max) => (s.length <= max ? s : `${s.slice(0, max - 3)}...`);
+
+/** Wrap a list of short labels into indented lines of `perLine` items. */
+function wrapList(items, label, perLine = 5) {
+  if (items.length === 0) return [`    ${label.padEnd(9)} (nothing)`];
+  const lines = [];
+  for (let i = 0; i < items.length; i += perLine) {
+    const chunk = items.slice(i, i + perLine).join('  ');
+    lines.push(i === 0 ? `    ${label.padEnd(9)} ${chunk}` : `    ${' '.repeat(9)} ${chunk}`);
+  }
+  return lines;
+}
+
+// ===========================================================================
+// Secret hygiene
+// ===========================================================================
+
+/**
+ * pg puts the host and sometimes the whole connection target into error
+ * messages. Nothing derived from DATABASE_URL is ever allowed onto stdout, so
+ * every message goes through here first.
+ */
+function makeRedactor(databaseUrl) {
+  const secrets = [];
+  if (databaseUrl) {
+    secrets.push(databaseUrl);
+    try {
+      const u = new URL(databaseUrl);
+      if (u.password) secrets.push(decodeURIComponent(u.password), u.password);
+      if (u.username) secrets.push(decodeURIComponent(u.username), u.username);
+      if (u.host) secrets.push(u.host);
+      if (u.hostname) secrets.push(u.hostname);
+    } catch {
+      // Not a URL we can parse; the whole-string replacement above still holds.
+    }
+  }
+  const unique = [...new Set(secrets.filter((s) => typeof s === 'string' && s.length >= 3))]
+    .sort((a, b) => b.length - a.length);
+  return (text) => {
+    let out = String(text ?? '');
+    for (const secret of unique) out = out.split(secret).join('[redacted]');
+    return out;
+  };
+}
+
+// ===========================================================================
+// The run
+// ===========================================================================
+
+function parseArgs(argv) {
+  const opts = {
+    json: false,
+    baseline: false,
+    limit: DEFAULT_FETCH_LIMIT,
+    timeout: DEFAULT_TIMEOUT_MS,
+    golden: GOLDEN_PATH,
+    help: false,
+  };
+  for (const arg of argv) {
+    if (arg === '--json') opts.json = true;
+    else if (arg === '--baseline') opts.baseline = true;
+    else if (arg === '--help' || arg === '-h') opts.help = true;
+    else if (arg.startsWith('--limit=')) opts.limit = Number.parseInt(arg.slice(8), 10);
+    else if (arg.startsWith('--timeout=')) opts.timeout = Number.parseInt(arg.slice(10), 10);
+    else if (arg.startsWith('--golden=')) opts.golden = path.resolve(process.cwd(), arg.slice(9));
+    else return { error: `unknown argument: ${arg}` , opts };
+  }
+  if (!Number.isInteger(opts.limit) || opts.limit < K) {
+    return { error: `--limit must be an integer >= ${K}`, opts };
+  }
+  if (!Number.isInteger(opts.timeout) || opts.timeout < 100) {
+    return { error: '--timeout must be an integer >= 100 (milliseconds)', opts };
+  }
+  return { opts };
+}
+
+const USAGE = `Foundit search evaluation harness
+
+  DATABASE_URL=postgres://... node eval/run.mjs [options]
+
+  --json          also write eval/results/<timestamp>.json
+  --baseline      compare against the latest recorded row in eval/baselines.md
+                  and exit non-zero if nDCG@10 dropped by more than ${REGRESSION_TOLERANCE}
+  --limit=N       rows to request from search_tools (default ${DEFAULT_FETCH_LIMIT}; metrics are always @${K})
+  --timeout=MS    per-query statement timeout (default ${DEFAULT_TIMEOUT_MS})
+  --golden=PATH   golden set to read (default eval/golden.jsonl)
+
+Exit: 0 ok, 1 usage, 2 constraint violation, 3 database, 4 regression.`;
+
+const SEARCH_SQL = `
+  select tool_id, slug, name, summary, pricing, score, match_source
+    from public.search_tools(
+      p_query     => $1::text,
+      p_pricing   => $2::pricing_model[],
+      p_platforms => $3::platform[],
+      p_flags     => $4::tool_flag[],
+      p_languages => $5::text[],
+      p_limit     => $6::int
+    )`;
+
+const FACTS_SQL = `
+  select slug::text as slug, pricing::text as pricing,
+         platforms::text[] as platforms, flags::text[] as flags, languages
+    from public.tools
+   where slug = any($1::citext[])`;
+
+async function main(argv) {
+  const { opts, error: argError } = parseArgs(argv);
+  if (argError) {
+    process.stderr.write(`${argError}\n\n${USAGE}\n`);
+    return EXIT.USAGE;
+  }
+  if (opts.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return EXIT.OK;
+  }
+
+  const databaseUrl = process.env.DATABASE_URL;
+  const redact = makeRedactor(databaseUrl);
+
+  if (!databaseUrl || databaseUrl.trim() === '') {
+    process.stderr.write(
+      [
+        'ERROR: DATABASE_URL is not set.',
+        '',
+        'The eval harness reads its connection string from the environment and',
+        'from nowhere else. Nothing is hardcoded and no default is guessed.',
+        '',
+        'Set it for this command only, so it does not linger in your shell:',
+        '',
+        '  bash/zsh     DATABASE_URL=postgres://user:pass@host:5432/foundit node eval/run.mjs',
+        '  PowerShell   $env:DATABASE_URL = \'postgres://user:pass@host:5432/foundit\'; node eval/run.mjs',
+        '',
+        'Use a read-only role. The harness only ever runs SELECT.',
+        '',
+      ].join('\n'),
+    );
+    return EXIT.USAGE;
+  }
+
+  // --- Golden set --------------------------------------------------------
+  if (!existsSync(opts.golden)) {
+    process.stderr.write(
+      [
+        `ERROR: golden set not found at ${opts.golden}`,
+        '',
+        'eval/golden.jsonl holds the 60 queries with known right answers. It is',
+        'owned by a different agent in Phase 2 and this harness never writes it.',
+        '',
+      ].join('\n'),
+    );
+    return EXIT.USAGE;
+  }
+
+  const goldenText = await readFile(opts.golden, 'utf8');
+  const { queries, errors: goldenErrors } = parseGolden(goldenText);
+
+  if (goldenErrors.length > 0) {
+    process.stderr.write(`ERROR: ${goldenErrors.length} problem(s) in ${opts.golden}:\n`);
+    for (const e of goldenErrors) process.stderr.write(`  ${e}\n`);
+    process.stderr.write('\nFix the golden set. Do not fix it by deleting the query that failed.\n');
+    return EXIT.USAGE;
+  }
+  if (queries.length === 0) {
+    process.stderr.write(`ERROR: ${opts.golden} contains no queries.\n`);
+    return EXIT.USAGE;
+  }
+
+  const unjudged = queries.filter((q) => Object.keys(q.relevant).length === 0);
+
+  // --- Connect -----------------------------------------------------------
+  let pg;
+  try {
+    ({ default: pg } = await import('pg'));
+  } catch {
+    process.stderr.write("ERROR: the 'pg' package is not installed. Run: npm install\n");
+    return EXIT.USAGE;
+  }
+
+  const pool = new pg.Pool({
+    connectionString: databaseUrl,
+    max: 1,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 1_000,
+    application_name: 'foundit-eval',
+    // Belt and braces: the server enforces the per-query ceiling too.
+    statement_timeout: opts.timeout,
+    query_timeout: opts.timeout + 500,
+  });
+  // A pool error with no listener is an unhandled rejection that kills the
+  // process without a usable message.
+  pool.on('error', () => {});
+
+  const startedAt = new Date();
+  const perQuery = [];
+  const allViolations = [];
+  let client;
+
+  try {
+    try {
+      client = await pool.connect();
+      await client.query('set session characteristics as transaction read only');
+      await client.query(`set statement_timeout = ${opts.timeout}`);
+    } catch (err) {
+      process.stderr.write(`ERROR: could not connect to PostgreSQL.\n  ${redact(err.message)}\n`);
+      return EXIT.DATABASE;
+    }
+
+    process.stdout.write(
+      `Foundit eval — ${queries.length} queries, metrics @${K}, fetching ${opts.limit} rows each.\n`,
+    );
+
+    // --- Run every query, sequentially ------------------------------------
+    for (const q of queries) {
+      const params = [
+        q.query,
+        q.constraints.pricing ?? null,
+        q.constraints.platforms ?? null,
+        q.constraints.flags ?? null,
+        q.constraints.languages ?? null,
+        opts.limit,
+      ];
+
+      const t0 = performance.now();
+      let rows;
+      try {
+        ({ rows } = await client.query(SEARCH_SQL, params));
+      } catch (err) {
+        const message = redact(err.message);
+        process.stderr.write(`\nERROR running query ${q.id} (golden line ${q.line}).\n  ${message}\n`);
+        if (/does not exist/i.test(message) && /search_tools/i.test(message)) {
+          process.stderr.write(
+            '  public.search_tools is missing. Apply db/migrations/0002_search.sql first.\n',
+          );
+        }
+        if (/statement timeout|canceling statement/i.test(message)) {
+          process.stderr.write(`  The query exceeded the ${opts.timeout} ms timeout.\n`);
+        }
+        if (/read-only transaction/i.test(message)) {
+          process.stderr.write(
+            [
+              '  The session is read-only and search_tools tried to write.',
+              '  That is the harness working as intended, not a configuration problem:',
+              '  a benchmark run must not write rows, and logging to search_events in',
+              '  particular would pollute the analytics this number exists to inform.',
+              '  Move the logging out of search_tools and into the caller.',
+              '',
+            ].join('\n'),
+          );
+        }
+        return EXIT.DATABASE;
+      }
+      const latencyMs = performance.now() - t0;
+
+      const results = rows.map((r, i) => ({
+        rank: i + 1,
+        toolId: r.tool_id === null ? null : String(r.tool_id),
+        slug: String(r.slug),
+        name: r.name,
+        pricing: r.pricing,
+        score: r.score === null ? null : Number(r.score),
+        matchSource: r.match_source,
+      }));
+
+      perQuery.push({ query: q, results, latencyMs });
+    }
+
+    // --- One lookup for the ground truth about every returned tool --------
+    const returnedSlugs = [...new Set(perQuery.flatMap((r) => r.results.map((x) => x.slug)))];
+    const factsBySlug = new Map();
+    if (returnedSlugs.length > 0) {
+      try {
+        const { rows } = await client.query(FACTS_SQL, [returnedSlugs]);
+        for (const r of rows) {
+          factsBySlug.set(String(r.slug), {
+            pricing: r.pricing,
+            platforms: r.platforms ?? [],
+            flags: r.flags ?? [],
+            languages: r.languages ?? [],
+          });
+        }
+      } catch (err) {
+        process.stderr.write(`ERROR reading public.tools for constraint verification.\n  ${redact(err.message)}\n`);
+        return EXIT.DATABASE;
+      }
+    }
+
+    // --- Score -------------------------------------------------------------
+    for (const entry of perQuery) {
+      const q = entry.query;
+      const slugs = entry.results.map((r) => r.slug);
+      const grades = slugs.map((s) => q.relevant[s] ?? 0);
+      const judged = Object.values(q.relevant);
+
+      entry.resultCount = entry.results.length;
+      entry.ndcg = ndcg(grades, judged, K);
+      entry.recall = recall(slugs, q.relevant, K);
+      entry.judgedCount = judged.length;
+      entry.constrained = isConstrained(q);
+      entry.violations = checkConstraints(q, entry.results, factsBySlug);
+      allViolations.push(...entry.violations);
+    }
+  } finally {
+    if (client) client.release();
+    await pool.end(); // so the process actually exits
+  }
+
+  // --- Report ---------------------------------------------------------------
+  const overall = aggregate(perQuery);
+  const slices = buildSlices(perQuery);
+  const worst = [...perQuery]
+    .sort((a, b) => a.ndcg - b.ndcg || a.recall - b.recall || a.query.id.localeCompare(b.query.id))
+    .slice(0, 5);
+
+  printReport({ overall, slices, worst, perQuery, unjudged, opts, startedAt });
+
+  // --- Hard failures --------------------------------------------------------
+  let exitCode = EXIT.OK;
+
+  if (allViolations.length > 0) {
+    printViolations(allViolations);
+    exitCode = EXIT.CONSTRAINT_VIOLATION;
+  }
+
+  // --- Regression -----------------------------------------------------------
+  let regression = null;
+  if (opts.baseline) {
+    if (!existsSync(BASELINES_PATH)) {
+      process.stdout.write(`\nBASELINE: ${BASELINES_PATH} not found — nothing to compare against.\n`);
+    } else {
+      const rows = parseBaselines(await readFile(BASELINES_PATH, 'utf8'));
+      if (rows.length === 0) {
+        process.stdout.write(
+          '\nBASELINE: no baseline recorded yet in eval/baselines.md.\n' +
+            '          Record this run as the Phase 2 row and future runs will be checked against it.\n',
+        );
+      } else {
+        const latest = rows[rows.length - 1];
+        regression = checkRegression(overall.ndcgAt10, latest);
+        const sign = regression.delta >= 0 ? '+' : '';
+        process.stdout.write(
+          '\n' +
+            renderTable(
+              ['BASELINE', 'phase', 'date', 'commit', 'nDCG@10', 'now', 'delta', 'tolerance', 'verdict'],
+              [[
+                '',
+                latest.phase,
+                latest.date,
+                latest.commit,
+                n4(latest.ndcgAt10),
+                n4(overall.ndcgAt10),
+                `${sign}${n4(regression.delta)}`,
+                n4(regression.tolerance),
+                regression.regressed ? 'REGRESSION' : 'ok',
+              ]],
+              ['l', 'l', 'l', 'l', 'r', 'r', 'r', 'r', 'l'],
+            ) +
+            '\n',
+        );
+        if (regression.regressed) {
+          process.stdout.write(
+            `\nFAIL: nDCG@10 dropped ${n4(-regression.delta)} below the recorded baseline ` +
+              `(tolerance ${regression.tolerance}).\n` +
+              'The search got worse. Do not edit the golden set.\n',
+          );
+          if (exitCode === EXIT.OK) exitCode = EXIT.REGRESSION;
+        }
+      }
+    }
+  }
+
+  // --- Machine-readable -----------------------------------------------------
+  if (opts.json) {
+    const payload = {
+      schema: 'foundit-eval/1',
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      k: K,
+      fetchLimit: opts.limit,
+      timeoutMs: opts.timeout,
+      goldenPath: path.relative(ROOT, opts.golden).split(path.sep).join('/'),
+      overall,
+      slices,
+      constraintViolations: allViolations,
+      regression,
+      exitCode,
+      queries: perQuery.map((e) => ({
+        id: e.query.id,
+        query: e.query.query,
+        lang: e.query.lang,
+        constrained: e.constrained,
+        constraints: e.query.constraints,
+        judgedCount: e.judgedCount,
+        resultCount: e.resultCount,
+        ndcgAt10: e.ndcg,
+        recallAt10: e.recall,
+        latencyMs: e.latencyMs,
+        violations: e.violations.length,
+        returned: e.results.map((r) => ({
+          rank: r.rank,
+          slug: r.slug,
+          pricing: r.pricing,
+          score: r.score,
+          matchSource: r.matchSource,
+          grade: e.query.relevant[r.slug] ?? 0,
+        })),
+      })),
+    };
+    await mkdir(RESULTS_DIR, { recursive: true });
+    // Colons are illegal in Windows filenames, so the ISO string is flattened
+    // for the name; the true timestamp is inside the file.
+    const stamp = startedAt.toISOString().replace(/[:.]/g, '-');
+    const outPath = path.join(RESULTS_DIR, `${stamp}.json`);
+    await writeFile(outPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    process.stdout.write(`\nJSON written to ${path.relative(ROOT, outPath).split(path.sep).join('/')}\n`);
+  }
+
+  return exitCode;
+}
+
+export function buildSlices(perQuery) {
+  const of = (label, subset) => ({
+    slice: label,
+    ...aggregate(subset),
+  });
+  return [
+    of('all', perQuery),
+    of('english', perQuery.filter((e) => e.query.lang === 'en')),
+    of('non-english', perQuery.filter((e) => e.query.lang !== 'en')),
+    of('constrained', perQuery.filter((e) => e.constrained)),
+    of('unconstrained', perQuery.filter((e) => !e.constrained)),
+  ];
+}
+
+/**
+ * Build the whole stdout report as a string. Separated from writing it so the
+ * self-test can render a synthetic run and check the output without a
+ * database — this is the one code path that otherwise never runs offline.
+ */
+export function buildReport({ overall, slices, worst, perQuery, unjudged, opts, startedAt }) {
+  const out = [];
+
+  out.push('');
+  out.push('=== Foundit search eval ===================================================');
+  out.push(`run at        ${startedAt.toISOString()}`);
+  out.push(`golden set    ${path.relative(ROOT, opts.golden).split(path.sep).join('/')}`);
+  out.push(`queries       ${overall.queries}`);
+  out.push(`cutoff        K = ${K} (rows fetched per query: ${opts.limit})`);
+  out.push('');
+
+  out.push('--- Overall ---------------------------------------------------------------');
+  out.push(
+    renderTable(
+      ['metric', 'value'],
+      [
+        ['recall@10', n4(overall.recallAt10)],
+        ['nDCG@10', n4(overall.ndcgAt10)],
+        ['mean latency ms', n1(overall.meanLatencyMs)],
+        ['p95 latency ms', n1(overall.p95LatencyMs)],
+        ['zero-result queries', `${overall.zeroResultQueries} of ${overall.queries}`],
+        ['constraint violations', String(perQuery.reduce((a, e) => a + e.violations.length, 0))],
+      ],
+      ['l', 'r'],
+    ),
+  );
+  out.push('');
+
+  out.push('--- Slices ----------------------------------------------------------------');
+  out.push(
+    renderTable(
+      ['slice', 'n', 'recall@10', 'nDCG@10', 'mean ms', 'p95 ms', 'zero'],
+      slices.map((s) => [
+        s.slice,
+        String(s.queries),
+        s.queries ? n4(s.recallAt10) : '-',
+        s.queries ? n4(s.ndcgAt10) : '-',
+        s.queries ? n1(s.meanLatencyMs) : '-',
+        s.queries ? n1(s.p95LatencyMs) : '-',
+        String(s.zeroResultQueries),
+      ]),
+      ['l', 'r', 'r', 'r', 'r', 'r', 'r'],
+    ),
+  );
+  out.push('');
+
+  out.push('--- Five worst queries by nDCG@10 -----------------------------------------');
+  out.push(
+    renderTable(
+      ['id', 'lang', 'cons', 'nDCG@10', 'recall@10', 'n', 'query'],
+      worst.map((e) => [
+        e.query.id,
+        e.query.lang,
+        e.constrained ? 'yes' : 'no',
+        n4(e.ndcg),
+        n4(e.recall),
+        String(e.resultCount),
+        truncate(e.query.query, 52),
+      ]),
+      ['l', 'l', 'l', 'r', 'r', 'r', 'l'],
+    ),
+  );
+  out.push('');
+
+  for (const e of worst) {
+    const q = e.query;
+    out.push(`  ${q.id}  ${q.query}`);
+    if (q.note) out.push(`    note      ${q.note}`);
+    const constraintText = Object.entries(q.constraints)
+      .map(([k, v]) => `${k}=[${v.join(',')}]`)
+      .join(' ');
+    if (constraintText) out.push(`    filters   ${constraintText}`);
+
+    const got = e.results.slice(0, K).map((r) => {
+      const grade = q.relevant[r.slug] ?? 0;
+      return `${r.rank}.${r.slug}(rel ${grade})`;
+    });
+    out.push(...wrapList(got, 'got'));
+
+    const rankBySlug = new Map(e.results.map((r) => [r.slug, r.rank]));
+    const wanted = Object.entries(q.relevant)
+      .sort((a, b) => b[1] - a[1])
+      .map(([slug, grade]) => {
+        const rank = rankBySlug.get(slug);
+        const where = rank === undefined
+          ? 'MISSING'
+          : rank <= K
+            ? `at ${rank}`
+            : `at ${rank}, below the cutoff`;
+        return `${slug}(rel ${grade}, ${where})`;
+      });
+    out.push(...(wanted.length ? wrapList(wanted, 'wanted', 4) : ['    wanted    (no judgements)']));
+    out.push('');
+  }
+
+  if (unjudged.length > 0) {
+    out.push('--- Golden set warnings ---------------------------------------------------');
+    out.push(`${unjudged.length} query/queries have an empty "relevant" map and score 0 by definition:`);
+    for (const q of unjudged) out.push(`  ${q.id} (line ${q.line}) ${truncate(q.query, 60)}`);
+    out.push('');
+  }
+
+  return out.join('\n');
+}
+
+function printReport(args) {
+  process.stdout.write(`${buildReport(args)}\n`);
+}
+
+/** Same split as buildReport: build the text, then write it. */
+export function buildViolationReport(violations) {
+  const out = [];
+  out.push('');
+  out.push('!!! CONSTRAINT VIOLATIONS !!!==============================================');
+  out.push(`${violations.length} returned row(s) broke a hard filter.`);
+  out.push('');
+  out.push('A constraint is a WHERE clause, not a ranking signal. "Free" is never a');
+  out.push('vibe. This fails the run regardless of the scores above.');
+  out.push('');
+  out.push(
+    renderTable(
+      ['query', 'rank', 'slug', 'constraint', 'wanted', 'tool actually has'],
+      violations.slice(0, 50).map((v) => [
+        v.queryId,
+        String(v.rank),
+        v.slug,
+        v.key,
+        truncate(v.wanted.join(','), 40),
+        truncate(String(v.got), 40),
+      ]),
+      ['l', 'r', 'l', 'l', 'l', 'l'],
+    ),
+  );
+  if (violations.length > 50) out.push(`... and ${violations.length - 50} more.`);
+  out.push('');
+  out.push('===========================================================================');
+  return out.join('\n');
+}
+
+function printViolations(violations) {
+  process.stdout.write(`${buildViolationReport(violations)}\n`);
+}
+
+// Run only when invoked directly, so scoring.test.mjs can import the maths.
+const invokedDirectly =
+  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (invokedDirectly) {
+  try {
+    process.exitCode = await main(process.argv.slice(2));
+  } catch (err) {
+    const redact = makeRedactor(process.env.DATABASE_URL);
+    process.stderr.write(`\nERROR: ${redact(err?.stack ?? err?.message ?? err)}\n`);
+    process.exitCode = EXIT.DATABASE;
+  }
+}
+
+export { main };

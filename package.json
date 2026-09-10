@@ -1,0 +1,19 @@
+{
+  "name": "foundit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Foundit — search evaluation harness. The web app arrives in a later phase.",
+  "type": "module",
+  "engines": {
+    "node": ">=26.0.0"
+  },
+  "scripts": {
+    "eval": "node eval/run.mjs",
+    "eval:json": "node eval/run.mjs --json",
+    "eval:baseline": "node eval/run.mjs --baseline --json",
+    "test": "node eval/scoring.test.mjs && node eval/run.mjs --baseline"
+  },
+  "dependencies": {
+    "pg": "^8.13.0"
+  }
+}

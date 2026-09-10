@@ -3,6 +3,10 @@ node_modules/
 .pnp/
 .pnp.js
 
+# eval harness output — every run writes a new timestamped file, and the
+# numbers that matter are transcribed into eval/baselines.md by hand
+eval/results/
+
 # builds
 .next/
 out/
