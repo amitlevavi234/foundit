@@ -8,6 +8,11 @@ holds the standards, runs the gates, reports to the owner. One phase at a time e
 where this document says two may run together. Nothing moves to the next phase until
 its gate passes and the owner has seen the result.
 
+**How a phase is run.** With `/goal`, one phase per session — the ready-made
+condition for each is in `phase-goals.md`. The session keeps working across turns until
+a separate model judges the condition met. That model reads only the conversation, so
+every condition names the command that settles it and asks for the output to be pasted.
+
 **Written to be read cold.** Each phase brief is self-contained, because the agent
 doing the work has not read this conversation.
 
