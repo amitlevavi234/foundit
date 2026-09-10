@@ -36,7 +36,7 @@ if (!url) {
 // The only one in use is `\set ON_ERROR_STOP on`, whose behaviour we get for
 // free: any error here rejects and stops the run.
 const stripMeta = (sql) =>
-  sql.split('\n').filter((l) => !/^\s*\/.test(l)).join('\n');
+  sql.split(String.fromCharCode(10)).filter((l) => l.trimStart().charCodeAt(0) !== 92).join(String.fromCharCode(10));
 
 const client = new pg.Client({ connectionString: url });
 await client.connect();
