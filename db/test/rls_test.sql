@@ -8,9 +8,38 @@
 -- It is written as tests of BEHAVIOUR — try the thing, see it refused —
 -- rather than tests that a policy exists. A policy that exists and does not
 -- work is exactly the failure mode we are guarding against.
+--
+-- IT LEAVES THE DATABASE EXACTLY AS IT FOUND IT.
+--
+-- Proving that a write is refused requires attempting the write, and some of
+-- these checks have to make a write SUCCEED first — a claim has to exist
+-- before "and now nobody else can claim it" means anything, and the search
+-- log has to have a row in it before "an admin can read it" is a test rather
+-- than a tautology. Left committed, those rows made the suite a one-shot: the
+-- second run died on tool_claims_one_pending_per_person, and the development
+-- catalogue quietly lost dev_person's reviews to a hard delete that was
+-- supposed to be refused but was allowed to try. A test that can only be run
+-- once against a given database is not a test you can put in CI.
+--
+-- So the whole suite runs inside ONE transaction that is ALWAYS rolled back.
+-- Two things make that safe rather than a way of hiding failures:
+--
+--   * Every check still raises. ON_ERROR_STOP means psql abandons the file at
+--     the first error and exits non-zero, and the abandoned transaction is
+--     rolled back by the server on disconnect. A failure is as loud as it
+--     ever was; the rollback swallows the rows, not the exception.
+--
+--   * The rollback is the last statement, after the success line. Reaching
+--     it means every check passed.
+--
+-- Every check below therefore sees the writes made by the checks above it,
+-- and nothing outside this transaction ever does. Run it as many times as you
+-- like, in any order relative to anything else.
 -- ===========================================================================
 
 \set ON_ERROR_STOP on
+
+begin;
 
 -- Helpers ------------------------------------------------------------------
 create or replace function pg_temp.be(p_user text)
@@ -274,3 +303,9 @@ $$;
 reset role;
 
 select 'All row-level security checks passed.' as result;
+
+-- Nothing this file did survives it. Reached only when every check above
+-- passed; a failure gets here by another route — psql stops on the error and
+-- the server rolls the transaction back when the connection closes — and
+-- either way the database is as it was.
+rollback;

@@ -210,10 +210,22 @@ check('p95 is order-independent', percentile([9, 1, 5, 3, 7], 95), 9);
 // ---------------------------------------------------------------------------
 process.stdout.write('\nconstraint checking — the hard failure\n');
 // ---------------------------------------------------------------------------
+//
+// Every fact row carries `status`, because "is this row even published?" is
+// checked on every returned tool independently of the query's constraints.
 const facts = new Map([
-  ['splitwise', { pricing: 'freemium', platforms: ['ios', 'android', 'web'], flags: ['no_ads'], languages: ['en', 'es'] }],
-  ['expensify', { pricing: 'paid', platforms: ['ios', 'web'], flags: [], languages: ['en'] }],
-  ['deskonly', { pricing: 'free', platforms: ['windows'], flags: [], languages: [] }],
+  ['splitwise', { status: 'published', pricing: 'freemium', platforms: ['ios', 'android', 'web'], flags: ['no_ads'], languages: ['en', 'es'] }],
+  ['expensify', { status: 'published', pricing: 'paid', platforms: ['ios', 'web'], flags: [], languages: ['en'] }],
+  ['deskonly', { status: 'published', pricing: 'free', platforms: ['windows'], flags: [], languages: [] }],
+  // Declares exactly one of the two flags a "offline and no ads" query wants.
+  // This is the row that the old any-of flags test could not see.
+  ['halfflags', { status: 'published', pricing: 'free', platforms: ['web'], flags: ['works_offline'], languages: ['en'] }],
+  ['bothflags', { status: 'published', pricing: 'free', platforms: ['web'], flags: ['works_offline', 'no_account_needed', 'no_ads'], languages: ['en'] }],
+  // Stores its language code the way a careless import would.
+  ['shoutylang', { status: 'published', pricing: 'free', platforms: ['web'], flags: [], languages: ['EN'] }],
+  // Never published. Must never appear in a result, constraints or not.
+  ['draftling', { status: 'draft', pricing: 'free', platforms: ['web'], flags: [], languages: ['en'] }],
+  ['deprecatling', { status: 'deprecated', pricing: 'free', platforms: ['web'], flags: [], languages: ['en'] }],
 ]);
 const row = (rank, slug) => ({ rank, slug, pricing: facts.get(slug).pricing });
 
@@ -285,6 +297,195 @@ check(
   'a slug that is not in public.tools is a violation',
   checkConstraints({ id: 'q6' }, [{ rank: 1, slug: 'ghost', pricing: 'free' }], facts).length,
   1,
+);
+
+// ---------------------------------------------------------------------------
+process.stdout.write('\n  ...one case per constraint kind, matched to the SQL it verifies\n');
+// ---------------------------------------------------------------------------
+//
+// The harness is a second opinion on search_tools(). When the two drift, "0
+// constraint violations" certifies less than it looks like and nothing says
+// so. One assertion per key, written against the SQL predicate it mirrors.
+
+// --- pricing: ANY-OF, membership.  t.pricing = any (v_pricing) -------------
+check(
+  'pricing: a matching value passes',
+  checkConstraints({ id: 'p1', constraints: { pricing: ['free', 'freemium'] } }, [row(1, 'splitwise')], facts).length,
+  0,
+);
+check(
+  'pricing: any-of means one of the listed values is enough',
+  checkConstraints({ id: 'p2', constraints: { pricing: ['paid', 'free'] } }, [row(1, 'deskonly')], facts).length,
+  0, // deskonly is free, which is in the list
+);
+check(
+  'pricing: a value outside the list is a violation',
+  checkConstraints({ id: 'p3', constraints: { pricing: ['free'] } }, [row(1, 'expensify')], facts).length,
+  1,
+);
+
+// --- platforms: ANY-OF, overlap.  t.platforms && v_platforms ---------------
+check(
+  'platforms: any-of, one shared platform is enough',
+  checkConstraints({ id: 'pl1', constraints: { platforms: ['android', 'linux', 'web'] } }, [row(1, 'expensify')], facts).length,
+  0,
+);
+check(
+  'platforms: NOT all-of — a query naming three platforms does not require all three',
+  checkConstraints({ id: 'pl2', constraints: { platforms: ['ios', 'android', 'web'] } }, [row(1, 'expensify')], facts).length,
+  0, // expensify has ios+web and not android; overlap is satisfied
+);
+check(
+  'platforms: no shared platform is a violation',
+  checkConstraints({ id: 'pl3', constraints: { platforms: ['ios', 'android'] } }, [row(1, 'deskonly')], facts).length,
+  1,
+);
+
+// --- flags: ALL-OF, containment.  t.flags @> v_flags -----------------------
+//
+// THE case the self-test used to miss entirely, because it never passed flags
+// to checkConstraints at all. "offline and no ads" states two requirements.
+check(
+  'flags: all-of — declaring only one of two required flags IS a violation',
+  checkConstraints(
+    { id: 'f1', constraints: { flags: ['works_offline', 'no_account_needed'] } },
+    [row(1, 'halfflags')],
+    facts,
+  ).length,
+  1,
+);
+check(
+  'flags: all-of — declaring both required flags passes',
+  checkConstraints(
+    { id: 'f2', constraints: { flags: ['works_offline', 'no_account_needed'] } },
+    [row(1, 'bothflags')],
+    facts,
+  ).length,
+  0,
+);
+check(
+  'flags: a superset of the requirements still passes (@> is containment, not equality)',
+  checkConstraints({ id: 'f3', constraints: { flags: ['no_ads'] } }, [row(1, 'bothflags')], facts).length,
+  0,
+);
+check(
+  'flags: a single required flag the tool lacks is a violation',
+  checkConstraints({ id: 'f4', constraints: { flags: ['no_ads'] } }, [row(1, 'halfflags')], facts).length,
+  1,
+);
+check(
+  'flags: a tool declaring no flags cannot satisfy any requirement',
+  checkConstraints({ id: 'f5', constraints: { flags: ['no_ads'] } }, [row(1, 'deskonly')], facts).length,
+  1,
+);
+check(
+  'flags: the violation names the flags that are missing, not just the key',
+  /no_account_needed/.test(
+    checkConstraints(
+      { id: 'f6', constraints: { flags: ['works_offline', 'no_account_needed'] } },
+      [row(1, 'halfflags')],
+      facts,
+    )[0].detail,
+  ),
+  true,
+);
+
+// --- languages: ANY-OF, overlap, wanted side lower-cased -------------------
+//
+// search_tools does `lower(btrim(x))` to every element of p_languages before
+// comparing. A golden entry written ["EN"] is therefore a match, and used to
+// produce a screenful of false violations here.
+check(
+  'languages: a mixed-case request matches a lower-case catalogue (the SQL lower-cases p_languages)',
+  checkConstraints({ id: 'l1', constraints: { languages: ['EN'] } }, [row(1, 'expensify')], facts).length,
+  0,
+);
+check(
+  'languages: mixed case, mixed list, still matches',
+  checkConstraints({ id: 'l2', constraints: { languages: ['De', 'ES'] } }, [row(1, 'splitwise')], facts).length,
+  0,
+);
+check(
+  'languages: surrounding whitespace is trimmed, as btrim() does in the SQL',
+  checkConstraints({ id: 'l3', constraints: { languages: [' en '] } }, [row(1, 'expensify')], facts).length,
+  0,
+);
+check(
+  'languages: a language the tool does not declare is still a violation',
+  checkConstraints({ id: 'l4', constraints: { languages: ['DE'] } }, [row(1, 'expensify')], facts).length,
+  1,
+);
+check(
+  'languages: only the WANTED side is folded — a catalogue row storing "EN" is reported, not excused',
+  checkConstraints({ id: 'l5', constraints: { languages: ['en'] } }, [row(1, 'shoutylang')], facts).length,
+  1,
+);
+
+// --- status: not a golden-set constraint, checked on every row -------------
+check(
+  'status: a draft tool in the results is a violation even with no constraints',
+  checkConstraints({ id: 's1' }, [row(1, 'draftling')], facts).length,
+  1,
+);
+check(
+  'status: a deprecated tool is a violation too — published is the only acceptable status',
+  checkConstraints({ id: 's2' }, [row(1, 'deprecatling')], facts).length,
+  1,
+);
+check(
+  'status: the violation is reported under the "status" key',
+  checkConstraints({ id: 's3' }, [row(1, 'draftling')], facts)[0].key,
+  'status',
+);
+check(
+  'status: a published tool raises nothing',
+  checkConstraints({ id: 's4' }, [row(1, 'splitwise')], facts).length,
+  0,
+);
+check(
+  'status: an unpublished row that ALSO breaks a constraint reports both',
+  checkConstraints(
+    { id: 's5', constraints: { pricing: ['paid'] } },
+    [row(1, 'draftling')],
+    facts,
+  ).length,
+  2,
+);
+
+// --- all four keys at once, on one row -------------------------------------
+check(
+  'every constraint kind together: a fully compliant row is clean',
+  checkConstraints(
+    {
+      id: 'x1',
+      constraints: {
+        pricing: ['free'],
+        platforms: ['web', 'ios'],
+        flags: ['works_offline', 'no_ads'],
+        languages: ['EN'],
+      },
+    },
+    [row(1, 'bothflags')],
+    facts,
+  ).length,
+  0,
+);
+check(
+  'every constraint kind together: one row can break three of them at once',
+  checkConstraints(
+    {
+      id: 'x2',
+      constraints: {
+        pricing: ['free'],          // expensify is paid           -> violation
+        platforms: ['ios'],         // expensify has ios           -> ok
+        flags: ['no_ads'],          // expensify declares none     -> violation
+        languages: ['de'],          // expensify declares en only  -> violation
+      },
+    },
+    [row(1, 'expensify')],
+    facts,
+  ).length,
+  3,
 );
 
 check('isConstrained: absent', isConstrained({ id: 'a' }), false);

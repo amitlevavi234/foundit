@@ -53,7 +53,10 @@ begin;
 --   p_flags      required flags. All-of: someone who says "offline and no
 --                ads" means both, so a tool with only one of them is out.
 --   p_languages  interface languages the person can use. Any-of, compared
---                case-insensitively against tools.languages.
+--                case-insensitively against tools.languages. null or {} means
+--                no constraint; an array whose entries are all null or blank
+--                is a constraint nothing can satisfy and returns no rows,
+--                same as array[null] does for every other constraint.
 --   p_limit      clamped to 1..50 inside the function. A caller cannot ask
 --                for the whole table.
 --
@@ -185,12 +188,36 @@ begin
   v_flags     := nullif(p_flags,     '{}'::tool_flag[]);
 
   -- Language codes are lower-cased so a caller sending 'EN' still matches a
-  -- catalogue storing 'en'. Blank entries are dropped rather than being
-  -- allowed to match nothing.
-  select array_agg(lower(btrim(x)))
-    into v_langs
-    from unnest(coalesce(p_languages, '{}'::text[])) as x
-   where btrim(x) <> '';
+  -- catalogue storing 'en', and blank or null entries are dropped.
+  --
+  -- The distinction this branch exists to make: "nothing was asked for" is not
+  -- the same thing as "what was asked for normalised to nothing", and only the
+  -- first of the two means "no constraint".
+  --
+  --   p_languages => null            nothing asked   -> v_langs null  -> no filter
+  --   p_languages => '{}'            nothing asked   -> v_langs null  -> no filter
+  --   p_languages => array[null]     something asked, nothing survived
+  --   p_languages => array['']       ditto
+  --   p_languages => array['EN','']  something asked, 'en' survived
+  --
+  -- The middle two must return NO ROWS, exactly as p_pricing => array[null]
+  -- and p_flags => array[null] already do: an array containing one unusable
+  -- element is not an empty array, and `= any`/`@>`/`&&` all reject it rather
+  -- than ignoring it. Aggregating straight into v_langs failed open instead,
+  -- because array_agg over zero surviving rows returns NULL and NULL is this
+  -- function's word for "unconstrained" — so a caller whose constraint
+  -- extractor produced a blank language silently got the whole catalogue back.
+  -- Every other constraint fails closed; this one now does too. An empty
+  -- array here is a constraint nothing can satisfy: `t.languages && '{}'` is
+  -- false for every row, including rows whose own languages column is empty.
+  if p_languages is null or cardinality(p_languages) = 0 then
+    v_langs := null;
+  else
+    select coalesce(array_agg(lower(btrim(x))), '{}'::text[])
+      into v_langs
+      from unnest(p_languages) as x
+     where btrim(x) <> '';
+  end if;
 
   -- ----- the empty query: editorial browse, constraints still enforced ----
   if v_q = '' then
@@ -479,9 +506,14 @@ comment on function public.search_tools(text, pricing_model[], platform[], tool_
 --     application is a correlation handle: it lets a caller stash "this
 --     person's search was event 91,204" somewhere else and rebuild exactly
 --     the join this table exists to prevent.
---   * query_hash is computed HERE, from a normalization defined here, so
---     every caller groups the same way and no caller can pass a hash of
---     something other than the query.
+--   * query_hash is computed here, from a normalization defined here, so
+--     every caller groups the same way. This function is NOT what makes that
+--     guarantee hold: foundit_app can insert into search_events directly, so
+--     for a while a caller could pass any string it liked in query_hash -- an
+--     account id, a session id -- and nothing stopped it. 0003_hardening.sql
+--     closed that with a BEFORE INSERT trigger that derives the hash from the
+--     query text whatever the caller passes. The guarantee lives there, in the
+--     table, because this function was never the only way in.
 --
 -- It is not security definer either. The search_events_insert policy from
 -- 0001 already permits the insert (see the comment on that policy below), so

@@ -17,6 +17,7 @@
 // Usage:
 //   DATABASE_URL=... node eval/run.mjs [--json] [--baseline] [--limit=N]
 //                                      [--timeout=MS] [--golden=PATH]
+//                                      [--baselines=PATH]
 //
 // Exit codes (see eval/README.md):
 //   0  success
@@ -178,19 +179,41 @@ export function percentile(values, p) {
 /**
  * Check one query's results against its hard constraints.
  *
- * Semantics, and they matter because a false alarm here fails a build:
- * a constraint array is ANY-OF. `pricing: ["free","freemium"]` means the tool's
- * pricing must be one of those two. `platforms: ["ios","android"]` means the
- * tool must run on at least one of them — that is what "on my phone" means,
- * and it matches the array-overlap (&&) a SQL WHERE clause would use.
+ * This function is a second opinion on db/migrations/0002_search.sql, so its
+ * semantics have to be the SAME semantics, key for key. Where the two ever
+ * disagreed, "0 constraint violations" certified less than it looked like.
+ * The mapping, and the line of SQL each one mirrors:
  *
- * `pricing` is scalar on the tool and is tested with membership. `platforms`,
- * `flags` and `languages` are arrays on the tool and are tested with overlap.
+ *   pricing    ANY-OF, membership.  `t.pricing = any (v_pricing)`
+ *   platforms  ANY-OF, overlap.     `t.platforms && v_platforms`
+ *   flags      ALL-OF, containment. `t.flags @> v_flags`
+ *   languages  ANY-OF, overlap, and the wanted side is lower-cased first,
+ *              exactly as the SQL lower-cases p_languages before comparing:
+ *              `t.languages && v_langs`, v_langs = lower(btrim(...)).
+ *
+ * flags being ALL-OF is the whole reason a flag is not a platform: "offline
+ * and no ads" states two requirements and a tool with only one of them is
+ * out. An any-of test here would agree with the SQL on every catalogue that
+ * happens not to breach it, and go quiet on the one that does.
+ *
+ * The languages comparison lower-cases only the WANTED side, because that is
+ * all the SQL lower-cases. A catalogue row storing "EN" would be excluded by
+ * search_tools and, if it somehow came back anyway, is reported here — which
+ * is the behaviour we want from a checker, not a courtesy fold-case that
+ * hides it.
+ *
  * A tool with an empty array cannot satisfy an overlap constraint, and that is
  * correct: if a query asked for Spanish and the tool declares no languages,
- * the catalogue does not support the claim that it fits.
+ * the catalogue does not support the claim that it fits. An empty `flags` on
+ * the tool likewise fails any non-empty all-of requirement.
  *
- * @param facts  {pricing, platforms, flags, languages} read from public.tools
+ * Independently of the query's own constraints, every returned tool must be
+ * published. search_tools carries `t.status = 'published'` as an explicit
+ * predicate rather than leaning on row-level security, precisely because RLS
+ * lets an owner see their own drafts; if that predicate were ever dropped the
+ * eval would have reported clean without this check.
+ *
+ * @param facts  {status, pricing, platforms, flags, languages} from public.tools
  * @returns array of violation objects, empty when clean
  */
 export function checkConstraints(query, results, factsBySlug) {
@@ -210,6 +233,21 @@ export function checkConstraints(query, results, factsBySlug) {
         detail: 'search_tools returned a slug that does not exist in the tools table',
       });
       continue;
+    }
+
+    // Unpublished rows must never reach a search result, whatever the query
+    // asked for. This is not one of the golden set's constraints; it is the
+    // one predicate search_tools applies on every single call.
+    if (facts.status !== 'published') {
+      violations.push({
+        queryId: query.id,
+        slug: row.slug,
+        rank: row.rank,
+        key: 'status',
+        wanted: ['published'],
+        got: String(facts.status),
+        detail: 'search_tools returned a tool that is not published',
+      });
     }
 
     // Cross-check: the function must not report a pricing different from the
@@ -242,9 +280,28 @@ export function checkConstraints(query, results, factsBySlug) {
             detail: 'pricing is not one of the requested values',
           });
         }
+      } else if (key === 'flags') {
+        // ALL-OF. Mirrors `t.flags @> v_flags`.
+        const have = Array.isArray(facts.flags) ? facts.flags : [];
+        const missing = wanted.filter((v) => !have.includes(v));
+        if (missing.length > 0) {
+          violations.push({
+            queryId: query.id,
+            slug: row.slug,
+            rank: row.rank,
+            key,
+            wanted,
+            got: have.length ? have.join(',') : '(none declared)',
+            detail: `tool.flags is missing every requested flag it must have: ${missing.join(',')}`,
+          });
+        }
       } else {
+        // ANY-OF. Mirrors `t.platforms && v_platforms` and
+        // `t.languages && v_langs`; for languages the wanted side is
+        // lower-cased first, because that is what the SQL does to p_languages.
         const have = Array.isArray(facts[key]) ? facts[key] : [];
-        const overlaps = have.some((v) => wanted.includes(v));
+        const want = key === 'languages' ? wanted.map((v) => String(v).trim().toLowerCase()) : wanted;
+        const overlaps = have.some((v) => want.includes(v));
         if (!overlaps) {
           violations.push({
             queryId: query.id,
@@ -550,6 +607,8 @@ function parseArgs(argv) {
     limit: DEFAULT_FETCH_LIMIT,
     timeout: DEFAULT_TIMEOUT_MS,
     golden: GOLDEN_PATH,
+    baselines: BASELINES_PATH,
+    baselinesExplicit: false,
     help: false,
   };
   for (const arg of argv) {
@@ -559,6 +618,13 @@ function parseArgs(argv) {
     else if (arg.startsWith('--limit=')) opts.limit = Number.parseInt(arg.slice(8), 10);
     else if (arg.startsWith('--timeout=')) opts.timeout = Number.parseInt(arg.slice(10), 10);
     else if (arg.startsWith('--golden=')) opts.golden = path.resolve(process.cwd(), arg.slice(9));
+    // The regression gate is the one code path that could not be exercised
+    // without editing a tracked file. CI points this at a fixture and proves
+    // the gate fires; nothing else about the run changes.
+    else if (arg.startsWith('--baselines=')) {
+      opts.baselines = path.resolve(process.cwd(), arg.slice(12));
+      opts.baselinesExplicit = true;
+    }
     else return { error: `unknown argument: ${arg}` , opts };
   }
   if (!Number.isInteger(opts.limit) || opts.limit < K) {
@@ -580,6 +646,8 @@ const USAGE = `Foundit search evaluation harness
   --limit=N       rows to request from search_tools (default ${DEFAULT_FETCH_LIMIT}; metrics are always @${K})
   --timeout=MS    per-query statement timeout (default ${DEFAULT_TIMEOUT_MS})
   --golden=PATH   golden set to read (default eval/golden.jsonl)
+  --baselines=PATH  baselines table to compare against with --baseline
+                  (default eval/baselines.md)
 
 Exit: 0 ok, 1 usage, 2 constraint violation, 3 database, 4 regression.`;
 
@@ -595,7 +663,7 @@ const SEARCH_SQL = `
     )`;
 
 const FACTS_SQL = `
-  select slug::text as slug, pricing::text as pricing,
+  select slug::text as slug, status::text as status, pricing::text as pricing,
          platforms::text[] as platforms, flags::text[] as flags, languages
     from public.tools
    where slug = any($1::citext[])`;
@@ -769,6 +837,7 @@ async function main(argv) {
         const { rows } = await client.query(FACTS_SQL, [returnedSlugs]);
         for (const r of rows) {
           factsBySlug.set(String(r.slug), {
+            status: r.status,
             pricing: r.pricing,
             platforms: r.platforms ?? [],
             flags: r.flags ?? [],
@@ -821,13 +890,21 @@ async function main(argv) {
   // --- Regression -----------------------------------------------------------
   let regression = null;
   if (opts.baseline) {
-    if (!existsSync(BASELINES_PATH)) {
-      process.stdout.write(`\nBASELINE: ${BASELINES_PATH} not found — nothing to compare against.\n`);
+    if (!existsSync(opts.baselines)) {
+      // A missing DEFAULT baselines file is the ordinary state before the
+      // first number is recorded, and passing is right. A missing file that
+      // someone NAMED is a typo, and a typo that quietly turns the regression
+      // gate off is worse than no gate at all.
+      if (opts.baselinesExplicit) {
+        process.stderr.write(`\nERROR: --baselines=${opts.baselines} does not exist.\n`);
+        return EXIT.USAGE;
+      }
+      process.stdout.write(`\nBASELINE: ${opts.baselines} not found — nothing to compare against.\n`);
     } else {
-      const rows = parseBaselines(await readFile(BASELINES_PATH, 'utf8'));
+      const rows = parseBaselines(await readFile(opts.baselines, 'utf8'));
       if (rows.length === 0) {
         process.stdout.write(
-          '\nBASELINE: no baseline recorded yet in eval/baselines.md.\n' +
+          `\nBASELINE: no baseline recorded yet in ${path.relative(ROOT, opts.baselines).split(path.sep).join('/')}.\n` +
             '          Record this run as the Phase 2 row and future runs will be checked against it.\n',
         );
       } else {
@@ -875,6 +952,9 @@ async function main(argv) {
       fetchLimit: opts.limit,
       timeoutMs: opts.timeout,
       goldenPath: path.relative(ROOT, opts.golden).split(path.sep).join('/'),
+      baselinesPath: opts.baseline
+        ? path.relative(ROOT, opts.baselines).split(path.sep).join('/')
+        : null,
       overall,
       slices,
       constraintViolations: allViolations,

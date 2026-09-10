@@ -14,4 +14,4 @@ $PSQL -tAc "select 'likes counted right='||bool_and(t.like_count=(select count(*
 $PSQL -tAc "select 'ratings counted right='||bool_and(t.rating_count=(select count(*) from reviews r where r.tool_id=t.id and r.deleted_at is null))::text from tools t" </dev/null
 
 echo "=== 3. permission tests ==="
-if $PSQL < /tmp/fdt-db/rls_test.sql > /tmp/r.log 2>&1; then tail -2 /tmp/r.log; else echo "FAILED"; grep -iE "RLS TEST FAILED|ERROR" /tmp/r.log | head -8; exit 1; fi
+if $PSQL < /tmp/fdt-db/rls_test.sql > /tmp/r.log 2>&1; then grep -F "All row-level security checks passed." /tmp/r.log || tail -6 /tmp/r.log; else echo "FAILED"; grep -iE "RLS TEST FAILED|ERROR" /tmp/r.log | head -8; exit 1; fi

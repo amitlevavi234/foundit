@@ -40,8 +40,14 @@ fi
 
 echo
 echo "=== 3. permission tests ==="
-if $PSQL < /tmp/fdt-db/rls_test.sql > /tmp/fdt-rls.log 2>&1; then
-  tail -3 /tmp/fdt-rls.log
-else
-  echo "FAILED:"; grep -E "FAILED|ERROR" /tmp/fdt-rls.log | head -10; exit 1
-fi
+# Every suite in the directory, not one named file. The previous version named
+# rls_test.sql, so when a second suite was written it ran nowhere and nobody
+# noticed. A test that is not wired in is not a test.
+for SUITE in /tmp/fdt-db/*.sql; do
+  echo "--- $(basename "$SUITE") ---"
+  if $PSQL < "$SUITE" > /tmp/fdt-test.log 2>&1; then
+    grep -F "checks passed." /tmp/fdt-test.log || tail -6 /tmp/fdt-test.log
+  else
+    echo "FAILED:"; grep -E "FAILED|ERROR" /tmp/fdt-test.log | head -10; exit 1
+  fi
+done

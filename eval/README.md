@@ -64,6 +64,15 @@ loaded catalogue. Without the function it exits 3 and says so.
 | `--limit=N` | 20 | Rows requested per query. Metrics are always @10 |
 | `--timeout=MS` | 5000 | Per-query statement timeout |
 | `--golden=PATH` | `eval/golden.jsonl` | Which golden set to read |
+| `--baselines=PATH` | `eval/baselines.md` | Which baselines table `--baseline` compares against |
+
+`--baselines=` exists so the regression gate can be exercised against a
+fixture. Without it the only way to see the gate fire was to edit a tracked
+file, which meant the one check that fails builds was itself never tested.
+A path given here that does not exist is a usage error (exit 1), not a pass:
+a mistyped fixture path that quietly switches the gate off would be worse than
+having no gate. A missing *default* `eval/baselines.md` still passes with a
+notice, because that is the ordinary state before the first number is recorded.
 
 `eval/scoring.test.mjs` needs no database and no network. Run it any time:
 `node eval/scoring.test.mjs`.
@@ -187,18 +196,39 @@ It is checked against the **table**, not against what `search_tools` reported,
 so a function that filters correctly but reports a wrong `pricing` column is
 also caught — that would be a lie told directly to the user's screen.
 
-**Semantics**, which matter because a false alarm here fails a build:
+**Semantics.** The harness is a second opinion on `search_tools`, so its rules
+have to be *the same rules*, key for key — a divergence does not announce
+itself, it just makes "0 constraint violations" certify less than it looks
+like. Each row below names the SQL predicate it mirrors:
 
-- A constraint array is **any-of**. `pricing: ["free","freemium","open_source"]`
-  means the tool's pricing must be one of those three.
-- `pricing` is a scalar on the tool, so it is tested with membership.
-- `platforms`, `flags` and `languages` are arrays on the tool, so they are tested
-  with **overlap** — the same `&&` a SQL `WHERE` clause would use.
-  `platforms: ["ios","android"]` means the tool must run on at least one of them,
-  which is what "on my phone" means.
-- A tool with an **empty** array cannot satisfy an overlap constraint. That is
-  deliberate: if a query asked for Spanish and the tool declares no languages,
-  the catalogue does not support the claim that it fits.
+| Key | Rule | SQL in `0002_search.sql` |
+| --- | --- | --- |
+| `pricing` | **any-of**, membership | `t.pricing = any (v_pricing)` |
+| `platforms` | **any-of**, overlap | `t.platforms && v_platforms` |
+| `flags` | **all-of**, containment | `t.flags @> v_flags` |
+| `languages` | **any-of**, overlap, wanted side lower-cased and trimmed first | `t.languages && v_langs` |
+
+- `pricing: ["free","freemium","open_source"]` means the tool's pricing must be
+  one of those three. `platforms: ["ios","android"]` means the tool must run on
+  at least one of them, which is what "on my phone" means.
+- `flags` is the odd one out, and deliberately: `["works_offline","no_ads"]`
+  means *offline **and** no ads*. A tool declaring only one of them is out.
+  A flag is a requirement someone stated, not an alternative they would accept.
+- `languages: ["EN"]` matches a catalogue storing `en`, because `search_tools`
+  lower-cases `p_languages` before comparing. Only the **wanted** side is
+  folded — a catalogue row that stores `EN` is reported, not excused.
+- A tool with an **empty** array cannot satisfy an overlap constraint, or any
+  non-empty all-of requirement. That is deliberate: if a query asked for Spanish
+  and the tool declares no languages, the catalogue does not support the claim
+  that it fits.
+- Independently of the query's constraints, every returned tool must have
+  `status = 'published'`. `search_tools` carries that as an explicit predicate
+  rather than leaning on row-level security — RLS lets an owner see their own
+  drafts — so the harness asserts it separately.
+
+Every one of these has a case in `eval/scoring.test.mjs`, including the all-of
+flags case and the mixed-case language case, so a drift back to the wrong
+semantics fails the self-test rather than passing quietly.
 
 Violations are checked across every row returned, not just the top ten. A hard
 filter that leaks at rank 17 is exactly as broken as one that leaks at rank 1.

@@ -6,6 +6,57 @@
 # The data lives in ./db/.data, a plain folder on disk rather than a Docker
 # named volume. That is deliberate: `docker compose down -v` deletes named
 # volumes permanently, and it is a command people run casually.
+#
+# Two roles live in here, and the difference between them is the point:
+#
+#   foundit_owner  owns the schema and runs migrations. Superuser in this
+#                  container, which means BYPASSRLS, which means every
+#                  row-level security policy in the database is switched off
+#                  for it. Nothing but a migration should ever connect as it.
+#   foundit_app    what the application, the eval harness and the tests
+#                  connect as. Owns nothing, no superuser, no BYPASSRLS. It
+#                  gets its grants from db/migrations/0001_init.sql and
+#                  0002_search.sql and nothing else — this file only gives it
+#                  a password so it can log in at all.
+#
+# Both passwords are throwaway literals on purpose, and that is the only kind
+# of password that ever belongs in a tracked file: this database holds
+# invented seed data, listens on 127.0.0.1 only, and can be deleted at any
+# time. The server's credentials are generated on the server and live in a
+# root-only file there. See docs/development.md.
+configs:
+  dev_roles_sql:
+    # Runs once, on an empty ./db/.data, before any migration.
+    #
+    # 0001_init.sql creates foundit_app if it does not already exist, and it
+    # creates it with no password, so on its own there is no way to connect
+    # as the application role. Development then measures everything as the
+    # owner — a BYPASSRLS superuser — which is how a baseline came to be
+    # recorded at roughly a third of the latency the application will see.
+    # Creating the role here, with a password, means 0001 finds it and leaves
+    # it alone.
+    #
+    # No grants here. What foundit_app may do is decided by the migrations,
+    # which are the same files that run on the server; a grant that existed
+    # only in development would be a difference between the two environments
+    # that nothing tests.
+    #
+    # If your ./db/.data already exists, this file will not run — Postgres
+    # only executes /docker-entrypoint-initdb.d on first initialisation. Set
+    # the password on the running container instead:
+    #
+    #   docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
+    #     -c "alter role foundit_app login password 'local_development_only_app'"
+    content: |
+      do $$
+      begin
+        if exists (select 1 from pg_roles where rolname = 'foundit_app') then
+          alter role foundit_app login noinherit password 'local_development_only_app';
+        else
+          create role foundit_app login noinherit password 'local_development_only_app';
+        end if;
+      end
+      $$;
 services:
   db:
     image: pgvector/pgvector:pg17
@@ -21,6 +72,9 @@ services:
       - "127.0.0.1:5433:5432"
     volumes:
       - ./.data:/var/lib/postgresql/data
+    configs:
+      - source: dev_roles_sql
+        target: /docker-entrypoint-initdb.d/10-dev-roles.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U foundit_owner -d foundit"]
       interval: 5s
