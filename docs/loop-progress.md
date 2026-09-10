@@ -85,6 +85,44 @@ Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
 - **The ~200 remaining `languages` arrays are unverified** against vendor locale
   lists, and the constrained slice partly measures those guesses.
 
+## Phase 2-UI — the interface shell — **built, reviewed once, fixed, second review running**
+
+| Deliverable | Status | Evidence |
+| --- | --- | --- |
+| Next.js 15 scaffold, tokens as CSS, shared components | done | `npm run build`, `lint`, `tsc` all clean on a fresh `.next` |
+| Homepage, results (+loading/empty/clarifier), tool page, browse, top tools | done | all render real rows; one statement per screen measured in the query log (`/results` is two: search + log, as the migration licenses) |
+| Searches logged through the app | done | closes the Phase 2 partial. Real page visit → real `search_events` row, no user column |
+| Outbound link on every tool surface | done | `rel="noopener noreferrer"` + domain on every external anchor on every route; zero exceptions found |
+| No Apple sign-in; no blur or rotation on text; no server-side fetch | done | grep-clean; `images.remotePatterns: []`; the illustration's rotation redrawn as vertical travel |
+| Tests | done | 68 unit + 119 scoring assertions; `tests/markup.test.mjs` forbids `fetch(`, `target=` outside one helper, `DATABASE_URL_OWNER` in app code, and `fit={` on any card |
+| CI | done | `.github/workflows/ci.yml`; every step extracted and run locally first |
+| Production build serves CSS | done | postbuild copies `.next/static` into standalone, matching `research/10` §6.6 |
+| **Adversarial review, first pass** | done — 9 confirmed findings, all fixed in `9be71f9` | see below |
+| **Adversarial review, second pass** | **running** | the gate |
+| Owner compares screens against artboards | waiting on Amit | |
+
+### First review, and where each finding landed
+
+| Finding | Outcome |
+| --- | --- |
+| Reader turned ordinary English into hard filters and deleted the subject ("a website builder" → web-only, ranked on "builder") | Fixed. `export`, `website`, `encryption`, `anonymous` rules deleted; `windows`/`mac`/`pc` need a preposition |
+| **Dropping "open source" dropped "free" too — a paid tool could appear for a query that said free** | Fixed. Both kept and drawn; narrowing only in the filter |
+| "Strong match" / "the 12 that fit best" asserted without a relevance floor | Fixed by wording, not by filtering in JS. Bands name where the match happened |
+| `had_good_match` = "page not empty" — would blank the dashboard's most valuable panel | Fixed. Not passed; column defaults false until Phase 5 defines "good" |
+| Standalone build served no CSS | Fixed. postbuild copy |
+| Reduced motion zeroed duration but not delay — content invisible for 1.09 s | Fixed. Canvas `RM` block still has the omission — noted in `motion.css` |
+| `/components` drew a fit percentage | Fixed. Captioned as a specimen |
+| `/top` claimed every row links out | Fixed. Sentence made true |
+| Clarifier fired on 5 of 6 short queries | Fixed. 1 of 6; needs top category < 50% and options ≥ 2 |
+
+### Found along the way, unasked
+
+- **Hebrew and Russian "free" never matched** — `` is ASCII-only. Unicode boundaries now.
+- **The eval could not see the shipped path.** `--read-query` added: authored 0.4878, derived **0.4785**. The reader costs 0.009 nDCG in eight queries. That is Phase 4's number to beat.
+- The deploy pipeline in `research/10` does not exist yet — no Dockerfile, no Caddyfile, no deploy workflow. Phase 9.
+- `research/10` §6.6's Dockerfile would fail as written (`COPY public/` when there is no `public/`).
+- The standalone server binds `0.0.0.0`; safe behind Docker's 127.0.0.1 publishing, but set `HOSTNAME=127.0.0.1` on the box anyway.
+
 ## Tried and rejected
 
 - **Docker on the owner's laptop.** Docker Desktop crashes on an orphaned
