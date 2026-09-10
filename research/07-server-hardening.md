@@ -4,7 +4,7 @@
 **Audience:** the owner — not a developer, has never administered a server, working with an AI assistant
 **Target setup:** one Hetzner Cloud VPS (CX23 / CX33), Debian 13 or Ubuntu 24.04 LTS, running Next.js + Postgres/pgvector + a reverse proxy in Docker Compose, fronted by Cloudflare
 
-Every claim is sourced inline to primary documentation. Anything I could not verify against a primary source is in [What I could not confirm](#what-i-could-not-confirm) rather than asserted.
+Every claim is sourced inline to primary documentation. Anything I could not verify against a primary source is in [What I could not confirm](#12-what-i-could-not-confirm) rather than asserted.
 
 ---
 
@@ -18,7 +18,7 @@ Read these before anything else. The rest of the document is the implementation.
 | 2 | **Docker publishes to `0.0.0.0` by default.** Docker's own docs call this "insecure by default. Meaning, when you publish a container's ports it becomes available not only to the Docker host, but to the outside world as well." ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)) | `ports: - "5432:5432"` in a compose file is a public database. |
 | 3 | **A Cloudflare-fronted site with an unrestricted origin IP is not protected.** Cloudflare: "block all traffic that does not come from Cloudflare IP addresses." ([Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/)) | The WAF, rate limiting and DDoS protection are all optional from the attacker's point of view until the origin refuses non-Cloudflare traffic. |
 | 4 | **Hetzner Cloud Firewalls block all inbound by default and are free.** "all inbound traffic will automatically be blocked" without rules; "all outbound traffic will automatically be permitted." ([Hetzner: Cloud Firewalls](https://docs.hetzner.com/cloud/firewalls/overview/)) | This is the one firewall Docker cannot bypass, because it is not on the machine. It is your safety net for fact #1. |
-| 5 | **You will lock yourself out of SSH.** | Hetzner's web console and Rescue system are the way back in ([Hetzner: Using the console](https://docs.hetzner.com/cloud/servers/getting-started/vnc-console/), [Using Rescue](https://docs.hetzner.com/cloud/servers/getting-started/rescue-system/)). Read §1.9 *before* you need it. |
+| 5 | **You will lock yourself out of SSH.** | Hetzner's web console and Rescue system are the way back in ([Hetzner: Using the console](https://docs.hetzner.com/cloud/servers/getting-started/vnc-console/), [Using Rescue](https://docs.hetzner.com/cloud/servers/getting-started/rescue-system/)). Read §1.10 *before* you need it. |
 
 **The single most important line of configuration in this entire document:**
 
@@ -71,7 +71,7 @@ In the Hetzner Console: **Servers → Add Server** ([Hetzner: Creating a server]
 | SSH keys | **Paste the public key from step 1.1** | This is the whole point. |
 | Firewalls | Attach the firewall from §2.2 — **create it first, in a separate tab** | Attaching at creation means the box is never naked on the internet. |
 | Backups | **Enable** (+20% of server cost) | See §7. This is the cheapest insurance you will ever buy. |
-| Cloud config | Optional — see §1.10 for a cloud-init that does steps 1.5–1.8 automatically | |
+| Cloud config | Optional — see §1.11 for a cloud-init that does steps 1.5-1.8 automatically | |
 
 Critical Hetzner behaviour: **"After the server has been created, it is no longer possible to add an SSH key via the Hetzner Console"** ([Hetzner: Creating a server](https://docs.hetzner.com/cloud/servers/getting-started/creating-a-server/)). Adding a second key later is done over SSH or from Rescue. Add every key you might want **at creation time** — including one from a second device.
 
@@ -331,7 +331,7 @@ This netboots a separate Linux with your disk unmounted, so you can repair anyth
    ```
 5. **Reboot to leave rescue.** "The only way to end Rescue is to restart the server once again" ([Hetzner: Using Rescue](https://docs.hetzner.com/cloud/servers/getting-started/rescue-system/)).
 
-Hetzner Rescue does not include mount instructions on its own page — steps 4's commands are standard Linux, not Hetzner-documented; see [What I could not confirm](#what-i-could-not-confirm).
+Hetzner Rescue does not include mount instructions on its own page — steps 4's commands are standard Linux, not Hetzner-documented; see [What I could not confirm](#12-what-i-could-not-confirm).
 
 **Path C — Snapshot rollback.** If you took a snapshot before the change (you should have, see §7.4), restoring it is a few clicks and about a minute. Cheapest recovery of all.
 
@@ -392,66 +392,66 @@ You have **three** packet-filtering layers, and they do not see the same packets
 
 ```
    Internet
-      â”‚
-      â–¼
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚  LAYER 1 â€” Hetzner Cloud Firewall                        â”‚
-â”‚  Runs OUTSIDE your machine, on Hetzner's network.        â”‚
-â”‚  Docker cannot touch it. You cannot lock yourself out of â”‚
-â”‚  the console with it. Default: deny all inbound.         â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                        â”‚  packets that survive
-                        â–¼
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚  YOUR SERVER'S KERNEL â€” netfilter                        â”‚
-â”‚                                                          â”‚
-â”‚   raw/PREROUTING  â†’  nat/PREROUTING (Docker's DNAT)      â”‚
-â”‚                            â”‚                             â”‚
-â”‚            â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”              â”‚
-â”‚            â–¼                              â–¼              â”‚
-â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”         â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”‚
-â”‚   â”‚ LAYER 2a: filter â”‚         â”‚ LAYER 2b: filter      â”‚ â”‚
-â”‚   â”‚ INPUT chain      â”‚         â”‚ FORWARD chain         â”‚ â”‚
-â”‚   â”‚ -- ufw lives hereâ”‚         â”‚ -- DOCKER-USER first, â”‚ â”‚
-â”‚   â”‚                  â”‚         â”‚    then Docker's own  â”‚ â”‚
-â”‚   â”‚ Traffic to the   â”‚         â”‚    chains             â”‚ â”‚
-â”‚   â”‚ HOST: sshd, and  â”‚         â”‚ Traffic to CONTAINERS â”‚ â”‚
-â”‚   â”‚ anything bound   â”‚         â”‚ via published ports   â”‚ â”‚
-â”‚   â”‚ to the host      â”‚         â”‚                       â”‚ â”‚
-â”‚   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜         â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â”‚
-â”‚           â–²                              â–²               â”‚
-â”‚           â”‚                              â”‚               â”‚
-â”‚      ufw protects this        ufw DOES NOT protect this  â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+      │
+      ▼
+┌──────────────────────────────────────────────────────────┐
+│  LAYER 1 — Hetzner Cloud Firewall                        │
+│  Runs OUTSIDE your machine, on Hetzner's network.        │
+│  Docker cannot touch it. You cannot lock yourself out of │
+│  the console with it. Default: deny all inbound.         │
+└───────────────────────┬──────────────────────────────────┘
+                        │  packets that survive
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  YOUR SERVER'S KERNEL — netfilter                        │
+│                                                          │
+│   raw/PREROUTING  →  nat/PREROUTING (Docker's DNAT)      │
+│                            │                             │
+│            ┌───────────────┴──────────────┐              │
+│            ▼                              ▼              │
+│   ┌──────────────────┐         ┌───────────────────────┐ │
+│   │ LAYER 2a: filter │         │ LAYER 2b: filter      │ │
+│   │ INPUT chain      │         │ FORWARD chain         │ │
+│   │ -- ufw lives here│         │ -- DOCKER-USER first, │ │
+│   │                  │         │    then Docker's own  │ │
+│   │ Traffic to the   │         │    chains             │ │
+│   │ HOST: sshd, and  │         │ Traffic to CONTAINERS │ │
+│   │ anything bound   │         │ via published ports   │ │
+│   │ to the host      │         │                       │ │
+│   └──────────────────┘         └───────────────────────┘ │
+│           ▲                              ▲               │
+│           │                              │               │
+│      ufw protects this        ufw DOES NOT protect this  │
+└──────────────────────────────────────────────────────────┘
 ```
 
-That right-hand branch is the trap. Everything in Â§2.4 is about it.
+That right-hand branch is the trap. Everything in §2.4 is about it.
 
-### 2.2 Layer 1 â€” the Hetzner Cloud Firewall (do this first)
+### 2.2 Layer 1 — the Hetzner Cloud Firewall (do this first)
 
 This is your safety net, precisely *because* it is not on the machine. Docker cannot bypass it, a mistake in it cannot lock you out of the web console, and it is free ([Hetzner: Cloud Firewalls](https://docs.hetzner.com/cloud/firewalls/overview/)).
 
 Hetzner Cloud Firewalls "block any network traffic not specified in a rule": without rules, "all inbound traffic will automatically be blocked" and "all outbound traffic will automatically be permitted" ([Hetzner: Cloud Firewalls](https://docs.hetzner.com/cloud/firewalls/overview/)).
 
-**Create it in the Console â†’ Firewalls â†’ Create Firewall**, then attach it to the server.
+**Create it in the Console → Firewalls → Create Firewall**, then attach it to the server.
 
 | Direction | Protocol | Port | Source | Comment |
 |---|---|---|---|---|
-| Inbound | TCP | `52242` (or `22`) | **your home/office IPv4 /32 only**, e.g. `203.0.113.45/32` | SSH. If your ISP gives you a dynamic address, use `0.0.0.0/0` **and** rely on key-only auth + fail2ban â€” but prefer a fixed source if you have one. |
-| Inbound | TCP | `80` | Cloudflare IPv4 ranges (Â§3.2) | HTTP â†’ redirect to HTTPS, and ACME HTTP-01 if you use it |
-| Inbound | TCP | `443` | Cloudflare IPv4 ranges (Â§3.2) | HTTPS |
-| Inbound | ICMP | â€” | `0.0.0.0/0` (optional) | Ping. Useful for monitoring; harmless. |
-| Outbound | â€” | â€” | leave default (allow all) | Restricting egress on a box that pulls Docker images, apt packages and calls an embeddings API is more pain than value at this scale. See Â§2.8. |
+| Inbound | TCP | `52242` (or `22`) | **your home/office IPv4 /32 only**, e.g. `203.0.113.45/32` | SSH. If your ISP gives you a dynamic address, use `0.0.0.0/0` **and** rely on key-only auth + fail2ban — but prefer a fixed source if you have one. |
+| Inbound | TCP | `80` | Cloudflare IPv4 ranges (§3.2) | HTTP → redirect to HTTPS, and ACME HTTP-01 if you use it |
+| Inbound | TCP | `443` | Cloudflare IPv4 ranges (§3.2) | HTTPS |
+| Inbound | ICMP | — | `0.0.0.0/0` (optional) | Ping. Useful for monitoring; harmless. |
+| Outbound | — | — | leave default (allow all) | Restricting egress on a box that pulls Docker images, apt packages and calls an embeddings API is more pain than value at this scale. See §2.8. |
 
 Limits you will not hit but should know: 5 firewalls per server, 500 effective rules per firewall, 80,000 concurrent connections per server ([Hetzner: Cloud Firewalls](https://docs.hetzner.com/cloud/firewalls/overview/)).
 
 **Three Hetzner behaviours that surprise people:**
 
-1. **Rule changes do not kill existing connections.** "the new settings apply only to new connection attempts. Existing connections established before the Firewall was updated will remain active" ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). Good news when you lock yourself out mid-session â€” your SSH stays up long enough to undo it. Bad news when testing: your "it still works!" may just be an old connection. **Test from a fresh connection, ideally from a different network.**
-2. **Private networks are not filtered.** "Not yet, because we consider the private networks to be 'secure'" ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). If you ever add a second server on a Hetzner private network, the Cloud Firewall will not police traffic between them â€” only the host firewall will.
-3. **Some Hetzner services always bypass the firewall** â€” DNS, the rescue system, the metadata server and DHCP ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). This is why the console/rescue path in Â§1.10 always works no matter how badly you misconfigure things.
+1. **Rule changes do not kill existing connections.** "the new settings apply only to new connection attempts. Existing connections established before the Firewall was updated will remain active" ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). Good news when you lock yourself out mid-session — your SSH stays up long enough to undo it. Bad news when testing: your "it still works!" may just be an old connection. **Test from a fresh connection, ideally from a different network.**
+2. **Private networks are not filtered.** "Not yet, because we consider the private networks to be 'secure'" ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). If you ever add a second server on a Hetzner private network, the Cloud Firewall will not police traffic between them — only the host firewall will.
+3. **Some Hetzner services always bypass the firewall** — DNS, the rescue system, the metadata server and DHCP ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). This is why the console/rescue path in §1.10 always works no matter how badly you misconfigure things.
 
-### 2.3 Layer 2a â€” the host firewall with ufw
+### 2.3 Layer 2a — the host firewall with ufw
 
 ```bash
 sudo ufw default deny incoming
@@ -462,16 +462,16 @@ sudo ufw limit 52242/tcp comment 'ssh rate-limited'
 # Or, tighter, if you have a static home IP:
 # sudo ufw allow from 203.0.113.45/32 to any port 52242 proto tcp comment 'ssh from home'
 
-# 80/443 are added in Â§3.3, restricted to Cloudflare. Do NOT open them to the world here.
+# 80/443 are added in §3.3, restricted to Cloudflare. Do NOT open them to the world here.
 
 sudo ufw logging low
 sudo ufw --force enable
 sudo ufw status verbose
 ```
 
-`ufw` places its rules in the `INPUT` and `FORWARD` chains ([ufw(8)](https://manpages.ubuntu.com/manpages/noble/man8/ufw.8.html)). Note the second half of that sentence â€” it *does* write FORWARD rules. That is exactly why the next section is confusing: ufw's FORWARD rules are appended *after* Docker's jump to its own chains, so Docker's ACCEPT wins first.
+`ufw` places its rules in the `INPUT` and `FORWARD` chains ([ufw(8)](https://manpages.ubuntu.com/manpages/noble/man8/ufw.8.html)). Note the second half of that sentence — it *does* write FORWARD rules. That is exactly why the next section is confusing: ufw's FORWARD rules are appended *after* Docker's jump to its own chains, so Docker's ACCEPT wins first.
 
-`ufw limit` denies a source that makes 6 or more connections in 30 seconds â€” free brute-force damping before fail2ban even starts.
+`ufw limit` denies a source that makes 6 or more connections in 30 seconds — free brute-force damping before fail2ban even starts.
 
 ### 2.4 THE TRAP: Docker publishes straight past ufw
 
@@ -482,15 +482,15 @@ sudo ufw status verbose
 Docker's documentation states it plainly:
 
 > "Docker and ufw use firewall rules in ways that make them incompatible with each other. When you publish a container's ports using Docker, traffic to and from that container gets diverted before it goes through the ufw firewall settings. Docker routes container traffic in the `nat` table, which means that packets are diverted before it reaches the `INPUT` and `OUTPUT` chains that ufw uses."
-> â€” [Docker: Packet filtering and firewalls â†’ Docker and ufw](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
+> — [Docker: Packet filtering and firewalls → Docker and ufw](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
 
 Mechanically:
 
 1. A packet arrives for `YOUR.SERVER.IP:5432`.
-2. `nat/PREROUTING` â†’ Docker's `DOCKER` chain **DNATs** the destination to the container's private address, e.g. `172.18.0.3:5432`.
-3. Because the destination is no longer the host itself, the packet is now **forwarded**, not delivered locally. It goes to the `FORWARD` chain â€” *not* `INPUT`.
+2. `nat/PREROUTING` → Docker's `DOCKER` chain **DNATs** the destination to the container's private address, e.g. `172.18.0.3:5432`.
+3. Because the destination is no longer the host itself, the packet is now **forwarded**, not delivered locally. It goes to the `FORWARD` chain — *not* `INPUT`.
 4. Docker inserts, at the top of `FORWARD`, unconditional jumps to `DOCKER-USER`, `DOCKER-FORWARD` and `DOCKER-INGRESS` ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)). `DOCKER-FORWARD`/`DOCKER` accept the packet, because you published the port.
-5. ufw's rules â€” which sit in `INPUT`, and in `FORWARD` *after* Docker's jumps â€” are never consulted. Docker's own words: *"Packets that get accepted or rejected by rules in these custom chains will not be seen by user-defined rules appended to the `FORWARD` chain"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)).
+5. ufw's rules — which sit in `INPUT`, and in `FORWARD` *after* Docker's jumps — are never consulted. Docker's own words: *"Packets that get accepted or rejected by rules in these custom chains will not be seen by user-defined rules appended to the `FORWARD` chain"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)).
 
 The result: `ufw status` says `Status: active`, `Default: deny (incoming)`, and Postgres is answering the internet.
 
@@ -498,9 +498,9 @@ Compounding it, Docker's default publish address is every address on the host. D
 
 **In one sentence:** ufw filters packets addressed *to the host*; Docker's published ports are addressed *through the host to a container*, take a different path through the kernel, and are accepted by rules Docker wrote before ufw's are ever reached.
 
-#### 2.4.2 How to detect it â€” five checks, in ascending order of trustworthiness
+#### 2.4.2 How to detect it — five checks, in ascending order of trustworthiness
 
-**Check 1 â€” what is Docker actually publishing?**
+**Check 1 — what is Docker actually publishing?**
 
 ```bash
 docker ps --format 'table {{.Names}}\t{{.Ports}}'
@@ -508,17 +508,17 @@ docker ps --format 'table {{.Names}}\t{{.Ports}}'
 
 Read the left-hand side of each `->`. Anything reading `0.0.0.0:5432->5432/tcp` or `:::5432->5432/tcp` is **published to the whole internet**. Only `127.0.0.1:5432->5432/tcp` is safe.
 
-**Check 2 â€” what is listening on the host, and on which address?**
+**Check 2 — what is listening on the host, and on which address?**
 
 ```bash
 sudo ss -tlnp
 ```
 
 In the `Local Address:Port` column:
-- `127.0.0.1:5432` â€” loopback only. Safe.
-- `0.0.0.0:5432`, `*:5432` or `[::]:5432` â€” **exposed**. The process will be `docker-proxy` (or nothing at all if `userland-proxy: false`, in which case Check 3 is the authority).
+- `127.0.0.1:5432` — loopback only. Safe.
+- `0.0.0.0:5432`, `*:5432` or `[::]:5432` — **exposed**. The process will be `docker-proxy` (or nothing at all if `userland-proxy: false`, in which case Check 3 is the authority).
 
-**Check 3 â€” read Docker's rules directly.**
+**Check 3 — read Docker's rules directly.**
 
 ```bash
 sudo iptables -t nat -L DOCKER -n --line-numbers
@@ -528,7 +528,7 @@ sudo iptables -L DOCKER-USER -n --line-numbers
 
 A `DNAT ... to:172.x.x.x:5432` with no source restriction, and an empty `DOCKER-USER` chain, is the exposure spelled out in full.
 
-**Check 4 â€” grep the compose file for the anti-pattern.**
+**Check 4 — grep the compose file for the anti-pattern.**
 
 ```bash
 grep -nE '^\s*-\s*"?[0-9]+:[0-9]+' docker-compose.yml
@@ -536,11 +536,11 @@ grep -nE '^\s*-\s*"?[0-9]+:[0-9]+' docker-compose.yml
 
 Every hit is a port published on `0.0.0.0`. Each one needs either a `127.0.0.1:` prefix or deletion.
 
-**Check 5 â€” the only check that proves anything: scan from outside.** See Â§5 (Verification). Checks 1â€“4 tell you what the machine *intends*. Only an external scan tells you what the internet *sees*.
+**Check 5 — the only check that proves anything: scan from outside.** See §5 (Verification). Checks 1–4 tell you what the machine *intends*. Only an external scan tells you what the internet *sees*.
 
 #### 2.4.3 The correct fixes, in the order to apply them
 
-**Fix 1 (always) â€” do not publish what does not need publishing.**
+**Fix 1 (always) — do not publish what does not need publishing.**
 
 Containers on the same Compose network reach each other by service name over the Docker network, with no host port involved at all. Your app reaches Postgres at `db:5432` whether or not a host port exists.
 
@@ -560,7 +560,7 @@ services:
   caddy:
     image: caddy:2
     ports:
-      - "0.0.0.0:80:80"     # deliberately public â€” restricted to Cloudflare by firewall, Â§3
+      - "0.0.0.0:80:80"     # deliberately public — restricted to Cloudflare by firewall, §3
       - "0.0.0.0:443:443"
     networks: [frontend]
 
@@ -572,14 +572,14 @@ networks:
 
 `internal: true` on the backend network means the database container cannot make outbound connections either, which blunts a large class of post-exploitation activity (exfiltration, pulling a second-stage payload, joining a botnet).
 
-**Fix 2 (always) â€” when you must publish, bind to loopback.**
+**Fix 2 (always) — when you must publish, bind to loopback.**
 
 ```yaml
     ports:
       - "127.0.0.1:5432:5432"
 ```
 
-Docker documents exactly this pattern: `docker run -p 127.0.0.1:8080:80 -p '[::1]:8080:80' nginx` ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)). **Note the IPv6 half** â€” `127.0.0.1:5432:5432` binds only IPv4 loopback.
+Docker documents exactly this pattern: `docker run -p 127.0.0.1:8080:80 -p '[::1]:8080:80' nginx` ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)). **Note the IPv6 half** — `127.0.0.1:5432:5432` binds only IPv4 loopback.
 
 Docker also notes a version floor worth knowing: **Docker versions before 28.0.0 allowed hosts on the same L2 segment to reach localhost-published ports** ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)). Run Docker Engine 28.0 or newer; check with `docker version`.
 
@@ -590,13 +590,13 @@ ssh -L 5432:127.0.0.1:5432 foundit
 # then point a local psql / TablePlus at localhost:5432
 ```
 
-âš ï¸ **That tunnel needs `AllowTcpForwarding yes`, which Â§1.7 deliberately turned off.** Pick one:
+⚠️ **That tunnel needs `AllowTcpForwarding yes`, which §1.7 deliberately turned off.** Pick one:
 - **Recommended:** leave forwarding off entirely and use `docker exec -it db psql -U foundit foundit` inside a normal SSH session. No tunnel, no forwarding, nothing extra exposed.
-- If you truly need a GUI client, enable it *narrowly*: `AllowTcpForwarding local` plus `PermitOpen 127.0.0.1:5432` in the sshd drop-in. Never blanket `AllowTcpForwarding yes` for convenience â€” with it, a stolen SSH key reaches every loopback-bound service you thought was private.
+- If you truly need a GUI client, enable it *narrowly*: `AllowTcpForwarding local` plus `PermitOpen 127.0.0.1:5432` in the sshd drop-in. Never blanket `AllowTcpForwarding yes` for convenience — with it, a stolen SSH key reaches every loopback-bound service you thought was private.
 
-**Fix 3 (always) â€” make loopback-binding the daemon-wide default.**
+**Fix 3 (always) — make loopback-binding the daemon-wide default.**
 
-This is the belt-and-braces that saves you when you â€” or an AI assistant, or a compose file copied off the internet â€” forget the `127.0.0.1:` prefix. Docker supports setting the default host binding address ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)):
+This is the belt-and-braces that saves you when you — or an AI assistant, or a compose file copied off the internet — forget the `127.0.0.1:` prefix. Docker supports setting the default host binding address ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)):
 
 ```bash
 sudo mkdir -p /etc/docker
@@ -619,12 +619,12 @@ sudo systemctl restart docker
 ```
 
 - `"ip": "127.0.0.1"` sets the default bind address for the **default bridge network**; the daemon reference describes `--ip` as "Host IP for port publishing from the default bridge network (default 0.0.0.0)" ([dockerd reference](https://docs.docker.com/reference/cli/dockerd/), [Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)).
-- `default-network-opts.bridge.host_binding_ipv4` applies the same default to **user-defined bridge networks** ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)). **Docker Compose creates user-defined bridges, so this is the key that actually matters for you** â€” `"ip"` alone does not cover a Compose stack.
+- `default-network-opts.bridge.host_binding_ipv4` applies the same default to **user-defined bridge networks** ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)). **Docker Compose creates user-defined bridges, so this is the key that actually matters for you** — `"ip"` alone does not cover a Compose stack.
 - After this, a forgotten `ports: - "5432:5432"` binds to `127.0.0.1:5432` instead of `0.0.0.0:5432`. It converts a catastrophic mistake into a harmless one.
 - The reverse proxy, which you *do* want public, must then say so explicitly: `- "0.0.0.0:443:443"`.
-- `no-new-privileges: true` â€” daemon-wide default preventing setuid escalation inside containers.
-- `userland-proxy: false` â€” removes the `docker-proxy` hop; port forwarding is handled purely in netfilter.
-- `live-restore: true` â€” containers keep running across a daemon restart, so `systemctl restart docker` does not take your site down.
+- `no-new-privileges: true` — daemon-wide default preventing setuid escalation inside containers.
+- `userland-proxy: false` — removes the `docker-proxy` hop; port forwarding is handled purely in netfilter.
+- `live-restore: true` — containers keep running across a daemon restart, so `systemctl restart docker` does not take your site down.
 
 Verify it took effect:
 
@@ -634,7 +634,7 @@ docker run --rm -d -p 9999:80 --name bindtest nginx >/dev/null && docker port bi
 # expect: 80/tcp -> 127.0.0.1:9999
 ```
 
-**Fix 4 (always) â€” filter container traffic in the `DOCKER-USER` chain.**
+**Fix 4 (always) — filter container traffic in the `DOCKER-USER` chain.**
 
 `DOCKER-USER` is the officially supported hook. Docker: *"to add additional rules to filter these packets, use the `DOCKER-USER` chain"*; it is *"A placeholder for user-defined rules that will be processed before rules in the `DOCKER-FORWARD` and `DOCKER` chains"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)).
 
@@ -646,9 +646,9 @@ The pattern Docker documents for restricting who may reach published ports is a 
 sudo iptables -I DOCKER-USER -i ext_if ! -s 192.0.2.0/24 -j DROP
 ```
 
-([Docker with iptables â†’ Restrict external connections to containers](https://docs.docker.com/engine/network/firewall-iptables/) â€” "By default, all external source IPs are allowed to connect to ports that have been published to the Docker host's addresses.")
+([Docker with iptables → Restrict external connections to containers](https://docs.docker.com/engine/network/firewall-iptables/) — "By default, all external source IPs are allowed to connect to ports that have been published to the Docker host's addresses.")
 
-**The conntrack gotcha that trips everyone up.** By the time a packet reaches `DOCKER-USER` it has already been DNATed: *"That means that the `iptables` flags you use can only match internal IP addresses and ports of containers."* To match on the **original** destination â€” "requests that arrived at my public IP on port 443" â€” you must use the conntrack extension ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)):
+**The conntrack gotcha that trips everyone up.** By the time a packet reaches `DOCKER-USER` it has already been DNATed: *"That means that the `iptables` flags you use can only match internal IP addresses and ports of containers."* To match on the **original** destination — "requests that arrived at my public IP on port 443" — you must use the conntrack extension ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)):
 
 ```bash
 sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -663,36 +663,36 @@ Return traffic must be accepted **before** any DROP rules ([Docker with iptables
 sudo iptables -I DOCKER-USER -m state --state RELATED,ESTABLISHED -j ACCEPT
 ```
 
-The complete ordered ruleset for this setup is in Â§3.4, because it is where the Cloudflare allowlist lives. Rules added with `iptables` do not survive a reboot â€” Â§2.6 fixes that.
+The complete ordered ruleset for this setup is in §3.4, because it is where the Cloudflare allowlist lives. Rules added with `iptables` do not survive a reboot — §2.6 fixes that.
 
-One more `DOCKER-USER` limitation worth knowing, straight from the docs: packets addressed *directly to a container's own IP* ("direct routed" access) are dropped by a rule in the `raw` table's `PREROUTING` chain, *"which is processed before the `filter` table. So, they never reach the `DOCKER-USER` chain, and a rule in `DOCKER-USER` cannot allow them"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)). That default is in your favour â€” leave `allow-direct-routing` alone.
+One more `DOCKER-USER` limitation worth knowing, straight from the docs: packets addressed *directly to a container's own IP* ("direct routed" access) are dropped by a rule in the `raw` table's `PREROUTING` chain, *"which is processed before the `filter` table. So, they never reach the `DOCKER-USER` chain, and a rule in `DOCKER-USER` cannot allow them"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)). That default is in your favour — leave `allow-direct-routing` alone.
 
-**Fix 5 (do NOT do this) â€” `"iptables": false`.**
+**Fix 5 (do NOT do this) — `"iptables": false`.**
 
 You will find this suggested on forums as "the way to make ufw work with Docker." Docker's own documentation is unambiguous:
 
 > "Setting the `iptables` or `ip6tables` keys to `false` in daemon configuration will prevent Docker from creating most of its `iptables` or `nftables` rules. But, this option is not appropriate for most users, it is likely to break container networking for the Docker Engine. For example, with Docker's firewalling disabled and no replacement rules, containers in bridge networks will not be able to access internet hosts by masquerading, **but all of their ports will be accessible to hosts on the local network.**"
-> â€” [Docker: Prevent Docker from manipulating firewall rules](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
+> — [Docker: Prevent Docker from manipulating firewall rules](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
 
-Read that last clause again. `iptables: false` is not "Docker stops opening ports." It is "Docker stops enforcing isolation *and* stops doing NAT." You get an app whose containers cannot reach the internet **and** a host whose container ports are reachable â€” worse on both axes, unless you hand-write every masquerade and filter rule yourself. Docker adds: *"It is not possible to completely prevent Docker from creating firewall rules, and creating rules after-the-fact is extremely involved and beyond the scope of these instructions."*
+Read that last clause again. `iptables: false` is not "Docker stops opening ports." It is "Docker stops enforcing isolation *and* stops doing NAT." You get an app whose containers cannot reach the internet **and** a host whose container ports are reachable — worse on both axes, unless you hand-write every masquerade and filter rule yourself. Docker adds: *"It is not possible to completely prevent Docker from creating firewall rules, and creating rules after-the-fact is extremely involved and beyond the scope of these instructions."*
 
-**Verdict: never set `iptables: false` on this server.** Fixes 1â€“4 solve the problem completely and keep networking working.
+**Verdict: never set `iptables: false` on this server.** Fixes 1–4 solve the problem completely and keep networking working.
 
 #### 2.4.4 What about the `ufw-docker` community script?
 
 A widely used community project (`chaifeng/ufw-docker`) installs a `DOCKER-USER` ruleset plus a `ufw-docker` helper so that `ufw route allow` works for containers. It is not Docker documentation, not Debian/Ubuntu documentation, and not covered by any vendor's support. Internally it does the same `DOCKER-USER` manipulation as Fix 4, wrapped in a script.
 
-**Recommendation for this owner: skip it.** Fixes 1â€“3 (don't publish; bind to loopback; make loopback the daemon default) remove the exposure entirely without adding a third-party moving part to the security-critical path. Fix 4 covers the one port you *do* publish. Adding an unaudited shell script to the firewall of a machine whose owner cannot read shell scripts is a bad trade. Listed in [What I could not confirm](#what-i-could-not-confirm).
+**Recommendation for this owner: skip it.** Fixes 1–3 (don't publish; bind to loopback; make loopback the daemon default) remove the exposure entirely without adding a third-party moving part to the security-critical path. Fix 4 covers the one port you *do* publish. Adding an unaudited shell script to the firewall of a machine whose owner cannot read shell scripts is a bad trade. Listed in [What I could not confirm](#12-what-i-could-not-confirm).
 
 ### 2.5 Should you use nftables directly instead of ufw?
 
 `ufw` is a frontend that "ships with Debian and Ubuntu" ([Docker: Docker and ufw](https://docs.docker.com/engine/network/packet-filtering-firewalls/)). Raw `nftables` gives one coherent ruleset instead of ufw's generated one, which experienced administrators often prefer.
 
-**Recommendation for this owner: use ufw.** It is the documented default on both candidate distributions, and `ufw status verbose` is readable by a non-specialist under stress at 2am â€” which is when you will read it.
+**Recommendation for this owner: use ufw.** It is the documented default on both candidate distributions, and `ufw status verbose` is readable by a non-specialist under stress at 2am — which is when you will read it.
 
-Critically, **switching to nftables does not help with Â§2.4 at all.** Docker supports an nftables backend (selected with the `firewall-backend` daemon option) and states "For bridge networks, iptables and nftables have the same functionality" ([Docker: Packet filtering and firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/)). The bypass is about *which chain the packet traverses*, not about which frontend wrote the rules. Fix the publishing, not the frontend.
+Critically, **switching to nftables does not help with §2.4 at all.** Docker supports an nftables backend (selected with the `firewall-backend` daemon option) and states "For bridge networks, iptables and nftables have the same functionality" ([Docker: Packet filtering and firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/)). The bypass is about *which chain the packet traverses*, not about which frontend wrote the rules. Fix the publishing, not the frontend.
 
-Note also that with the experimental nftables backend, "Docker does not enable IP forwarding itself, and it will not create a default 'drop' nftables policy" ([Docker: Packet filtering and firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/)) â€” a behavioural difference you do not want to discover by accident. Stay on the default iptables backend.
+Note also that with the experimental nftables backend, "Docker does not enable IP forwarding itself, and it will not create a default 'drop' nftables policy" ([Docker: Packet filtering and firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/)) — a behavioural difference you do not want to discover by accident. Stay on the default iptables backend.
 
 ### 2.6 Making the DOCKER-USER rules survive a reboot
 
@@ -720,9 +720,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable foundit-docker-user.service
 ```
 
-The script `/usr/local/sbin/foundit-cf-firewall.sh` is given in full in Â§3.4. Using a private chain (`FOUNDIT-CF`) that `DOCKER-USER` jumps to means you can flush and rebuild your rules without ever touching a chain Docker owns â€” the pattern that survives `docker restart`, reboots, and Docker upgrades.
+The script `/usr/local/sbin/foundit-cf-firewall.sh` is given in full in §3.4. Using a private chain (`FOUNDIT-CF`) that `DOCKER-USER` jumps to means you can flush and rebuild your rules without ever touching a chain Docker owns — the pattern that survives `docker restart`, reboots, and Docker upgrades.
 
-### 2.7 IPv6 â€” the half everyone forgets
+### 2.7 IPv6 — the half everyone forgets
 
 If the server has a public IPv6 address, **every rule above must exist twice.** A firewall that covers only IPv4 is a firewall with a documented bypass, and scanners do use it.
 
@@ -737,33 +737,32 @@ sudo ss -tlnp | grep '\[::\]'            # anything listening on all IPv6 addres
 
 If you keep IPv6: add the Cloudflare IPv6 ranges to Hetzner **and** to ufw **and** to `ip6tables`/`DOCKER-USER`. Doing two of the three is worse than doing none, because it feels done.
 
-### 2.8 Egress filtering â€” worth it?
+### 2.8 Egress filtering — worth it?
 
 Hetzner permits all outbound by default ([Hetzner: Cloud Firewalls](https://docs.hetzner.com/cloud/firewalls/overview/)). Locking egress down would blunt data exfiltration and stop a compromised container calling home.
 
-**Recommendation: do not filter egress at the Hetzner or ufw layer.** On a box that pulls Docker images, apt packages, ACME certificates and an embeddings API, the allowlist is large and changes without warning, and a broken egress rule presents exactly like an application bug â€” the worst kind of outage for a non-developer to diagnose.
+**Recommendation: do not filter egress at the Hetzner or ufw layer.** On a box that pulls Docker images, apt packages, ACME certificates and an embeddings API, the allowlist is large and changes without warning, and a broken egress rule presents exactly like an application bug — the worst kind of outage for a non-developer to diagnose.
 
 **Do the container-level equivalent instead**, which is free, precise and self-documenting: `networks: { backend: { internal: true } }` from Fix 1. The database and any worker with no business talking to the internet simply have no route to it. That is most of the benefit at none of the operational cost.
 
 ---
 
-
 ## 3. Locking the origin to Cloudflare
 
 ### 3.1 Why "we're behind Cloudflare" is not, by itself, protection
 
-Cloudflare proxies `foundit.app` â†’ your origin IP. The DDoS scrubbing, the WAF, the bot rules, the rate limiting â€” all of it lives at Cloudflare's edge. **None of it applies to a connection made directly to your origin's IP address.**
+Cloudflare proxies `foundit.app` → your origin IP. The DDoS scrubbing, the WAF, the bot rules, the rate limiting — all of it lives at Cloudflare's edge. **None of it applies to a connection made directly to your origin's IP address.**
 
 Cloudflare says so directly:
 
 > "If someone discovers your origin server's IP address, they could send traffic directly to your server, bypassing Cloudflare's security protections entirely. To prevent this, you should block all traffic that does not come from Cloudflare IP addresses or the IP addresses of your trusted partners, vendors, or applications."
-> â€” [Cloudflare: Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/)
+> — [Cloudflare: Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/)
 
 Your origin IP is not a secret and cannot be made one. It leaks through:
-- **Historical DNS records.** Services like SecurityTrails and DNS History keep every A record your domain ever had â€” including the one from before you enabled the orange cloud.
+- **Historical DNS records.** Services like SecurityTrails and DNS History keep every A record your domain ever had — including the one from before you enabled the orange cloud.
 - **Non-proxied DNS records.** A grey-clouded `mail.`, `ftp.`, `dev.` or `staging.` subdomain pointing at the same box gives the address away instantly.
 - **Certificate Transparency logs.** Every publicly trusted certificate you issue is logged; a cert for `staging.foundit.app` tells an attacker where to look.
-- **Outbound connections your server makes.** An email sent from the server, a webhook it calls, an error report â€” all carry the origin IP.
+- **Outbound connections your server makes.** An email sent from the server, a webhook it calls, an error report — all carry the origin IP.
 - **Internet-wide scanning.** Shodan and Censys index every IPv4 address's open ports and TLS certificates continuously. A cert with `foundit.app` in it on a random Hetzner IP is a one-query match.
 
 Assume the origin IP is public. **Therefore the origin must refuse anything that is not Cloudflare.** That is what the rest of this section does.
@@ -797,15 +796,15 @@ The IPv4 ranges as of **2026-09-10**, fetched from `https://www.cloudflare.com/i
 131.0.72.0/22
 ```
 
-**Do not treat that list as permanent.** Cloudflare: *"Cloudflare's IP ranges do not change frequently. When they do change, they are added to our list of IP ranges before being put into production"* ([Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/)). The list is published *ahead of* the change, which is exactly what makes automated refresh (Â§3.5) both possible and worth doing: a machine that re-reads the list weekly is never caught out.
+**Do not treat that list as permanent.** Cloudflare: *"Cloudflare's IP ranges do not change frequently. When they do change, they are added to our list of IP ranges before being put into production"* ([Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/)). The list is published *ahead of* the change, which is exactly what makes automated refresh (§3.5) both possible and worth doing: a machine that re-reads the list weekly is never caught out.
 
-The API response includes an `etag`, described as *"A digest of the IP data. Useful for determining if the data has changed"* ([API: List IPs](https://developers.cloudflare.com/api/resources/ips/methods/list/)) â€” that is what makes an automated refresh cheap and idempotent.
+The API response includes an `etag`, described as *"A digest of the IP data. Useful for determining if the data has changed"* ([API: List IPs](https://developers.cloudflare.com/api/resources/ips/methods/list/)) — that is what makes an automated refresh cheap and idempotent.
 
 ### 3.3 Layer 1 + 2a: allow 80/443 from Cloudflare only
 
-**Hetzner Cloud Firewall** (Console â†’ Firewalls â†’ your firewall â†’ Rules). For each inbound rule on port 80 and 443, paste **all fifteen** IPv4 CIDRs into the Source field. Hetzner allows 500 effective rules per firewall ([Hetzner: Cloud Firewalls](https://docs.hetzner.com/cloud/firewalls/overview/)), so 30 entries is trivial.
+**Hetzner Cloud Firewall** (Console → Firewalls → your firewall → Rules). For each inbound rule on port 80 and 443, paste **all fifteen** IPv4 CIDRs into the Source field. Hetzner allows 500 effective rules per firewall ([Hetzner: Cloud Firewalls](https://docs.hetzner.com/cloud/firewalls/overview/)), so 30 entries is trivial.
 
-**ufw**, on the host â€” generate the rules rather than typing fifteen CIDRs twice:
+**ufw**, on the host — generate the rules rather than typing fifteen CIDRs twice:
 
 ```bash
 sudo apt install -y curl
@@ -819,18 +818,18 @@ done
 sudo ufw status numbered
 ```
 
-Cloudflare documents the equivalent raw-iptables approach â€” allow each range, then a catch-all DROP ([Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/)):
+Cloudflare documents the equivalent raw-iptables approach — allow each range, then a catch-all DROP ([Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/)):
 
 ```bash
 iptables -I INPUT -p tcp -m multiport --dports http,https -s $ip -j ACCEPT
 iptables -A INPUT -p tcp -m multiport --dports http,https -j DROP
 ```
 
-âš ï¸ **Neither of those protects your containers.** Both write to `INPUT`. Your reverse proxy's 443 is a *published Docker port*, so it is forwarded, not INPUT-ed â€” see Â§2.4. The ufw rules above are correct and worth having (they protect anything you later run directly on the host), but the rule that actually enforces the Cloudflare allowlist for your site is the `DOCKER-USER` rule in Â§3.4. **Do both.**
+⚠️ **Neither of those protects your containers.** Both write to `INPUT`. Your reverse proxy's 443 is a *published Docker port*, so it is forwarded, not INPUT-ed — see §2.4. The ufw rules above are correct and worth having (they protect anything you later run directly on the host), but the rule that actually enforces the Cloudflare allowlist for your site is the `DOCKER-USER` rule in §3.4. **Do both.**
 
 ### 3.4 Layer 2b: the DOCKER-USER Cloudflare allowlist (the one that matters)
 
-This is the complete, self-refreshing script referenced by the systemd unit in Â§2.6.
+This is the complete, self-refreshing script referenced by the systemd unit in §2.6.
 
 ```bash
 sudo tee /usr/local/sbin/foundit-cf-firewall.sh > /dev/null <<'SCRIPT'
@@ -860,7 +859,7 @@ fi
 iptables -N "$CHAIN" 2>/dev/null || true
 iptables -F "$CHAIN"
 
-# 1. Return traffic first â€” Docker documents that this must precede the DROPs.
+# 1. Return traffic first — Docker documents that this must precede the DROPs.
 iptables -A "$CHAIN" -m state --state RELATED,ESTABLISHED -j RETURN
 
 # 2. Anything not arriving on the public interface is not our business.
@@ -896,10 +895,10 @@ sudo iptables -L FOUNDIT-CF -n --line-numbers
 Design notes, each tied to documented behaviour:
 
 - **A private chain jumped to from `DOCKER-USER`.** `DOCKER-USER` is *"A placeholder for user-defined rules that will be processed before rules in the `DOCKER-FORWARD` and `DOCKER` chains"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)). Keeping our rules in `FOUNDIT-CF` means `iptables -F FOUNDIT-CF` never disturbs anything Docker owns.
-- **`RETURN`, not `ACCEPT`.** Returning to `DOCKER-USER` lets Docker's own rules make the final decision â€” so an *unpublished* port stays closed even if a Cloudflare IP asks for it. `ACCEPT` here would short-circuit that.
+- **`RETURN`, not `ACCEPT`.** Returning to `DOCKER-USER` lets Docker's own rules make the final decision — so an *unpublished* port stays closed even if a Cloudflare IP asks for it. `ACCEPT` here would short-circuit that.
 - **`-m conntrack --ctorigdstport`.** Required because *"When packets arrive to the `DOCKER-USER` chain, they have already passed through a Destination Network Address Translation (DNAT) filter"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)). Matching `--dport 443` would silently fail if your proxy container listens on 8443 internally.
 - **`RELATED,ESTABLISHED` first**, per Docker's guidance that it *"must be placed before `DROP` rules that restrict access from external address ranges"* ([Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/)).
-- **Cached fallback + sanity check.** If Cloudflare is unreachable at boot, the script must not end up with an empty allowlist â€” an empty list plus a trailing DROP is a self-inflicted outage. The `grep -c ... -ge 10` guard also protects against a captive portal or error page being parsed as a CIDR list.
+- **Cached fallback + sanity check.** If Cloudflare is unreachable at boot, the script must not end up with an empty allowlist — an empty list plus a trailing DROP is a self-inflicted outage. The `grep -c ... -ge 10` guard also protects against a captive portal or error page being parsed as a CIDR list.
 
 ### 3.5 Keeping the list current
 
@@ -935,7 +934,7 @@ systemctl list-timers foundit-cf-firewall.timer
 
 The Hetzner Cloud Firewall entries are **not** automatically refreshed by this. Options, in order of preference:
 
-1. **Leave the Hetzner rules slightly broad on 80/443** (source `0.0.0.0/0`) and let `DOCKER-USER` do the precise filtering. The Hetzner firewall then serves its real purpose: closing everything *except* 22/80/443 no matter what Docker does. This is the recommendation â€” it is one fewer thing to keep in sync, and the precise rule is the one that is automated.
+1. **Leave the Hetzner rules slightly broad on 80/443** (source `0.0.0.0/0`) and let `DOCKER-USER` do the precise filtering. The Hetzner firewall then serves its real purpose: closing everything *except* 22/80/443 no matter what Docker does. This is the recommendation — it is one fewer thing to keep in sync, and the precise rule is the one that is automated.
 2. Or automate Hetzner too via `hcloud firewall replace-rules`, run from the same timer with a scoped API token. More moving parts, marginal gain.
 
 Set a calendar reminder to eyeball `https://www.cloudflare.com/ips/` quarterly regardless. The automation is there so you never *have* to; the reminder is there because automation silently breaking is a thing.
@@ -944,11 +943,11 @@ Set a calendar reminder to eyeball `https://www.cloudflare.com/ips/` quarterly r
 
 The firewall allowlist says "this packet came from a Cloudflare IP." Authenticated Origin Pulls says "this TLS connection presented a certificate Cloudflare holds." Belt and braces: the allowlist can go stale between refreshes; AOP cannot.
 
-**Global AOP** is the version you want â€” one dashboard toggle plus one certificate on the origin.
+**Global AOP** is the version you want — one dashboard toggle plus one certificate on the origin.
 
-Requirement: the zone must use SSL/TLS encryption mode **Full** or higher ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). Use **Full (strict)** â€” see Â§3.7.
+Requirement: the zone must use SSL/TLS encryption mode **Full** or higher ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). Use **Full (strict)** — see §3.7.
 
-**Step 1 â€” put Cloudflare's client CA on the origin.** Download from `https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem` ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). Note the docs' warning that this is *not* the same as the Cloudflare Origin CA certificate.
+**Step 1 — put Cloudflare's client CA on the origin.** Download from `https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem` ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). Note the docs' warning that this is *not* the same as the Cloudflare Origin CA certificate.
 
 ```bash
 sudo mkdir -p /srv/foundit/certs
@@ -957,7 +956,7 @@ sudo curl -fsSL https://developers.cloudflare.com/ssl/static/authenticated_origi
 sudo chmod 644 /srv/foundit/certs/origin-pull-ca.pem
 ```
 
-**Step 2 â€” configure the reverse proxy to require it.**
+**Step 2 — configure the reverse proxy to require it.**
 
 nginx ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)):
 
@@ -980,7 +979,7 @@ server {
 
 Cloudflare's documented pair is `ssl_client_certificate` + `ssl_verify_client optional` for the setup step, then `ssl_verify_client on` to **enforce** ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). Apache's equivalents are `SSLCACertificateFile` and `SSLVerifyClient require` ([same page](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)).
 
-Caddy (if you use Caddy rather than nginx â€” likely, given the audience):
+Caddy (if you use Caddy rather than nginx — likely, given the audience):
 
 ```
 foundit.app {
@@ -994,14 +993,14 @@ foundit.app {
 }
 ```
 
-âš ï¸ The Caddy syntax above is from Caddy's own documentation family, not Cloudflare's â€” verify against your Caddy version's docs. Listed in [What I could not confirm](#what-i-could-not-confirm).
+⚠️ The Caddy syntax above is from Caddy's own documentation family, not Cloudflare's — verify against your Caddy version's docs. Listed in [What I could not confirm](#12-what-i-could-not-confirm).
 
-**Step 3 â€” enable it at Cloudflare.** Dashboard â†’ **SSL/TLS â†’ Origin Server â†’ Authenticated Origin Pulls â†’ Global** â†’ toggle **On**. Via API, edit the zone setting `tls_client_auth` to `"on"` ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)).
+**Step 3 — enable it at Cloudflare.** Dashboard → **SSL/TLS → Origin Server → Authenticated Origin Pulls → Global** → toggle **On**. Via API, edit the zone setting `tls_client_auth` to `"on"` ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)).
 
-**Step 4 â€” verify enforcement.** From your laptop:
+**Step 4 — verify enforcement.** From your laptop:
 
 ```bash
-# Should now FAIL â€” no client certificate presented
+# Should now FAIL — no client certificate presented
 curl -sv --resolve foundit.app:443:YOUR.SERVER.IP https://foundit.app/ 2>&1 | tail -20
 # expect a TLS alert / 400 "No required SSL certificate was sent"
 
@@ -1012,7 +1011,7 @@ curl -sI https://foundit.app/
 **The limitation you must understand.** Global AOP uses a certificate that is *"not exclusive to your account. It only guarantees that a request is coming from the Cloudflare network"* ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). Anyone else with a Cloudflare account can, in principle, point a zone at your origin IP and their traffic will carry the same certificate. So:
 
 - Global AOP alone is **not** sufficient. It stops random internet scanners and direct-to-IP attacks cold; it does not stop a determined attacker who sets up their own Cloudflare zone.
-- **The firewall allowlist and AOP are complementary, and you need both.** The allowlist without AOP lets any Cloudflare customer through. AOP without the allowlist lets any Cloudflare customer through. Together, an attacker must be routing through Cloudflare *and* â€” because your Cloudflare zone applies your WAF and host rules to requests for `foundit.app` â€” hitting a host header your proxy accepts.
+- **The firewall allowlist and AOP are complementary, and you need both.** The allowlist without AOP lets any Cloudflare customer through. AOP without the allowlist lets any Cloudflare customer through. Together, an attacker must be routing through Cloudflare *and* — because your Cloudflare zone applies your WAF and host rules to requests for `foundit.app` — hitting a host header your proxy accepts.
 - **Also configure the reverse proxy to reject unknown `Host` headers**, which closes the "someone else's Cloudflare zone points at my IP" hole for real:
 
 ```nginx
@@ -1031,8 +1030,8 @@ If you need stronger than "came from Cloudflare", **zone-level AOP** lets you up
 
 | Setting | Wrong value | Correct value | Why |
 |---|---|---|---|
-| **SSL/TLS encryption mode** | `Flexible` | **`Full (strict)`** | `Flexible` means Cloudflare talks **plain HTTP** to your origin. Your "HTTPS site" is unencrypted across the public internet between Cloudflare and Hetzner. `Full` encrypts but does not validate the origin certificate. `Full (strict)` encrypts and validates â€” it also requires a real certificate on the origin, for which Cloudflare's free **Origin CA** certificate (15-year validity) is ideal since it only ever needs to satisfy Cloudflare. AOP requires Full or higher ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). |
-| **Grey-clouded DNS records** | any `A`/`AAAA` record pointing at the origin with the proxy off | proxy **everything**, or point non-proxied records elsewhere | A single grey-clouded record publishes your origin IP in DNS forever, and it is the first thing an attacker checks. Audit with: `dig +short staging.foundit.app; dig +short mail.foundit.app` â€” if any returns your Hetzner IP, fix it. |
+| **SSL/TLS encryption mode** | `Flexible` | **`Full (strict)`** | `Flexible` means Cloudflare talks **plain HTTP** to your origin. Your "HTTPS site" is unencrypted across the public internet between Cloudflare and Hetzner. `Full` encrypts but does not validate the origin certificate. `Full (strict)` encrypts and validates — it also requires a real certificate on the origin, for which Cloudflare's free **Origin CA** certificate (15-year validity) is ideal since it only ever needs to satisfy Cloudflare. AOP requires Full or higher ([Cloudflare: Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). |
+| **Grey-clouded DNS records** | any `A`/`AAAA` record pointing at the origin with the proxy off | proxy **everything**, or point non-proxied records elsewhere | A single grey-clouded record publishes your origin IP in DNS forever, and it is the first thing an attacker checks. Audit with: `dig +short staging.foundit.app; dig +short mail.foundit.app` — if any returns your Hetzner IP, fix it. |
 
 ### 3.8 The stronger alternative: Cloudflare Tunnel
 
@@ -1040,16 +1039,15 @@ If you want to eliminate this entire class of problem rather than manage it, **C
 
 What that buys you concretely:
 - Hetzner Cloud Firewall inbound rules reduce to **SSH only**. Ports 80 and 443 are closed to the entire internet, permanently.
-- The Cloudflare IP allowlist becomes unnecessary â€” there is nothing to allowlist to.
+- The Cloudflare IP allowlist becomes unnecessary — there is nothing to allowlist to.
 - The origin IP leaking stops mattering, because there is nothing listening on it.
-- Â§2.4's trap loses most of its teeth, because you stop publishing container ports to public addresses at all.
+- §2.4's trap loses most of its teeth, because you stop publishing container ports to public addresses at all.
 
 Costs: one more daemon to run and keep updated (it runs as a container in the same Compose stack), a hard dependency on Cloudflare for *all* availability (no "bypass Cloudflare to debug"), and slightly more involved certificate/routing setup.
 
-**Recommendation: this is the better architecture for this owner**, and worth adopting either at launch or as the first post-launch hardening step. If you are not ready for it, Â§3.1â€“3.7 is a correct and defensible position â€” just implement all of it, not half.
+**Recommendation: this is the better architecture for this owner**, and worth adopting either at launch or as the first post-launch hardening step. If you are not ready for it, §3.1–3.7 is a correct and defensible position — just implement all of it, not half.
 
 ---
-
 
 ## 4. Automatic security updates
 
@@ -1111,12 +1109,12 @@ Unattended-Upgrade::Allowed-Origins {
 | `${distro_codename}-security` | **Yes, always** | This is the entire point. Security fixes for OpenSSH, glibc, OpenSSL, the kernel. |
 | `${distro_codename}` (the base release) | **Yes** | On a stable release this only ever carries point-release fixes. Low risk. |
 | `ESMApps` / `ESM` (Ubuntu Pro) | **Yes** | Extended security maintenance for universe/main. Free for up to 5 machines. |
-| `${distro_codename}-updates` | **No** â€” leave commented out | Non-security bug fixes and version bumps. Unattended installation of these is how a working server changes behaviour at 06:00 for no reason. Apply these manually, monthly, when you are watching. |
+| `${distro_codename}-updates` | **No** — leave commented out | Non-security bug fixes and version bumps. Unattended installation of these is how a working server changes behaviour at 06:00 for no reason. Apply these manually, monthly, when you are watching. |
 | `${distro_codename}-backports` | **No** | Never unattended. Backports are opt-in newer software. |
-| **Docker's own APT repo** | **No** | A Docker Engine upgrade restarts the daemon. With `live-restore: true` (Â§2.4.3) that is survivable, but a *major* version bump is not something to discover after the fact. Upgrade Docker deliberately, monthly. |
-| **Your application images** | **No â€” and unattended-upgrades never touches these anyway** | Your app's dependencies live inside Docker images, entirely outside APT. Â§4.6. |
+| **Docker's own APT repo** | **No** | A Docker Engine upgrade restarts the daemon. With `live-restore: true` (§2.4.3) that is survivable, but a *major* version bump is not something to discover after the fact. Upgrade Docker deliberately, monthly. |
+| **Your application images** | **No — and unattended-upgrades never touches these anyway** | Your app's dependencies live inside Docker images, entirely outside APT. §4.6. |
 
-**Blacklist anything whose restart would take the site down** â€” even though it means you must patch those manually:
+**Blacklist anything whose restart would take the site down** — even though it means you must patch those manually:
 
 ```
 Unattended-Upgrade::Package-Blacklist {
@@ -1131,13 +1129,13 @@ Starting with an empty blacklist is the right call. A blacklist entry is a perma
 
 ### 4.4 The full configuration file
 
-Write a **local** override so package upgrades never clobber it â€” the Debian wiki's recommended pattern is to copy the shipped file to a higher-numbered name and edit the copy ([Debian Wiki: UnattendedUpgrades](https://wiki.debian.org/UnattendedUpgrades)):
+Write a **local** override so package upgrades never clobber it — the Debian wiki's recommended pattern is to copy the shipped file to a higher-numbered name and edit the copy ([Debian Wiki: UnattendedUpgrades](https://wiki.debian.org/UnattendedUpgrades)):
 
 ```bash
 sudo tee /etc/apt/apt.conf.d/52unattended-upgrades-local > /dev/null <<'EOF'
 // --- Foundit local overrides. Takes precedence over 50unattended-upgrades. ---
 
-// Email me. Requires a working MTA or msmtp; see Â§4.7.
+// Email me. Requires a working MTA or msmtp; see §4.7.
 Unattended-Upgrade::Mail "you@example.com";
 Unattended-Upgrade::MailReport "on-change";   // always | only-on-error | on-change
 
@@ -1159,7 +1157,7 @@ Unattended-Upgrade::Random-Sleep "true";
 EOF
 ```
 
-Every one of `Automatic-Reboot`, `Automatic-Reboot-Time`, `Automatic-Reboot-WithUsers`, `Mail`, `MailReport` and `Remove-Unused-Kernel-Packages` is a documented option ([Ubuntu Server: Automatic updates](https://ubuntu.com/server/docs/how-to/software/automatic-updates/)). Note the shipped defaults are `Automatic-Reboot "false"` and `Automatic-Reboot-Time "now"` â€” **"now" is why you must set a time if you set reboot to true.**
+Every one of `Automatic-Reboot`, `Automatic-Reboot-Time`, `Automatic-Reboot-WithUsers`, `Mail`, `MailReport` and `Remove-Unused-Kernel-Packages` is a documented option ([Ubuntu Server: Automatic updates](https://ubuntu.com/server/docs/how-to/software/automatic-updates/)). Note the shipped defaults are `Automatic-Reboot "false"` and `Automatic-Reboot-Time "now"` — **"now" is why you must set a time if you set reboot to true.**
 
 Test before trusting it:
 
@@ -1179,9 +1177,9 @@ sudo tail -50 /var/log/unattended-upgrades/unattended-upgrades.log
 
 **What needs a reboot:** the kernel, and `systemd` itself. Nothing else, strictly.
 
-**What needs a service restart but not a reboot:** OpenSSL, glibc, libssl â€” any library a running process has mapped. The process keeps using the *old, vulnerable* copy until restarted. This is the widely missed half: `apt upgrade` patched the file on disk; your nginx is still running the vulnerable code in memory.
+**What needs a service restart but not a reboot:** OpenSSL, glibc, libssl — any library a running process has mapped. The process keeps using the *old, vulnerable* copy until restarted. This is the widely missed half: `apt upgrade` patched the file on disk; your nginx is still running the vulnerable code in memory.
 
-`needrestart` (installed in Â§1.4) detects exactly this:
+`needrestart` (installed in §1.4) detects exactly this:
 
 ```bash
 sudo needrestart -b        # batch mode: lists services and whether a reboot is needed
@@ -1205,15 +1203,15 @@ EOF
 ls -l /var/run/reboot-required /var/run/reboot-required.pkgs 2>/dev/null && cat /var/run/reboot-required.pkgs
 ```
 
-**The reboot policy for a single-machine service.** You have no second server, so a reboot is a real outage of 20â€“60 seconds. The honest trade-off:
+**The reboot policy for a single-machine service.** You have no second server, so a reboot is a real outage of 20–60 seconds. The honest trade-off:
 
 | Policy | Outage | Risk | Verdict |
 |---|---|---|---|
 | Never reboot; patch manually when you notice | 0 | Kernel vulnerabilities stay live indefinitely. Uptime becomes a liability. | **No.** This is how a server ends up 400 days behind. |
-| `Automatic-Reboot "true"` at a fixed low-traffic hour | ~40s, at 04:30 | Small chance a reboot happens during a rare 04:30 usage spike; small chance the box does not come back cleanly. | **Yes â€” this is the recommendation.** |
+| `Automatic-Reboot "true"` at a fixed low-traffic hour | ~40s, at 04:30 | Small chance a reboot happens during a rare 04:30 usage spike; small chance the box does not come back cleanly. | **Yes — this is the recommendation.** |
 | Livepatch + reboot monthly | ~40s/month | Best-of-both, but Livepatch's own docs say it is "not a replacement for rebooting". | Yes, as an addition to the above, not a substitute. |
 
-Set `Automatic-Reboot-Time "04:30"` in your lowest-traffic hour **in the server's timezone** â€” check with `timedatectl` and set it to UTC (`sudo timedatectl set-timezone UTC`) so logs and schedules stop lying to you across daylight-saving changes.
+Set `Automatic-Reboot-Time "04:30"` in your lowest-traffic hour **in the server's timezone** — check with `timedatectl` and set it to UTC (`sudo timedatectl set-timezone UTC`) so logs and schedules stop lying to you across daylight-saving changes.
 
 Two prerequisites before you trust automatic reboots:
 
@@ -1252,7 +1250,7 @@ sudo docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
      aquasec/trivy image foundit-app:latest
 ```
 
-âš ï¸ That Trivy invocation mounts `docker.sock` into a container, which Â§6.6 tells you never to do. Run Trivy against a **registry image** (`trivy image registry/foundit-app:tag`, no socket) or install the Trivy binary on the host instead. Included here specifically because it is the exact copy-paste that undoes your container hardening.
+⚠️ That Trivy invocation mounts `docker.sock` into a container, which §6.6 tells you never to do. Run Trivy against a **registry image** (`trivy image registry/foundit-app:tag`, no socket) or install the Trivy binary on the host instead. Included here specifically because it is the exact copy-paste that undoes your container hardening.
 
 Set a monthly calendar reminder titled "rebuild containers". It is the single maintenance task most likely to be skipped and most likely to matter.
 
@@ -1281,7 +1279,7 @@ sudo chown root:root /etc/msmtprc /etc/msmtp-password
 echo "test from foundit server" | mail -s "foundit test" you@example.com
 ```
 
-Use an app-specific password from a dedicated address, never your personal mailbox password, and give the file mode `600` (Â§6). If email is too much friction, `MailReport "only-on-error"` plus the weekly checklist in Â§9 is an acceptable fallback â€” but silence should never mean "probably fine" by default.
+Use an app-specific password from a dedicated address, never your personal mailbox password, and give the file mode `600` (§6). If email is too much friction, `MailReport "only-on-error"` plus the weekly checklist in §9 is an acceptable fallback — but silence should never mean "probably fine" by default.
 
 ### 4.8 Kernel livepatch
 
@@ -1296,28 +1294,27 @@ canonical-livepatch status --verbose
 
 ([Ubuntu: Livepatch](https://ubuntu.com/security/livepatch))
 
-**What Livepatch does not do â€” read this before deciding it solves your reboot problem:**
+**What Livepatch does not do — read this before deciding it solves your reboot problem:**
 
 - "It patches only kernel vulnerabilities with critical/high severity ratings" ([Ubuntu: Livepatch](https://ubuntu.com/security/livepatch)). Medium-severity kernel issues still need a reboot.
 - "does not patch userspace libraries like OpenSSL or glibc" ([Ubuntu: Livepatch](https://ubuntu.com/security/livepatch)). Those are the ones that most often affect a web app, and they need a **service restart**, which is what `needrestart` handles.
-- It is "not a replacement for rebooting" â€” scheduled reboots remain necessary "to flush accumulated state inconsistencies from memory leaks" ([Ubuntu: Livepatch](https://ubuntu.com/security/livepatch)).
+- It is "not a replacement for rebooting" — scheduled reboots remain necessary "to flush accumulated state inconsistencies from memory leaks" ([Ubuntu: Livepatch](https://ubuntu.com/security/livepatch)).
 
-**Recommendation:** if you chose Ubuntu, enable Livepatch â€” it is free at your scale and strictly reduces exposure between reboots. Then still set `Automatic-Reboot "true"`, perhaps relaxed to a monthly cadence rather than "whenever a reboot is flagged". Do **not** enable Livepatch and then turn automatic reboots off; that is the misunderstanding the vendor's own documentation warns against.
+**Recommendation:** if you chose Ubuntu, enable Livepatch — it is free at your scale and strictly reduces exposure between reboots. Then still set `Automatic-Reboot "true"`, perhaps relaxed to a monthly cadence rather than "whenever a reboot is flagged". Do **not** enable Livepatch and then turn automatic reboots off; that is the misunderstanding the vendor's own documentation warns against.
 
 Debian has no equivalent free offering. If you chose Debian, automatic reboots are your only kernel-patching path, which is a mild argument in favour of Ubuntu for this deployment.
 
 ---
 
-
 ## 5. Intrusion prevention and detection
 
-### 5.1 fail2ban or CrowdSec? â€” the recommendation and the reasoning
+### 5.1 fail2ban or CrowdSec? — the recommendation and the reasoning
 
 **Recommendation: fail2ban, with an SSH jail only. Do not install CrowdSec at launch.**
 
 This will look like the boring answer, so here is the reasoning, which is specific to *your* architecture rather than generic.
 
-**What CrowdSec is genuinely better at.** CrowdSec is an "Open-source agent that parses logs, applies scenarios, and bans IPs", and users are "Immediately protected with the Community Blocklist" ([CrowdSec: Intro](https://docs.crowdsec.net/docs/next/getting_started/intro/)). Its firewall bouncer solves the Docker problem correctly â€” its docs say: *"If you are using a dockerized application and allow remote connections to the exposed port, you need to add the `DOCKER-USER` chain to the list"* ([CrowdSec: Firewall bouncer](https://docs.crowdsec.net/u/bouncers/firewall/)), configured as:
+**What CrowdSec is genuinely better at.** CrowdSec is an "Open-source agent that parses logs, applies scenarios, and bans IPs", and users are "Immediately protected with the Community Blocklist" ([CrowdSec: Intro](https://docs.crowdsec.net/docs/next/getting_started/intro/)). Its firewall bouncer solves the Docker problem correctly — its docs say: *"If you are using a dockerized application and allow remote connections to the exposed port, you need to add the `DOCKER-USER` chain to the list"* ([CrowdSec: Firewall bouncer](https://docs.crowdsec.net/u/bouncers/firewall/)), configured as:
 
 ```yaml
 iptables_chains:
@@ -1326,12 +1323,12 @@ iptables_chains:
   - DOCKER-USER
 ```
 
-That is a real advantage over fail2ban, whose default `banaction` is `iptables-multiport` ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)) writing to `INPUT` â€” which, per Â§2.4, **does not affect Docker-published ports at all.**
+That is a real advantage over fail2ban, whose default `banaction` is `iptables-multiport` ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)) writing to `INPUT` — which, per §2.4, **does not affect Docker-published ports at all.**
 
-**Why that advantage does not pay off here.** Your web traffic reaches the origin **only from Cloudflare IP ranges** (Â§3). Therefore:
+**Why that advantage does not pay off here.** Your web traffic reaches the origin **only from Cloudflare IP ranges** (§3). Therefore:
 
 1. Every HTTP request in your proxy's logs has a Cloudflare source IP unless you configure real-IP restoration.
-2. If CrowdSec bans an attacker's IP at the origin firewall, it bans nothing â€” the attacker's packets never carried that IP to your box.
+2. If CrowdSec bans an attacker's IP at the origin firewall, it bans nothing — the attacker's packets never carried that IP to your box.
 3. If real-IP restoration *is* configured and CrowdSec bans the restored address in `DOCKER-USER`, it still bans nothing, because the packets arrive from a Cloudflare IP.
 4. If it somehow banned the Cloudflare IP the request came from, it would **take a slice of your legitimate users offline.** This is a real, common self-inflicted outage.
 
@@ -1347,13 +1344,13 @@ So the division of labour is:
 | Origin network | **Hetzner Cloud Firewall + `DOCKER-USER` allowlist** | Everything not from Cloudflare |
 | SSH | **fail2ban** | Repeated failed auth from the same source |
 
-**When to revisit and adopt CrowdSec:** if you ever stop fronting the app with Cloudflare, if you expose a non-HTTP service to the internet, or if you want the community blocklist applied pre-emptively. If you do adopt it *while* still on Cloudflare, use the **Cloudflare bouncer** (which pushes decisions into Cloudflare's own firewall) rather than the origin firewall bouncer â€” that puts the block where the attacker's IP actually is.
+**When to revisit and adopt CrowdSec:** if you ever stop fronting the app with Cloudflare, if you expose a non-HTTP service to the internet, or if you want the community blocklist applied pre-emptively. If you do adopt it *while* still on Cloudflare, use the **Cloudflare bouncer** (which pushes decisions into Cloudflare's own firewall) rather than the origin firewall bouncer — that puts the block where the attacker's IP actually is.
 
-For completeness, the CrowdSec install path is `curl -s https://install.crowdsec.net | sudo sh` then `sudo apt install crowdsec`, plus `sudo apt install crowdsec-firewall-bouncer-iptables`; note their warning that *"the Security Engine by itself is a detection engine â€” it will not block anything"* without a bouncer ([CrowdSec: Linux installation](https://docs.crowdsec.net/u/getting_started/installation/linux/)).
+For completeness, the CrowdSec install path is `curl -s https://install.crowdsec.net | sudo sh` then `sudo apt install crowdsec`, plus `sudo apt install crowdsec-firewall-bouncer-iptables`; note their warning that *"the Security Engine by itself is a detection engine — it will not block anything"* without a bouncer ([CrowdSec: Linux installation](https://docs.crowdsec.net/u/getting_started/installation/linux/)).
 
 ### 5.2 fail2ban configuration
 
-Never edit `jail.conf` â€” settings in a file parsed later take precedence, so `jail.local` is the supported override ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)).
+Never edit `jail.conf` — settings in a file parsed later take precedence, so `jail.local` is the supported override ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)).
 
 ```bash
 sudo tee /etc/fail2ban/jail.local > /dev/null <<'EOF'
@@ -1399,11 +1396,11 @@ sudo systemctl restart fail2ban
 
 The options used are all documented in [jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html): `bantime` ("effective ban duration"), `findtime` ("time interval ... before the current time where failures will count towards a ban"), `maxretry` ("number of failures that have to occur in the last findtime seconds to ban the IP"), `ignoreip` ("list of IPs not to ban ... can include a DNS resp. CIDR mask too"), `banaction` ("banning action (default iptables-multiport)"), `backend` ("backend to be used to detect changes in the logpath. It defaults to 'auto'"), `filter`, `action` and `logpath`.
 
-`bantime.increment`, `bantime.factor` and `bantime.maxtime` are **not** in the Ubuntu manpage excerpt â€” they are fail2ban 0.11+ features documented in the shipped `jail.conf` comments. Verify on your machine with `grep -n 'bantime.increment' /etc/fail2ban/jail.conf` before relying on them; see [What I could not confirm](#what-i-could-not-confirm).
+`bantime.increment`, `bantime.factor` and `bantime.maxtime` are **not** in the Ubuntu manpage excerpt — they are fail2ban 0.11+ features documented in the shipped `jail.conf` comments. Verify on your machine with `grep -n 'bantime.increment' /etc/fail2ban/jail.conf` before relying on them; see [What I could not confirm](#12-what-i-could-not-confirm).
 
 **Three fail2ban traps, in order of how often they bite:**
 
-1. **`backend = auto` finds no log and silently does nothing.** Recent Debian and Ubuntu images often ship without `rsyslog`, so `/var/log/auth.log` does not exist and the `sshd` jail reads an empty file forever, while `systemctl status fail2ban` reports "active (running)". Setting `backend = systemd` reads the journal directly and removes the failure mode. **Verify it is actually seeing events** â€” this is the only proof that matters:
+1. **`backend = auto` finds no log and silently does nothing.** Recent Debian and Ubuntu images often ship without `rsyslog`, so `/var/log/auth.log` does not exist and the `sshd` jail reads an empty file forever, while `systemctl status fail2ban` reports "active (running)". Setting `backend = systemd` reads the journal directly and removes the failure mode. **Verify it is actually seeing events** — this is the only proof that matters:
    ```bash
    sudo fail2ban-client status sshd
    # "Total failed" must be > 0 after you deliberately fail a login.
@@ -1415,8 +1412,8 @@ The options used are all documented in [jail.conf(5)](https://manpages.ubuntu.co
    sudo fail2ban-client status sshd     # your test IP should be listed as banned
    sudo fail2ban-client set sshd unbanip YOUR.TEST.IP
    ```
-2. **fail2ban does not protect Docker-published ports.** Its default `iptables-multiport` action writes to `INPUT` ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)); Docker's published ports never traverse `INPUT` (Â§2.4). Do not add a web jail expecting it to work. This is not a bug you can configure away with `banaction`; it is the same architectural fact as Â§2.4.
-3. **`ignoreip` is your seatbelt.** Put your own address in it before you start testing bans. If your ISP address is dynamic, keep the Hetzner web console tab open while testing (Â§1.10 Path A defeats any fail2ban ban, because the console is not on the network).
+2. **fail2ban does not protect Docker-published ports.** Its default `iptables-multiport` action writes to `INPUT` ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)); Docker's published ports never traverse `INPUT` (§2.4). Do not add a web jail expecting it to work. This is not a bug you can configure away with `banaction`; it is the same architectural fact as §2.4.
+3. **`ignoreip` is your seatbelt.** Put your own address in it before you start testing bans. If your ISP address is dynamic, keep the Hetzner web console tab open while testing (§1.10 Path A defeats any fail2ban ban, because the console is not on the network).
 
 Useful commands:
 
@@ -1430,7 +1427,7 @@ sudo journalctl -u fail2ban -n 50 --no-pager
 
 ### 5.3 Auditing what changed: auditd, and the lighter alternative
 
-**Recommendation: skip `auditd` at launch. Adopt the light stack in Â§5.3.2. Add `auditd` only if you ever have a compliance requirement or an actual incident to investigate.**
+**Recommendation: skip `auditd` at launch. Adopt the light stack in §5.3.2. Add `auditd` only if you ever have a compliance requirement or an actual incident to investigate.**
 
 #### 5.3.1 What auditd would give you, and why it is the wrong first tool here
 
@@ -1476,7 +1473,7 @@ sudo augenrules --load && sudo systemctl restart auditd
 sudo ausearch -k sshd -i | tail -20
 ```
 
-**Why not to, for this owner:** `auditd` on a busy container host produces a large volume of records in a format that is genuinely hard to read, it competes with Docker for the audit netlink socket in some configurations, and â€” decisively â€” **an audit log that nobody reads provides zero security and non-zero disk consumption and CPU.** It is a tool for someone who will look at it. You have told me, honestly, that you are not that person yet.
+**Why not to, for this owner:** `auditd` on a busy container host produces a large volume of records in a format that is genuinely hard to read, it competes with Docker for the audit netlink socket in some configurations, and — decisively — **an audit log that nobody reads provides zero security and non-zero disk consumption and CPU.** It is a tool for someone who will look at it. You have told me, honestly, that you are not that person yet.
 
 #### 5.3.2 The lighter alternative that a non-developer will actually use
 
@@ -1497,7 +1494,7 @@ sudo journalctl -u ssh --since "7 days ago" | grep -E 'Accepted|Failed|Invalid'
 sudo journalctl _COMM=sudo --since "7 days ago" --no-pager    # every sudo invocation
 ```
 
-**c) Did any *shipped* file change?** `debsums` verifies installed files against the package manager's checksums. This catches a trojanised system binary â€” the single highest-value integrity check on a Debian-family box, and it takes one command:
+**c) Did any *shipped* file change?** `debsums` verifies installed files against the package manager's checksums. This catches a trojanised system binary — the single highest-value integrity check on a Debian-family box, and it takes one command:
 ```bash
 sudo apt install -y debsums
 sudo debsums -c        # lists any file whose checksum no longer matches its package
@@ -1517,12 +1514,12 @@ sudo tee /etc/aide/aide.conf.d/99_foundit > /dev/null <<'EOF'
 /etc/docker       FIPSR
 /srv/foundit      FIPSR
 EOF
-sudo aideinit          # builds the baseline â€” do this on day one, before going live
+sudo aideinit          # builds the baseline — do this on day one, before going live
 sudo aide.wrapper --check | head -50
 ```
-âš ï¸ **A baseline built after a compromise is a baseline of the compromise.** Run `aideinit` on day one. The Debian `aide-common` package installs a daily cron job that emails the report; if you use that, make sure Â§4.7's mail actually works, otherwise it is theatre.
+⚠️ **A baseline built after a compromise is a baseline of the compromise.** Run `aideinit` on day one. The Debian `aide-common` package installs a daily cron job that emails the report; if you use that, make sure §4.7's mail actually works, otherwise it is theatre.
 
-**Something to be honest about:** an attacker with root can edit `/var/log`, `/var/lib/aide/aide.db`, and the AIDE config. Local logs and local integrity databases detect *mistakes and unsophisticated intrusions*, not a competent attacker who got root. The only real defences against that are (i) shipping logs off the box, and (ii) rebuilding rather than cleaning (Â§7). Given the scale, ship the logs somewhere free â€” Cloudflare Logpush, a Grafana Cloud free tier, or even `journalctl` output rsynced nightly to a different provider â€” and accept that on-box detection is best-effort.
+**Something to be honest about:** an attacker with root can edit `/var/log`, `/var/lib/aide/aide.db`, and the AIDE config. Local logs and local integrity databases detect *mistakes and unsophisticated intrusions*, not a competent attacker who got root. The only real defences against that are (i) shipping logs off the box, and (ii) rebuilding rather than cleaning (§7). Given the scale, ship the logs somewhere free — Cloudflare Logpush, a Grafana Cloud free tier, or even `journalctl` output rsynced nightly to a different provider — and accept that on-box detection is best-effort.
 
 ### 5.4 What to look at weekly, and what to never look at
 
@@ -1531,20 +1528,20 @@ This table is the whole point of section 5. A monitoring setup nobody reads is w
 | Frequency | What | Command / place | Why this one |
 |---|---|---|---|
 | **Automatic, pushes to you** | Site down | Free uptime monitor (UptimeRobot, Better Stack free tier) hitting `https://foundit.app/healthz` every 5 min, alerting to your phone | The single highest-value alert you will ever configure. Most compromises that matter eventually break something. |
-| **Automatic** | Disk filling | `df -h` in the weekly digest; alert at 80% | A full disk takes Postgres down and looks exactly like a hack. Docker logs and images are the usual culprit â€” `daemon.json` in Â§2.4.3 caps log size. |
-| **Automatic** | unattended-upgrades report | Email, `MailReport "on-change"` (Â§4.4) | Tells you patching is alive. Silence for two weeks means it broke. |
+| **Automatic** | Disk filling | `df -h` in the weekly digest; alert at 80% | A full disk takes Postgres down and looks exactly like a hack. Docker logs and images are the usual culprit — `daemon.json` in §2.4.3 caps log size. |
+| **Automatic** | unattended-upgrades report | Email, `MailReport "on-change"` (§4.4) | Tells you patching is alive. Silence for two weeks means it broke. |
 | **Weekly, 5 minutes** | Failed and successful SSH logins | `sudo journalctl -u ssh --since "7 days ago" \| grep -E 'Accepted\|Failed'` | With key-only auth on a non-standard port this should be nearly empty. **A single `Accepted publickey` you do not recognise is the alarm.** |
 | **Weekly, 1 minute** | fail2ban state | `sudo fail2ban-client status sshd` | Confirms the tool is alive and counting. `Total failed: 0` after weeks is suspicious, not reassuring. |
-| **Weekly, 1 minute** | What is listening, and where | `sudo ss -tlnp` and `docker ps --format 'table {{.Names}}\t{{.Ports}}'` | The Â§2.4 regression check. A deploy that added `ports: - "6379:6379"` shows up here and nowhere else. |
+| **Weekly, 1 minute** | What is listening, and where | `sudo ss -tlnp` and `docker ps --format 'table {{.Names}}\t{{.Ports}}'` | The §2.4 regression check. A deploy that added `ports: - "6379:6379"` shows up here and nowhere else. |
 | **Weekly, 30 seconds** | Firewall still on | `sudo ufw status verbose` and `sudo iptables -L FOUNDIT-CF -n \| head` | Both must be non-empty. |
 | **Monthly** | Package integrity | `sudo debsums -c` | Should print nothing. |
-| **Monthly** | Container rebuild | Â§4.6 | The most-skipped and most-important task. |
-| **Monthly** | Restore a backup | Â§7.4 | An untested backup is a hope. |
+| **Monthly** | Container rebuild | §4.6 | The most-skipped and most-important task. |
+| **Monthly** | Restore a backup | §7.4 | An untested backup is a hope. |
 | **Quarterly** | Cloudflare IP list eyeball | `https://www.cloudflare.com/ips/` vs `/var/lib/foundit/cloudflare-ips-v4.txt` | The automation should make this unnecessary. Check anyway. |
-| **Quarterly** | External port scan | Â§8 | The only check that proves what the internet sees. |
-| **Never** | Raw `auditd` records | â€” | Unless you are investigating a specific incident, with a specific question. |
-| **Never** | Raw nginx/Caddy access logs, line by line | â€” | Behind Cloudflare these are Cloudflare IPs hitting your app. Use Cloudflare's own analytics dashboard instead â€” it has the real client IPs, the country, the bot score, and a UI. |
-| **Never** | `/var/log/syslog` in full | â€” | It is the wrong altitude. Query it when you have a question; do not read it as a practice. |
+| **Quarterly** | External port scan | §8 | The only check that proves what the internet sees. |
+| **Never** | Raw `auditd` records | — | Unless you are investigating a specific incident, with a specific question. |
+| **Never** | Raw nginx/Caddy access logs, line by line | — | Behind Cloudflare these are Cloudflare IPs hitting your app. Use Cloudflare's own analytics dashboard instead — it has the real client IPs, the country, the bot score, and a UI. |
+| **Never** | `/var/log/syslog` in full | — | It is the wrong altitude. Query it when you have a question; do not read it as a practice. |
 
 Automate the weekly ones into a single email so "weekly review" is reading one message, not running eight commands:
 
@@ -1552,7 +1549,7 @@ Automate the weekly ones into a single email so "weekly review" is reading one m
 sudo tee /usr/local/sbin/foundit-weekly-digest.sh > /dev/null <<'DIGEST'
 #!/bin/bash
 {
-  echo "=== FOUNDIT WEEKLY DIGEST â€” $(date -u) ==="
+  echo "=== FOUNDIT WEEKLY DIGEST — $(date -u) ==="
   echo; echo "--- Uptime / load ---"; uptime
   echo; echo "--- Disk ---"; df -h / /var/lib/docker 2>/dev/null
   echo; echo "--- Memory ---"; free -h
@@ -1574,7 +1571,7 @@ sudo tee /usr/local/sbin/foundit-weekly-digest.sh > /dev/null <<'DIGEST'
   grep -A3 "$(date -d '7 days ago' +%Y-%m)" /var/log/apt/history.log 2>/dev/null | tail -30
   echo; echo "--- Last unattended-upgrades run ---"
   tail -5 /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null
-} | mail -s "Foundit weekly digest â€” $(hostname)" you@example.com
+} | mail -s "Foundit weekly digest — $(hostname)" you@example.com
 DIGEST
 sudo chmod 700 /usr/local/sbin/foundit-weekly-digest.sh
 
@@ -1600,7 +1597,6 @@ sudo systemctl daemon-reload && sudo systemctl enable --now foundit-digest.timer
 
 ---
 
-
 ## 6. Secrets on the host, and containing a compromised container
 
 ### 6.1 Where the files live and what they are set to
@@ -1615,12 +1611,12 @@ sudo chmod 700 /srv/foundit/secrets
 | Path | Owner | Mode | Contents |
 |---|---|---|---|
 | `/srv/foundit/` | `founditops:founditops` | `750` | `docker-compose.yml`, `Caddyfile`, everything version-controllable |
-| `/srv/foundit/.env` | `founditops:founditops` | **`600`** | Non-secret configuration only â€” ports, hostnames, feature flags, log level |
+| `/srv/foundit/.env` | `founditops:founditops` | **`600`** | Non-secret configuration only — ports, hostnames, feature flags, log level |
 | `/srv/foundit/secrets/` | `founditops:founditops` | **`700`** | One file per secret, each `600`. Never in git. |
 | `/srv/foundit/secrets/db_password` | `founditops:founditops` | **`600`** | Postgres password, no trailing newline |
 | `/srv/foundit/data/` | per-container UID | `700` | Postgres data volume, backups staging |
 
-Verify â€” and put this in the weekly digest:
+Verify — and put this in the weekly digest:
 
 ```bash
 find /srv/foundit -name '*.env' -o -name '.env' -o -path '*/secrets/*' \
@@ -1653,12 +1649,12 @@ secrets/
 Docker's own documentation is blunt about the problem:
 
 > "If you're injecting passwords and API keys as environment variables, you risk unintentional information exposure. Environment variables are often available to all processes, and it can be difficult to track access. They can also be printed in logs when debugging errors without your knowledge."
-> â€” [Docker Compose: Use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)
+> — [Docker Compose: Use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)
 
 Concretely, here is your database password, four different ways:
 
 ```bash
-# 1. docker inspect â€” plain text, no root needed if you are in the docker group
+# 1. docker inspect — plain text, no root needed if you are in the docker group
 docker inspect foundit-db | grep -A20 '"Env"'
 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' foundit-db
 
@@ -1668,42 +1664,42 @@ sudo cat /proc/$(pgrep -f postgres | head -1)/environ | tr '\0' '\n'
 # 3. The process list with the environment flag
 ps auxe | grep -i postgres
 
-# 4. Compose's own rendered configuration â€” often pasted into a chat when debugging
+# 4. Compose's own rendered configuration — often pasted into a chat when debugging
 docker compose config
 ```
 
-Each of these is a routine debugging command. Every one of them prints secrets. The realistic leak paths are not "an attacker ran `docker inspect`" â€” they are:
+Each of these is a routine debugging command. Every one of them prints secrets. The realistic leak paths are not "an attacker ran `docker inspect`" — they are:
 
 - **You paste `docker compose config` output into an AI assistant, a forum, or a support ticket.** This is the most likely way your production database password ends up somewhere it should not be. It has happened to a great many people.
 - **A crash reporter (Sentry, Rollbar, Bugsnag) captures the process environment** with the stack trace and ships it to a third party.
 - **A child process inherits the environment** and logs it, or a dependency prints `process.env` on startup in debug mode.
 - **`docker inspect` output goes into a monitoring agent** that indexes container metadata.
-- **Anyone in the `docker` group can read every container's environment.** The `docker` group is root-equivalent (Â§6.6).
+- **Anyone in the `docker` group can read every container's environment.** The `docker` group is root-equivalent (§6.6).
 
-### 6.3 Docker secrets versus env files â€” the honest comparison
+### 6.3 Docker secrets versus env files — the honest comparison
 
 Compose secrets are "mounted as files at a standardized path within containers: `/run/secrets/<secret_name>`", defined in the top-level `secrets` element and granted "on a per-service basis" ([Docker Compose: Use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)).
 
 | | `.env` / `environment:` | Compose file secrets |
 |---|---|---|
-| Visible in `docker inspect` | **Yes, plain text** | No â€” only the mount path |
+| Visible in `docker inspect` | **Yes, plain text** | No — only the mount path |
 | Visible in `/proc/PID/environ` | **Yes** | No |
-| Visible in `docker compose config` | **Yes** | No â€” shows the file path |
+| Visible in `docker compose config` | **Yes** | No — shows the file path |
 | Captured by crash reporters | **Usually** | No |
 | Inherited by child processes | **Yes, automatically** | No |
-| Readable inside the container | Yes | Yes â€” at `/run/secrets/<name>` |
+| Readable inside the container | Yes | Yes — at `/run/secrets/<name>` |
 | Rotation | Restart container | Rewrite file, restart container |
 | Works with unmodified upstream images | Yes | **Only if the image supports it** |
 | On disk on the host | Yes, in `.env` | Yes, in the secret file |
-| Encrypted at rest | **No** | **No** â€” this is not encryption |
+| Encrypted at rest | **No** | **No** — this is not encryption |
 
 **The honest caveats, because Compose secrets are often oversold:**
 
-1. **They are not encrypted.** In Compose (as opposed to Swarm), a "secret" is a file on the host bind-mounted into the container. The protection is *scope* â€” it does not enter the environment, so it does not leak through the four channels in Â§6.2. That is a real and worthwhile improvement, but the file on disk is exactly as protected as its permissions make it.
-2. **The image must support file-based secrets.** Postgres does: `POSTGRES_PASSWORD_FILE`. Many images do not, and for those you are back to environment variables or an entrypoint wrapper that reads the file and exports it â€” which puts it back in the environment inside the container, though not in `docker inspect`.
+1. **They are not encrypted.** In Compose (as opposed to Swarm), a "secret" is a file on the host bind-mounted into the container. The protection is *scope* — it does not enter the environment, so it does not leak through the four channels in §6.2. That is a real and worthwhile improvement, but the file on disk is exactly as protected as its permissions make it.
+2. **The image must support file-based secrets.** Postgres does: `POSTGRES_PASSWORD_FILE`. Many images do not, and for those you are back to environment variables or an entrypoint wrapper that reads the file and exports it — which puts it back in the environment inside the container, though not in `docker inspect`.
 3. **They are only as good as the host.** Anyone who gets root on the host, or joins the `docker` group, reads the file.
 
-**Recommendation: use file-based secrets for everything that supports them, starting with Postgres, and keep a `600` `.env` for genuinely non-secret configuration.** Do not spend effort on a secrets manager (Vault, Infisical, SOPS-age) at launch â€” the operational complexity is real and the threat it addresses (host compromise) is better answered by Â§7's rebuild plan.
+**Recommendation: use file-based secrets for everything that supports them, starting with Postgres, and keep a `600` `.env` for genuinely non-secret configuration.** Do not spend effort on a secrets manager (Vault, Infisical, SOPS-age) at launch — the operational complexity is real and the threat it addresses (host compromise) is better answered by §7's rebuild plan.
 
 ### 6.4 The compose file, written correctly
 
@@ -1734,7 +1730,7 @@ services:
     <<: *hardening
     image: pgvector/pgvector:pg17
     user: "999:999"                    # the postgres UID inside this image
-    # NO ports: â€” reachable only from the backend network
+    # NO ports: — reachable only from the backend network
     environment:
       POSTGRES_USER: foundit
       POSTGRES_DB: foundit
@@ -1806,14 +1802,14 @@ volumes:
 
 Every hardening attribute above is documented in the Compose specification ([Compose file: Services](https://docs.docker.com/reference/compose-file/services/)):
 
-- `user` â€” "overrides the user used to run the container process. The default is set by the image, for example Dockerfile `USER`."
-- `read_only` â€” "configures the service container to be created with a read-only filesystem."
-- `cap_drop` â€” "specifies container capabilities to drop as strings."
-- `cap_add` â€” "specifies additional container capabilities as strings."
-- `security_opt` â€” "overrides the default labeling scheme for each container."
-- `tmpfs` â€” "mounts a temporary file system inside the container."
-- `privileged` â€” "configures the service container to run with elevated privileges." **Never set this.**
-- `secrets` â€” "grants access to sensitive data defined by the secrets top-level element on a per-service basis."
+- `user` — "overrides the user used to run the container process. The default is set by the image, for example Dockerfile `USER`."
+- `read_only` — "configures the service container to be created with a read-only filesystem."
+- `cap_drop` — "specifies container capabilities to drop as strings."
+- `cap_add` — "specifies additional container capabilities as strings."
+- `security_opt` — "overrides the default labeling scheme for each container."
+- `tmpfs` — "mounts a temporary file system inside the container."
+- `privileged` — "configures the service container to run with elevated privileges." **Never set this.**
+- `secrets` — "grants access to sensitive data defined by the secrets top-level element on a per-service basis."
 
 Note that `secrets:` also takes `uid`, `gid` and `mode`, so a secret can be made readable only by the container's non-root user ([Compose file: Services](https://docs.docker.com/reference/compose-file/services/)):
 
@@ -1827,24 +1823,24 @@ Note that `secrets:` also takes `uid`, `gid` and `mode`, so a secret can be made
 
 ### 6.5 How each hardening flag contains a compromised container
 
-Assume an attacker achieves remote code execution inside the `app` container â€” a dependency vulnerability, a deserialisation bug, whatever. Here is what each flag takes away from them:
+Assume an attacker achieves remote code execution inside the `app` container — a dependency vulnerability, a deserialisation bug, whatever. Here is what each flag takes away from them:
 
 | Control | What the attacker loses |
 |---|---|
 | **`user: "10001:10001"`** (non-root) | Cannot write to `/etc`, `/usr`, or any root-owned path in the image. Cannot install packages. Cannot bind ports below 1024. Docker's docs: containers are "quite secure; especially if you run your processes as non-privileged users inside the container" ([Docker Engine security](https://docs.docker.com/engine/security/)). |
 | **`read_only: true`** | Cannot drop a webshell, a cryptominer, or a persistence binary anywhere on disk. Everything they fetch dies with the container. This is the single most effective anti-persistence control available to you and it costs one line. |
 | **`tmpfs` for writable paths** | The only writable locations are in RAM, wiped on restart, and `noexec` can be added (`mode=1777,noexec`). |
-| **`cap_drop: [ALL]`** | No `CAP_NET_RAW` (no raw-socket scanning of your network), no `CAP_SYS_ADMIN`, no `CAP_DAC_OVERRIDE` (cannot bypass file permissions), no mounting. Docker already restricts capabilities â€” "By default Docker drops all capabilities except those needed", using an allowlist ([Docker Engine security](https://docs.docker.com/engine/security/)) â€” but that default set is still generous. `cap_drop: ALL` plus explicit `cap_add` is strictly tighter. |
+| **`cap_drop: [ALL]`** | No `CAP_NET_RAW` (no raw-socket scanning of your network), no `CAP_SYS_ADMIN`, no `CAP_DAC_OVERRIDE` (cannot bypass file permissions), no mounting. Docker already restricts capabilities — "By default Docker drops all capabilities except those needed", using an allowlist ([Docker Engine security](https://docs.docker.com/engine/security/)) — but that default set is still generous. `cap_drop: ALL` plus explicit `cap_add` is strictly tighter. |
 | **`security_opt: no-new-privileges:true`** | Cannot gain privileges through a setuid binary. Kills a whole family of container escapes that depend on `su`/`sudo`/setuid helpers inside the image. |
 | **`networks: backend.internal: true`** | For the `db` container: cannot exfiltrate data, cannot download a second stage, cannot join a botnet. It has no route off the box. |
 | **No published port on `db`** | Cannot be reached from outside at all. The attacker must already be inside another container. |
-| **No `docker.sock` mount** | Cannot become root on the host. See Â§6.6 â€” this is the big one. |
+| **No `docker.sock` mount** | Cannot become root on the host. See §6.6 — this is the big one. |
 | **`restart: unless-stopped` + read-only** | Any foothold that is not in the image itself evaporates on the next restart, and containers restart on every deploy and reboot. |
 
 Two things this does **not** protect against, stated plainly:
 
 - **Data the app is supposed to have access to.** The attacker in `app` can read your database, because `app` can read your database. Container hardening limits lateral movement and persistence; it does not limit the application's own authority. That is an application-authorization problem (see `03-security-and-authorization.md`).
-- **A kernel exploit.** Containers share the host kernel. `cap_drop` and non-root raise the bar considerably, but a kernel vulnerability escapes anyway â€” which is why Â§4's patching is not optional.
+- **A kernel exploit.** Containers share the host kernel. `cap_drop` and non-root raise the bar considerably, but a kernel vulnerability escapes anyway — which is why §4's patching is not optional.
 
 Enforce non-root in the image too, so a compose mistake cannot undo it:
 
@@ -1877,7 +1873,7 @@ done
 
 Docker's security documentation grounds why: *"only trusted users should be allowed to control your Docker daemon"*, and Docker allows sharing directories between host and container "without limiting the access rights of the container", so a container "could theoretically mount the entire host filesystem and modify it without restrictions" ([Docker Engine security](https://docs.docker.com/engine/security/)).
 
-The attack is three commands. A container with the socket can ask the daemon to start a *new* container with `--privileged` and the host root filesystem bind-mounted at `/host`, then write to `/host/root/.ssh/authorized_keys` or `/host/etc/cron.d/`. Nothing about the first container's own `read_only`, `cap_drop` or non-root user matters â€” it is not doing the escaping, the daemon is, and the daemon runs as root.
+The attack is three commands. A container with the socket can ask the daemon to start a *new* container with `--privileged` and the host root filesystem bind-mounted at `/host`, then write to `/host/root/.ssh/authorized_keys` or `/host/etc/cron.d/`. Nothing about the first container's own `read_only`, `cap_drop` or non-root user matters — it is not doing the escaping, the daemon is, and the daemon runs as root.
 
 The same reasoning means **adding a user to the `docker` group is equivalent to giving them passwordless root.** That is fine for `founditops`, who already has sudo. It is not fine for any service account, and it is not a way to "avoid using sudo".
 
@@ -1885,12 +1881,12 @@ Things that will ask you to mount the socket, and what to do instead:
 
 | Wants the socket | Do this instead |
 |---|---|
-| **Watchtower / auto-updating containers** | Do not run it. Update deliberately (Â§4.6). Automatic image updates on a single production host is a self-inflicted outage waiting for a bad upstream tag. |
+| **Watchtower / auto-updating containers** | Do not run it. Update deliberately (§4.6). Automatic image updates on a single production host is a self-inflicted outage waiting for a bad upstream tag. |
 | **Traefik** (reads container labels for routing) | Use Caddy or nginx with a static config file. You have three services; service discovery is solving a problem you do not have. If you must use Traefik, put a socket proxy (`tecnativa/docker-socket-proxy`) in front, exposing only the read-only endpoints it needs. |
 | **Portainer** | Access the host over SSH and use `docker` commands. If you want a UI badly enough, accept that Portainer is root-on-host and treat its credentials as root credentials. |
 | **cAdvisor / monitoring** | Use the read-only socket-proxy pattern, or scrape metrics the app exports itself. |
 | **CI/CD deploying via docker-in-docker** | Deploy over SSH: `ssh foundit 'cd /srv/foundit && docker compose pull && docker compose up -d'` with a dedicated, restricted key. |
-| **Trivy scanning local images** (Â§4.6) | Scan the image in the registry instead: `trivy image ghcr.io/you/app:tag`. No socket needed. |
+| **Trivy scanning local images** (§4.6) | Scan the image in the registry instead: `trivy image ghcr.io/you/app:tag`. No socket needed. |
 
 Audit for it:
 
@@ -1912,7 +1908,7 @@ Add that grep to your weekly digest. It is a one-line check for a total-compromi
 | Payment processor live keys | Only in the process that needs them, via file-based secrets, and rotate on any suspicion. |
 | Your SSH **private** key | Your laptop only. Never on the server. If you need server-to-server access, generate a separate key on the server and authorise it narrowly. |
 
-Rotation drill â€” run it once now, so you know how, before you need to do it at 3am:
+Rotation drill — run it once now, so you know how, before you need to do it at 3am:
 
 ```bash
 # 1. New password
@@ -1928,29 +1924,28 @@ docker compose up -d --force-recreate app
 
 ---
 
-
 ## 7. When it goes wrong
 
 ### 7.1 Signs of compromise on a small VPS
 
 You are not going to spot a sophisticated attacker. You are going to spot the ordinary ones, and the ordinary ones are 95% of what actually happens to a box like this. Ordinary attackers monetise immediately, and monetisation is noisy.
 
-**Loud signs â€” you will notice these without looking:**
+**Loud signs — you will notice these without looking:**
 
 | Sign | Check | What it usually means |
 |---|---|---|
 | CPU pinned at 100% with no traffic | `htop`, `docker stats` | Cryptominer. The single most common outcome of a compromised container. |
 | Hetzner emails you about abuse / outbound attack traffic | your inbox | Your box is scanning or DDoSing others. Hetzner will suspend it. |
-| Bandwidth bill or graph spikes | Hetzner Console â†’ Graphs | Exfiltration, a miner's pool traffic, or your box being used as a proxy. |
+| Bandwidth bill or graph spikes | Hetzner Console → Graphs | Exfiltration, a miner's pool traffic, or your box being used as a proxy. |
 | Site suddenly slow or 502ing | uptime monitor | Could be anything; combined with high CPU it is a miner. |
 | Disk full | `df -h` | Logs, or a staging area for stolen data, or dumped payloads. |
-| Cannot log in with your key | â€” | Someone changed `authorized_keys`. Go straight to Â§7.3. |
-| A ransom note in your database | â€” | Exposed Postgres/Redis. See Â§8.8 â€” this is *the* self-hosting disaster. |
+| Cannot log in with your key | — | Someone changed `authorized_keys`. Go straight to §7.3. |
+| A ransom note in your database | — | Exposed Postgres/Redis. See §8.8 — this is *the* self-hosting disaster. |
 
-**Quiet signs â€” these need looking, which is what the weekly checklist in Â§5.4 is for:**
+**Quiet signs — these need looking, which is what the weekly checklist in §5.4 is for:**
 
 ```bash
-# Unexpected listening sockets â€” the highest-value single check
+# Unexpected listening sockets — the highest-value single check
 sudo ss -tlnp
 
 # Outbound connections you did not initiate
@@ -1988,7 +1983,7 @@ docker inspect $(docker ps -q) --format '{{.Name}} {{.Config.Image}} {{.Config.C
 
 **Two signs specific to your architecture:**
 
-1. **Traffic arriving from a non-Cloudflare IP on 80/443.** With Â§3 in place this should be impossible; if it happens, your allowlist broke. Log it:
+1. **Traffic arriving from a non-Cloudflare IP on 80/443.** With §3 in place this should be impossible; if it happens, your allowlist broke. Log it:
    ```bash
    sudo iptables -I FOUNDIT-CF 1 -p tcp -m conntrack --ctorigdstport 443 \
      -m limit --limit 5/min -j LOG --log-prefix "CF-BYPASS: "
@@ -2009,27 +2004,27 @@ The reasoning, in a form worth internalising:
 
 - Root-level malware modifies the very binaries you would use to look for it. `ps`, `ls`, `netstat` and `find` are the classic targets. A rootkit's entire job is to make your inspection tools lie.
 - You cannot prove absence. You can find three backdoors and be confident about none of them being the last one. "I cleaned it" always means "I stopped finding things", which is a statement about your search, not about the server.
-- Attackers plant multiple persistence mechanisms *precisely because* defenders find one and stop. A cron job, an SSH key, a systemd timer, a modified `.bashrc`, a container image, a kernel module â€” you must find all of them; they need one to survive.
+- Attackers plant multiple persistence mechanisms *precisely because* defenders find one and stop. A cron job, an SSH key, a systemd timer, a modified `.bashrc`, a container image, a kernel module — you must find all of them; they need one to survive.
 - **Rebuilding is faster.** Cleaning is open-ended, stressful, and produces a server you never fully trust again. Rebuilding is a known, bounded procedure you have rehearsed. On a Hetzner Cloud VPS with your configuration in git, it is under an hour.
 
-The one exception: if this is a genuinely serious incident (customer data, legal exposure), **snapshot the compromised disk before destroying it** so a professional can examine it later, and do not power it off until you have â€” some evidence lives only in memory.
+The one exception: if this is a genuinely serious incident (customer data, legal exposure), **snapshot the compromised disk before destroying it** so a professional can examine it later, and do not power it off until you have — some evidence lives only in memory.
 
 ```bash
-# Preserve evidence: Hetzner Console â†’ your server â†’ Snapshots â†’ Take Snapshot
+# Preserve evidence: Hetzner Console → your server → Snapshots → Take Snapshot
 # Label it "COMPROMISED-2026-09-10-do-not-boot"
 ```
 
 ### 7.3 The rebuild procedure, target: under one hour
 
-**Phase 0 â€” contain (2 minutes).** Do this before anything else.
+**Phase 0 — contain (2 minutes).** Do this before anything else.
 
 ```
-Hetzner Console â†’ your server â†’ Firewalls
-  â†’ remove ALL inbound rules except SSH from your own IP
+Hetzner Console → your server → Firewalls
+  → remove ALL inbound rules except SSH from your own IP
 ```
 This severs the attacker's access without destroying evidence or state, and without touching the machine (which the attacker may be watching). Then, in Cloudflare, enable "Under Attack" mode or pause the zone so users see a maintenance page rather than a compromised app.
 
-**Phase 1 â€” capture what you need (10 minutes).**
+**Phase 1 — capture what you need (10 minutes).**
 
 ```bash
 # Take a Hetzner snapshot first (Console), then, if you can still trust a shell:
@@ -2040,17 +2035,17 @@ docker compose exec -T db pg_dump -U foundit -Fc foundit > /tmp/final-dump.pgdum
 exit
 scp foundit:/tmp/final-dump.pgdump ./final-dump.pgdump
 ```
-âš ï¸ **Treat this dump as potentially tainted.** Prefer your last known-good scheduled backup (Â§7.4) and accept the data loss. Use the final dump only to reconcile what changed in between, and inspect it before restoring â€” an attacker with database write access may have modified rows.
+⚠️ **Treat this dump as potentially tainted.** Prefer your last known-good scheduled backup (§7.4) and accept the data loss. Use the final dump only to reconcile what changed in between, and inspect it before restoring — an attacker with database write access may have modified rows.
 
-**Phase 2 â€” build the new server (15 minutes).**
+**Phase 2 — build the new server (15 minutes).**
 
-1. Create a new Hetzner server, **new IP**, following Â§1.1â€“1.8 (use the cloud-init from Â§1.11 to compress this to minutes).
-2. Attach the firewall from Â§2.2.
-3. Install Docker, apply `/etc/docker/daemon.json` from Â§2.4.3.
-4. Apply the `DOCKER-USER` script from Â§3.4 and enable its unit and timer.
-5. Configure `unattended-upgrades` (Â§4) and `fail2ban` (Â§5.2).
+1. Create a new Hetzner server, **new IP**, following §1.1–1.8 (use the cloud-init from §1.11 to compress this to minutes).
+2. Attach the firewall from §2.2.
+3. Install Docker, apply `/etc/docker/daemon.json` from §2.4.3.
+4. Apply the `DOCKER-USER` script from §3.4 and enable its unit and timer.
+5. Configure `unattended-upgrades` (§4) and `fail2ban` (§5.2).
 
-**Phase 3 â€” restore (15 minutes).**
+**Phase 3 — restore (15 minutes).**
 
 ```bash
 git clone git@github.com:amitlevavi234/foundit-infra.git /srv/foundit
@@ -2069,22 +2064,22 @@ docker compose exec -T db pg_restore -U foundit -d foundit --clean --if-exists \
 docker compose up -d
 ```
 
-**Phase 4 â€” cut over (10 minutes).**
+**Phase 4 — cut over (10 minutes).**
 
 1. Update the Cloudflare A record to the new IP. Cloudflare propagation is near-instant since it is proxied.
-2. Verify with Â§8's external checks.
+2. Verify with §8's external checks.
 3. Turn off "Under Attack" mode.
-4. **Destroy the old server.** Not "stop" â€” destroy. Keep only the labelled forensic snapshot.
+4. **Destroy the old server.** Not "stop" — destroy. Keep only the labelled forensic snapshot.
 
-**Phase 5 â€” rotate everything the old server ever saw (do not skip).**
+**Phase 5 — rotate everything the old server ever saw (do not skip).**
 
-- Database passwords âœ… (done in Phase 3)
+- Database passwords ✅ (done in Phase 3)
 - Every third-party API key the server held
-- Cloudflare API token â†’ revoke and reissue
-- Hetzner API token â†’ revoke and reissue
-- GitHub deploy key â†’ delete and regenerate
+- Cloudflare API token → revoke and reissue
+- Hetzner API token → revoke and reissue
+- GitHub deploy key → delete and regenerate
 - **Your own SSH key**, if there is any chance the private key was on the server (it should never have been)
-- Any user session tokens / JWT signing secrets â€” invalidating all sessions is correct here
+- Any user session tokens / JWT signing secrets — invalidating all sessions is correct here
 - If user passwords were in a database the attacker read: force a reset, and notify users. This may be a legal obligation depending on jurisdiction.
 
 ### 7.4 What must exist beforehand for that hour to be possible
@@ -2093,18 +2088,18 @@ docker compose up -d
 
 | # | Must exist | How | Verify |
 |---|---|---|---|
-| 1 | **Infrastructure in git** â€” `docker-compose.yml`, `Caddyfile`, Dockerfiles, systemd units, the `foundit-cf-firewall.sh` script | A **private** repo, `foundit-infra`. Secrets never in it (Â§6.1 `.gitignore`). | `git clone` it to a scratch directory and confirm nothing is missing. |
-| 2 | **Automated, off-server database backups** | `pg_dump -Fc` nightly, pushed to object storage in a **different provider** (Hetzner Storage Box, Backblaze B2, Cloudflare R2). Not on the same VPS; not on the same account if you can help it. | Â§7.5 |
+| 1 | **Infrastructure in git** — `docker-compose.yml`, `Caddyfile`, Dockerfiles, systemd units, the `foundit-cf-firewall.sh` script | A **private** repo, `foundit-infra`. Secrets never in it (§6.1 `.gitignore`). | `git clone` it to a scratch directory and confirm nothing is missing. |
+| 2 | **Automated, off-server database backups** | `pg_dump -Fc` nightly, pushed to object storage in a **different provider** (Hetzner Storage Box, Backblaze B2, Cloudflare R2). Not on the same VPS; not on the same account if you can help it. | §7.5 |
 | 3 | **A tested restore** | Actually restore last night's dump into a scratch container, monthly. | `docker run --rm -d --name restoretest postgres:17 && pg_restore ...` then count rows. |
 | 4 | **Hetzner automatic backups enabled** | +20% of server cost. "copies of a server's disk that are created automatically on a daily basis", up to 7 slots, oldest deleted when full ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). | Console shows 7 dated backups. |
-| 5 | **A pre-incident snapshot before every risky change** | Console â†’ Snapshots â†’ Take Snapshot. Snapshots are "created manually" and persist until deleted ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). | Delete old ones; the default cap is 30 across all projects. |
-| 6 | **A second SSH key, on a second device** | Added at server creation (Â§1.2 â€” you cannot add one via the Console afterwards). | Log in from the second device once, then leave it alone. |
+| 5 | **A pre-incident snapshot before every risky change** | Console → Snapshots → Take Snapshot. Snapshots are "created manually" and persist until deleted ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). | Delete old ones; the default cap is 30 across all projects. |
+| 6 | **A second SSH key, on a second device** | Added at server creation (§1.2 — you cannot add one via the Console afterwards). | Log in from the second device once, then leave it alone. |
 | 7 | **Your secrets in a password manager**, structured | One entry per secret with the rotation procedure in the notes. | Open it and read it; can you rebuild from what is written there? |
-| 8 | **DNS you control, with a short TTL** | Cloudflare, proxied. Changing the origin IP is one field. | â€” |
-| 9 | **The rebuild runbook, printed or in the password manager** | Â§7.3, saved somewhere not on the server. | â€” |
+| 8 | **DNS you control, with a short TTL** | Cloudflare, proxied. Changing the origin IP is one field. | — |
+| 9 | **The rebuild runbook, printed or in the password manager** | §7.3, saved somewhere not on the server. | — |
 | 10 | **An uptime monitor with phone alerts** | UptimeRobot / Better Stack free tier. | Stop the app deliberately; confirm your phone buzzes. |
 
-âš ï¸ **Two Hetzner limitations that matter for backups:** neither backups nor snapshots include attached **Volumes** ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). If you ever move `pgdata` to a Volume for space, it stops being covered â€” you would need Volume snapshots separately. And a disk-image backup of a *compromised* server is a backup of the compromise; that is why item 2 (application-level database dumps, versioned, off-site) is the one that actually saves you, and items 4â€“5 are conveniences.
+⚠️ **Two Hetzner limitations that matter for backups:** neither backups nor snapshots include attached **Volumes** ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). If you ever move `pgdata` to a Volume for space, it stops being covered — you would need Volume snapshots separately. And a disk-image backup of a *compromised* server is a backup of the compromise; that is why item 2 (application-level database dumps, versioned, off-site) is the one that actually saves you, and items 4–5 are conveniences.
 
 ### 7.5 The backup script
 
@@ -2135,7 +2130,7 @@ BACKUP
 sudo chmod 700 /usr/local/sbin/foundit-backup.sh
 ```
 
-Schedule it at 03:00 with a systemd timer (same pattern as Â§3.5), and â€” critically â€” **alert on failure**, because a backup job that has silently failed for six weeks is the actual disaster:
+Schedule it at 03:00 with a systemd timer (same pattern as §3.5), and — critically — **alert on failure**, because a backup job that has silently failed for six weeks is the actual disaster:
 
 ```ini
 # /etc/systemd/system/foundit-backup.service
@@ -2161,13 +2156,13 @@ Also add a **dead-man's switch**: have the backup script ping a healthchecks.io 
 
 ---
 
-## 8. Verification â€” proving from outside that only 80/443 are open
+## 8. Verification — proving from outside that only 80/443 are open
 
 Everything in sections 2 and 3 is a claim about intent. This section is the proof. **Run it after initial setup, after every firewall change, and quarterly.**
 
 ### 8.1 The single most important test
 
-From a machine that is **not** your server and **not** on your home network â€” a friend's laptop, a phone hotspot, a $5 throwaway VPS elsewhere, or a free cloud shell:
+From a machine that is **not** your server and **not** on your home network — a friend's laptop, a phone hotspot, a $5 throwaway VPS elsewhere, or a free cloud shell:
 
 ```bash
 # Full TCP scan of every port. Takes a few minutes. This is the test.
@@ -2176,11 +2171,11 @@ nmap -Pn -sS -p- --min-rate 1000 YOUR.SERVER.IP
 # UDP, top ports (slower)
 sudo nmap -Pn -sU --top-ports 50 YOUR.SERVER.IP
 
-# IPv6, if the server has a public IPv6 address â€” DO NOT SKIP THIS
+# IPv6, if the server has a public IPv6 address — DO NOT SKIP THIS
 nmap -6 -Pn -sS -p- YOUR.SERVER.IPV6
 ```
 
-**Expected result if Â§2 and Â§3 are correct:**
+**Expected result if §2 and §3 are correct:**
 
 ```
 PORT      STATE    SERVICE
@@ -2190,16 +2185,16 @@ PORT      STATE    SERVICE
 All other ports: filtered
 ```
 
-`filtered` means the packet was dropped with no response â€” the correct outcome. `closed` means something answered with a RST, which means the packet reached your machine; acceptable but less good. **`open` on anything other than 80/443 from a Cloudflare IP is a finding.**
+`filtered` means the packet was dropped with no response — the correct outcome. `closed` means something answered with a RST, which means the packet reached your machine; acceptable but less good. **`open` on anything other than 80/443 from a Cloudflare IP is a finding.**
 
 **The specific ports that must NOT be open, with what it would mean:**
 
 | Port | Service | If open |
 |---|---|---|
-| **5432** | PostgreSQL | **Stop everything.** Your database is public. Go to Â§2.4.3 Fix 1 now, then assume it has been read and rebuild (Â§7). |
+| **5432** | PostgreSQL | **Stop everything.** Your database is public. Go to §2.4.3 Fix 1 now, then assume it has been read and rebuild (§7). |
 | **6379** | Redis | Same. Redis with no auth is trivially exploited into RCE. |
 | **27017** | MongoDB | Same. |
-| **3000** | Next.js dev/direct | Your app is reachable bypassing Cloudflare â€” no WAF, no rate limiting. |
+| **3000** | Next.js dev/direct | Your app is reachable bypassing Cloudflare — no WAF, no rate limiting. |
 | **8080 / 8000** | app / admin panel | Same. |
 | **2375 / 2376** | Docker API | Total compromise. Anyone can start a privileged container. |
 | **9000** | Portainer / php-fpm | Admin interface exposed. |
@@ -2210,7 +2205,7 @@ All other ports: filtered
 ```bash
 # From a non-Cloudflare machine, hit the ORIGIN IP directly.
 curl -v --max-time 10 --resolve foundit.app:443:YOUR.SERVER.IP https://foundit.app/
-# Expected: "Connection timed out" or "No route to host" â€” NOT a page.
+# Expected: "Connection timed out" or "No route to host" — NOT a page.
 
 curl -v --max-time 10 http://YOUR.SERVER.IP/
 # Expected: timeout.
@@ -2237,10 +2232,10 @@ curl -vk --resolve foundit.app:443:YOUR.SERVER.IP https://foundit.app/ 2>&1 | ta
 ```bash
 ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password \
     -p 52242 founditops@YOUR.SERVER.IP
-# Expected: "Permission denied (publickey)." â€” the server never even prompts.
+# Expected: "Permission denied (publickey)." — the server never even prompts.
 
 ssh -p 52242 root@YOUR.SERVER.IP
-# Expected: "Permission denied (publickey)." â€” root login refused.
+# Expected: "Permission denied (publickey)." — root login refused.
 ```
 
 And from the server, confirm the *effective* configuration rather than what you think you wrote:
@@ -2281,7 +2276,7 @@ docker compose ps -q | xargs -r -I{} docker inspect -f \
 |---|---|---|
 | **Shodan** | `https://www.shodan.io/host/YOUR.SERVER.IP` | What internet-wide scanners have already indexed about you. **Check this. It is what an attacker checks.** |
 | **Censys** | `https://search.censys.io/hosts/YOUR.SERVER.IP` | Same, with certificate detail. |
-| **crt.sh** | `https://crt.sh/?q=foundit.app` | Every certificate ever issued for your domain â€” i.e. every subdomain you may have forgotten, one of which may be grey-clouded and leaking your origin IP. |
+| **crt.sh** | `https://crt.sh/?q=foundit.app` | Every certificate ever issued for your domain — i.e. every subdomain you may have forgotten, one of which may be grey-clouded and leaking your origin IP. |
 | **SSL Labs** | `https://www.ssllabs.com/ssltest/analyze.html?d=foundit.app` | TLS configuration grade. Aim for A. |
 | **Mozilla Observatory** | `https://developer.mozilla.org/en-US/observatory/analyze?host=foundit.app` | HTTP security headers (CSP, HSTS, X-Frame-Options, Referrer-Policy). Free, actionable, and directly relevant to the app rather than the host. |
 | **DNS history** | SecurityTrails / ViewDNS | Whether your pre-Cloudflare origin IP is in the historical record. If your *current* IP is there, that is a reason to change it. |
@@ -2295,7 +2290,7 @@ IP="YOUR.SERVER.IP"; DOMAIN="foundit.app"; SSH_PORT="52242"
 FAIL=0
 say(){ printf '%-52s %s\n' "$1" "$2"; }
 
-echo "=== Foundit external verification â€” $(date -u) ==="
+echo "=== Foundit external verification — $(date -u) ==="
 
 for p in 5432 6379 27017 3000 8080 8000 2375 2376 9000 25; do
   if nc -z -w3 "$IP" "$p" 2>/dev/null; then say "port $p" "OPEN  <-- FAIL"; FAIL=1
@@ -2316,18 +2311,17 @@ if ssh -o BatchMode=yes -o ConnectTimeout=5 -o PubkeyAuthentication=no \
   say "SSH password auth" "refused  OK"
 else say "SSH password auth" "CHECK MANUALLY"; fi
 
-echo; [ "$FAIL" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "FAILURES PRESENT â€” see above"
+echo; [ "$FAIL" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "FAILURES PRESENT — see above"
 exit "$FAIL"
 ```
 
 ---
 
-
 ## 9. The mistakes people make self-hosting for the first time
 
 Ranked by how likely each is to end the project. Each entry gives the mistake, why it happens, how to detect it in one command, and the fix.
 
-### 9.1 Postgres bound to `0.0.0.0` â€” the one that ends companies
+### 9.1 Postgres bound to `0.0.0.0` — the one that ends companies
 
 **The mistake.** `ports: - "5432:5432"` in `docker-compose.yml`. It reads like "let my app reach the database"; it means "publish PostgreSQL on every address of this machine, including the public IPv4."
 
@@ -2339,23 +2333,23 @@ docker ps --format '{{.Names}}\t{{.Ports}}' | grep -E '0\.0\.0\.0:(5432|6379|270
 ```
 Any output is an emergency.
 
-**Fix.** Delete the `ports:` block entirely (Â§2.4.3 Fix 1). If you truly need it, `"127.0.0.1:5432:5432"`, plus the daemon default in Fix 3 so the next person's mistake is harmless.
+**Fix.** Delete the `ports:` block entirely (§2.4.3 Fix 1). If you truly need it, `"127.0.0.1:5432:5432"`, plus the daemon default in Fix 3 so the next person's mistake is harmless.
 
-**If it was exposed:** assume the data was read. Postgres with a weak password is cracked in seconds; even with a strong one, an unpatched Postgres has had remotely exploitable bugs. Rotate everything and rebuild (Â§7).
+**If it was exposed:** assume the data was read. Postgres with a weak password is cracked in seconds; even with a strong one, an unpatched Postgres has had remotely exploitable bugs. Rotate everything and rebuild (§7).
 
 ### 9.2 Believing ufw protects Docker ports
 
-**The mistake.** `sudo ufw default deny incoming` + `sudo ufw status` showing `active`, and concluding the box is closed. It is not, for anything Docker published â€” Docker "routes container traffic in the `nat` table, which means that packets are diverted before it reaches the `INPUT` and `OUTPUT` chains that ufw uses" ([Docker: Docker and ufw](https://docs.docker.com/engine/network/packet-filtering-firewalls/)).
+**The mistake.** `sudo ufw default deny incoming` + `sudo ufw status` showing `active`, and concluding the box is closed. It is not, for anything Docker published — Docker "routes container traffic in the `nat` table, which means that packets are diverted before it reaches the `INPUT` and `OUTPUT` chains that ufw uses" ([Docker: Docker and ufw](https://docs.docker.com/engine/network/packet-filtering-firewalls/)).
 
 **Why it happens.** ufw's output is confident and unambiguous, and it is telling the truth about the chains it controls. Nothing warns you that a whole category of traffic never reaches those chains. It is a false-confidence bug, which is the most dangerous kind.
 
-**Detect.** Only an external scan settles it (Â§8.1). On-box, compare `sudo ufw status` against `docker ps --format '{{.Ports}}'` â€” where they disagree, Docker wins.
+**Detect.** Only an external scan settles it (§8.1). On-box, compare `sudo ufw status` against `docker ps --format '{{.Ports}}'` — where they disagree, Docker wins.
 
-**Fix.** Â§2.4.3, Fixes 1â€“4. And re-read: **ufw is still worth running** â€” it protects the host's own services, sshd included. It is just not the thing protecting your containers.
+**Fix.** §2.4.3, Fixes 1–4. And re-read: **ufw is still worth running** — it protects the host's own services, sshd included. It is just not the thing protecting your containers.
 
 ### 9.3 Root SSH with a password
 
-**The mistake.** Creating the server with a root password (or resetting to one and leaving it), and never touching `sshd_config`. OpenSSH's defaults are `PermitRootLogin prohibit-password` and â€” the killer â€” `PasswordAuthentication yes` ([sshd_config(5)](https://man.openbsd.org/sshd_config)).
+**The mistake.** Creating the server with a root password (or resetting to one and leaving it), and never touching `sshd_config`. OpenSSH's defaults are `PermitRootLogin prohibit-password` and — the killer — `PasswordAuthentication yes` ([sshd_config(5)](https://man.openbsd.org/sshd_config)).
 
 **Why it happens.** It works immediately, and the failure is invisible. Nothing tells you that thousands of automated attempts per day are hitting the box.
 
@@ -2365,9 +2359,9 @@ sudo sshd -T | grep -E 'permitrootlogin|passwordauthentication|kbdinteractive'
 sudo journalctl -u ssh --since "24 hours ago" | grep -c 'Failed password'
 ```
 
-**Fix.** Â§1.7. And note that `PasswordAuthentication no` alone is a half-fix â€” `KbdInteractiveAuthentication yes` (also the default) can allow password prompts through PAM on some configurations. Turn both off.
+**Fix.** §1.7. And note that `PasswordAuthentication no` alone is a half-fix — `KbdInteractiveAuthentication yes` (also the default) can allow password prompts through PAM on some configurations. Turn both off.
 
-### 9.4 No fail2ban â€” and, worse, fail2ban installed but silently doing nothing
+### 9.4 No fail2ban — and, worse, fail2ban installed but silently doing nothing
 
 **The mistake with a twist.** The classic mistake is not installing it. The *more common* modern mistake is installing it, seeing `active (running)`, and never checking that it can see any logs. Recent Debian/Ubuntu images often ship without `rsyslog`, so `/var/log/auth.log` never exists, and a jail with `backend = auto` watches nothing forever.
 
@@ -2377,7 +2371,7 @@ sudo fail2ban-client status sshd
 # "Total failed: 0" after weeks of a public SSH port means it is BLIND, not safe.
 ```
 
-**Fix.** `backend = systemd` (Â§5.2), then deliberately fail four logins from a phone hotspot and confirm you get banned.
+**Fix.** `backend = systemd` (§5.2), then deliberately fail four logins from a phone hotspot and confirm you get banned.
 
 ### 9.5 Secrets in the compose file, committed to a public repo
 
@@ -2394,7 +2388,7 @@ git log --all --oneline -- .env secrets/
 **Fix.** In this order, and the order matters:
 1. **Rotate the secret first.** Immediately. It is compromised the moment it was pushed, and rewriting history does not un-compromise it.
 2. Then clean the repo (`git filter-repo`, or make it private and rotate everything regardless).
-3. Then add `.gitignore` (Â§6.1) and use file-based secrets (Â§6.3â€“6.4).
+3. Then add `.gitignore` (§6.1) and use file-based secrets (§6.3–6.4).
 4. Enable GitHub secret scanning and push protection on the repo.
 
 **Prevent it structurally:** install a pre-commit hook so it cannot happen again.
@@ -2417,107 +2411,265 @@ docker compose ps -q | xargs -r -I{} docker inspect -f '{{.Name}} user=[{{.Confi
 docker compose exec app id     # uid=0(root) is the finding
 ```
 
-**Fix.** Â§6.4/Â§6.5. Docker's own conclusion: containers are "quite secure; especially if you run your processes as non-privileged users inside the container" ([Docker Engine security](https://docs.docker.com/engine/security/)). Pair `user:` with `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges:true`.
+**Fix.** §6.4/§6.5. Docker's own conclusion: containers are "quite secure; especially if you run your processes as non-privileged users inside the container" ([Docker Engine security](https://docs.docker.com/engine/security/)). Pair `user:` with `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges:true`.
 
-**Related and worse:** `privileged: true`, and mounting `/var/run/docker.sock` (Â§6.6). Both are root-on-host.
+**Related and worse:** `privileged: true`, and mounting `/var/run/docker.sock` (§6.6). Both are root-on-host.
 
 ### 9.7 No monitoring, so a breach is invisible
 
-**The mistake.** Nothing watches the server. You find out it was compromised when Hetzner emails you about abuse traffic, or when a user says the site is down, or â€” most commonly â€” never.
+**The mistake.** Nothing watches the server. You find out it was compromised when Hetzner emails you about abuse traffic, or when a user says the site is down, or — most commonly — never.
 
 **Why it happens.** Monitoring feels like a nice-to-have next to shipping features, and the free tiers require an afternoon of setup.
 
 **Detect.** Ask yourself: *if my server were mining cryptocurrency right now, how would I find out?* If you cannot name the mechanism, you do not have one.
 
-**Fix â€” the 30-minute version that covers most of it:**
+**Fix — the 30-minute version that covers most of it:**
 1. **Uptime monitor** hitting `/healthz` every 5 minutes with phone alerts. Free. Do this one first.
-2. **The weekly digest email** from Â§5.4.
-3. **`OnFailure=` alerts** on your backup and firewall systemd units (Â§7.5).
+2. **The weekly digest email** from §5.4.
+3. **`OnFailure=` alerts** on your backup and firewall systemd units (§7.5).
 4. **Healthchecks.io dead-man's switch** on the backup job.
-5. **Cloudflare's analytics dashboard** for traffic anomalies â€” it is already there and it has real client IPs.
+5. **Cloudflare's analytics dashboard** for traffic anomalies — it is already there and it has real client IPs.
 
 Point 1 alone catches most real incidents, because attackers who monetise tend to break things.
 
 ### 9.8 Underestimating what a public IPv4 attracts
 
-**The reality.** A new Hetzner IPv4 address begins receiving unsolicited traffic within **minutes** of being assigned. Not because anyone is targeting you â€” because the entire IPv4 space is scanned continuously. Shodan alone added "1,000+ ports" to its scanning list in 2025 and offers monitoring that reports "what you have connected to the Internet within your network range within 5 minutes" ([Shodan Book: 2025 release notes](https://book.shodan.io/release-notes/2025/), [Shodan Monitor](https://monitor.shodan.io/)). Shodan and Censys are the *polite*, publicly documented scanners; the impolite ones are far more numerous and do not publish release notes.
+**The reality.** A new Hetzner IPv4 address begins receiving unsolicited traffic within **minutes** of being assigned. Not because anyone is targeting you — because the entire IPv4 space is scanned continuously. Shodan alone added "1,000+ ports" to its scanning list in 2025 and offers monitoring that reports "what you have connected to the Internet within your network range within 5 minutes" ([Shodan Book: 2025 release notes](https://book.shodan.io/release-notes/2025/), [Shodan Monitor](https://monitor.shodan.io/)). Shodan and Censys are the *polite*, publicly documented scanners; the impolite ones are far more numerous and do not publish release notes.
 
 **What this means concretely:**
 
-- An exposed Redis with no password is typically found and exploited within **hours**, often much less. Redis is the archetypal case: no authentication by default in older versions, and a documented path from "can write keys" to "can write a crontab or an SSH key" â€” i.e. remote code execution as whoever runs redis.
+- An exposed Redis with no password is typically found and exploited within **hours**, often much less. Redis is the archetypal case: no authentication by default in older versions, and a documented path from "can write keys" to "can write a crontab or an SSH key" — i.e. remote code execution as whoever runs redis.
 - An exposed Postgres or MongoDB draws credential-stuffing and, if reachable, the well-known "your data has been backed up, pay X BTC" ransom-wipe. Automated ransom campaigns against exposed databases have run continuously for years.
 - SSH on port 22 with passwords enabled receives thousands of credential attempts per day from day one.
 - None of this requires your domain to exist, your site to launch, or anyone to know who you are. **You do not have to be a target to be compromised.** You just have to be reachable.
 
-**The lesson for how you work:** there is no "I'll harden it after launch" window. The window between `CREATE & BUY NOW` and the first hostile packet is measured in minutes. That is why Â§1.2 attaches the firewall *at creation*, and why Â§1.11's cloud-init exists.
+**The lesson for how you work:** there is no "I'll harden it after launch" window. The window between `CREATE & BUY NOW` and the first hostile packet is measured in minutes. That is why §1.2 attaches the firewall *at creation*, and why §1.11's cloud-init exists.
 
 ### 9.9 Six more that show up constantly
 
 | Mistake | Why it bites | Fix |
 |---|---|---|
-| **Cloudflare SSL mode set to `Flexible`** | Cloudflareâ†’origin traffic is plain HTTP across the public internet. The padlock is a lie. | `Full (strict)` + Cloudflare Origin CA cert (Â§3.7). |
-| **A grey-clouded DNS record** (`staging.`, `mail.`, `direct.`) | Publishes the origin IP in DNS, defeating the whole of Â§3 in one record. | `dig +short <each subdomain>`; proxy everything or move it. |
-| **`chmod 777` to fix a permissions error** | Usually applied to a data volume or a secret file, and never undone. | `chown` to the container's UID instead; Â§6.4 uses explicit `user:`. |
-| **Postgres data in a container layer, not a volume** | `docker compose down` deletes the database. Not a breach; still fatal. | Named volume or bind mount, plus Â§7.5 backups. |
-| **No log rotation** | Docker JSON logs grow without limit until the disk fills and Postgres stops. | `log-opts max-size/max-file` in `daemon.json` (Â§2.4.3). |
+| **Cloudflare SSL mode set to `Flexible`** | Cloudflare→origin traffic is plain HTTP across the public internet. The padlock is a lie. | `Full (strict)` + Cloudflare Origin CA cert (§3.7). |
+| **A grey-clouded DNS record** (`staging.`, `mail.`, `direct.`) | Publishes the origin IP in DNS, defeating the whole of §3 in one record. | `dig +short <each subdomain>`; proxy everything or move it. |
+| **`chmod 777` to fix a permissions error** | Usually applied to a data volume or a secret file, and never undone. | `chown` to the container's UID instead; §6.4 uses explicit `user:`. |
+| **Postgres data in a container layer, not a volume** | `docker compose down` deletes the database. Not a breach; still fatal. | Named volume or bind mount, plus §7.5 backups. |
+| **No log rotation** | Docker JSON logs grow without limit until the disk fills and Postgres stops. | `log-opts max-size/max-file` in `daemon.json` (§2.4.3). |
 | **Testing the firewall from an existing SSH session** | Hetzner: "Existing connections established before the Firewall was updated will remain active" ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). You "verify" with a connection the new rules never touched. | Always test from a **new** connection on a **different** network. |
 
 ---
 
 ## 10. Maintenance checklist
 
-Print this. Put it in your password manager. The whole point of sections 1â€“9 is that this list is short.
+Print this. Put it in your password manager. The whole point of sections 1–9 is that this list is short.
 
-### Every week â€” 10 minutes, mostly reading one email
+### Every week — 10 minutes, mostly reading one email
 
-- [ ] **Read the weekly digest email** (Â§5.4). If it did not arrive, that is itself the finding â€” investigate.
+- [ ] **Read the weekly digest email** (§5.4). If it did not arrive, that is itself the finding — investigate.
 - [ ] In the digest, specifically look at:
-  - [ ] **`ss -tlnp`** â€” anything on `0.0.0.0` other than 80/443? *(the Â§2.4 regression check)*
-  - [ ] **Published container ports** â€” any new `0.0.0.0:` entry?
-  - [ ] **SSH logins** â€” any `Accepted publickey` you do not recognise?
-  - [ ] **Disk usage** â€” under 80%?
-  - [ ] **`Reboot required?`** â€” if yes and it has been yes for days, automatic reboots are broken.
+  - [ ] **`ss -tlnp`** — anything on `0.0.0.0` other than 80/443? *(the §2.4 regression check)*
+  - [ ] **Published container ports** — any new `0.0.0.0:` entry?
+  - [ ] **SSH logins** — any `Accepted publickey` you do not recognise?
+  - [ ] **Disk usage** — under 80%?
+  - [ ] **`Reboot required?`** — if yes and it has been yes for days, automatic reboots are broken.
 - [ ] **Uptime monitor** shows no unexplained gaps.
-- [ ] `sudo fail2ban-client status sshd` â€” running and counting.
+- [ ] `sudo fail2ban-client status sshd` — running and counting.
 
-### Every month â€” 45 minutes
+### Every month — 45 minutes
 
-- [ ] **Rebuild and redeploy containers** (Â§4.6) â€” `docker compose pull && docker compose build --pull && docker compose up -d`. *The most-skipped, most-important task.*
-- [ ] **Scan images for CVEs** â€” `docker scout cves` or `trivy image <registry-image>`.
-- [ ] **Restore a backup into a scratch container and count rows** (Â§7.4 item 3). An untested backup is a hope.
-- [ ] `sudo debsums -c` â€” expect no output.
-- [ ] `sudo apt update && apt list --upgradable` â€” apply the `-updates` packages you deliberately excluded from unattended upgrades (Â§4.3).
-- [ ] `sudo aide.wrapper --check` â€” review changes; re-baseline after legitimate ones.
+- [ ] **Rebuild and redeploy containers** (§4.6) — `docker compose pull && docker compose build --pull && docker compose up -d`. *The most-skipped, most-important task.*
+- [ ] **Scan images for CVEs** — `docker scout cves` or `trivy image <registry-image>`.
+- [ ] **Restore a backup into a scratch container and count rows** (§7.4 item 3). An untested backup is a hope.
+- [ ] `sudo debsums -c` — expect no output.
+- [ ] `sudo apt update && apt list --upgradable` — apply the `-updates` packages you deliberately excluded from unattended upgrades (§4.3).
+- [ ] `sudo aide.wrapper --check` — review changes; re-baseline after legitimate ones.
 - [ ] Review Cloudflare analytics for traffic anomalies.
-- [ ] `docker system prune -af --volumes` â€” **read what it will delete first**; the `--volumes` flag can remove data.
+- [ ] `docker system prune -af --volumes` — **read what it will delete first**; the `--volumes` flag can remove data.
 - [ ] Confirm the off-site backup bucket actually contains the last 30 nightly files.
 
-### Every quarter â€” 90 minutes
+### Every quarter — 90 minutes
 
-- [ ] **Run the full external verification** (Â§8) from a network you have never used for this server.
-- [ ] Check `https://www.shodan.io/host/YOUR.SERVER.IP` â€” what does the internet know about you?
+- [ ] **Run the full external verification** (§8) from a network you have never used for this server.
+- [ ] Check `https://www.shodan.io/host/YOUR.SERVER.IP` — what does the internet know about you?
 - [ ] Check `https://crt.sh/?q=foundit.app` for subdomains you forgot, then `dig +short` each one for grey-clouded records.
 - [ ] Compare `https://www.cloudflare.com/ips/` against `/var/lib/foundit/cloudflare-ips-v4.txt`.
-- [ ] **Do a full rebuild drill**: build a new server from the runbook and your backups into a scratch Hetzner project, confirm the site comes up, then destroy it. Time it. If it takes more than 90 minutes, something in Â§7.4 is missing.
-- [ ] Rotate the database password (Â§6.7 drill).
+- [ ] **Do a full rebuild drill**: build a new server from the runbook and your backups into a scratch Hetzner project, confirm the site comes up, then destroy it. Time it. If it takes more than 90 minutes, something in §7.4 is missing.
+- [ ] Rotate the database password (§6.7 drill).
 - [ ] Review who has access: SSH keys in `authorized_keys`, Hetzner project members, Cloudflare account members, GitHub collaborators.
 - [ ] Confirm the Hetzner backups list shows 7 recent dated entries.
-- [ ] `sudo sshd -T | grep -E 'permitrootlogin|passwordauthentication'` â€” confirm a package upgrade has not reset anything.
+- [ ] `sudo sshd -T | grep -E 'permitrootlogin|passwordauthentication'` — confirm a package upgrade has not reset anything.
 
-### Every year â€” half a day
+### Every year — half a day
 
-- [ ] Plan the **OS upgrade** (Ubuntu 24.04 â†’ 26.04 LTS, or Debian point release). Do it on a *new* server from your runbook, not in place. This is the rebuild drill with a real payoff.
+- [ ] Plan the **OS upgrade** (Ubuntu 24.04 → 26.04 LTS, or Debian point release). Do it on a *new* server from your runbook, not in place. This is the rebuild drill with a real payoff.
 - [ ] Rotate every credential: API tokens, deploy keys, SSH keys.
 - [ ] Re-read this document. Some of it will be out of date.
-- [ ] Consider migrating to Cloudflare Tunnel (Â§3.8) if you have not already.
+- [ ] Consider migrating to Cloudflare Tunnel (§3.8) if you have not already.
 
-### After every change to firewall, SSH or Docker networking â€” always
+### After every change to firewall, SSH or Docker networking — always
 
 - [ ] Second SSH session still works (opened *after* the change).
 - [ ] `curl -sI https://foundit.app/ | head -1` returns 200.
-- [ ] `docker ps --format '{{.Names}}\t{{.Ports}}'` â€” no new `0.0.0.0` publishing.
-- [ ] External check of ports 5432/6379/3000 (Â§8.7 script).
+- [ ] `docker ps --format '{{.Names}}\t{{.Ports}}'` — no new `0.0.0.0` publishing.
+- [ ] External check of ports 5432/6379/3000 (§8.7 script).
 - [ ] Snapshot taken **before** the change, deleted after it is proven good.
 
 ---
 
+## 11. Going further: CIS Benchmarks and automated hardening
+
+If you want a formal, auditable standard rather than this document's opinionated subset, the **CIS Benchmarks** are the reference. There are separate benchmarks for [Ubuntu Linux](https://www.cisecurity.org/benchmark/ubuntu_linux), [Debian Linux](https://www.cisecurity.org/benchmark/debian_linux) and [Docker](https://www.cisecurity.org/benchmark/docker). PDFs are free for non-commercial use; you need a (free) CIS account to download them ([CIS Benchmarks](https://www.cisecurity.org/cis-benchmarks)).
+
+**How to use them without drowning.** A CIS Linux benchmark runs to several hundred pages and hundreds of controls, and it is written for fleets in regulated environments. Reading it cover to cover is not a good use of your time. Instead:
+
+- Treat CIS Level 1 as a checklist to *audit against*, not a script to apply blindly. Level 2 will break things on a container host.
+- Run an automated audit rather than reading:
+  ```bash
+  # Lynis: a general-purpose hardening auditor, in Debian/Ubuntu main
+  sudo apt install -y lynis
+  sudo lynis audit system
+  # Read the "Suggestions" section; ignore the hardening index number.
+  ```
+  ⚠️ Lynis is not a CIS implementation and its numeric "hardening index" is not a meaningful score. Use its individual suggestions, and ignore anything that would break Docker networking. Listed in [What I could not confirm](#12-what-i-could-not-confirm).
+- For Docker specifically, `docker-bench-security` (from Docker's own GitHub organisation) checks the Docker CIS benchmark. **It wants the Docker socket mounted** — run it as a host binary rather than the container form, for the reasons in §6.6.
+
+**What CIS adds beyond this document, that is worth doing:** filesystem mount options (`nodev,nosuid,noexec` on `/tmp`, `/dev/shm`, `/var/tmp`), disabling unused kernel modules and filesystems, `AppArmor` in enforce mode (Ubuntu ships this on by default — `sudo aa-status` to confirm), and `sysctl` network hardening.
+
+A pragmatic subset of the last one:
+
+```bash
+sudo tee /etc/sysctl.d/60-foundit-hardening.conf > /dev/null <<'EOF'
+# Ignore ICMP redirects and source routing
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.all.accept_source_route = 0
+
+# Log martians, enable reverse-path filtering
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.all.rp_filter = 1
+
+# SYN flood resistance
+net.ipv4.tcp_syncookies = 1
+
+# Restrict kernel pointer and dmesg exposure
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+
+# Restrict ptrace to direct children (blocks cross-process memory reads)
+kernel.yama.ptrace_scope = 1
+
+# NOTE: net.ipv4.ip_forward must stay 1 — Docker requires IP forwarding.
+EOF
+sudo sysctl --system
+```
+
+⚠️ **Do not set `net.ipv4.ip_forward = 0`.** Docker "needs 'IP Forwarding' enabled on the host" and enables `net.ipv4.ip_forward` and `net.ipv6.conf.all.forwarding` itself if they are off ([Docker: Packet filtering and firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/)). Many generic hardening guides tell you to disable it; on this machine that breaks all container networking. Docker also sets the default forwarding policy to "drop" when it enables forwarding, which is the recommended state ([same page](https://docs.docker.com/engine/network/packet-filtering-firewalls/)).
+
+---
+
+## 12. What I could not confirm
+
+Everything in this list is either not stated in the primary source I could reach, or is a judgement call rather than a documented fact. Verify before relying on it.
+
+### Not found in the primary documentation
+
+| Item | Where it appears | What I could not confirm |
+|---|---|---|
+| **Hetzner Rescue mount commands** | §1.10 Path B step 4 | Hetzner's [Using Rescue](https://docs.hetzner.com/cloud/servers/getting-started/rescue-system/) page documents enabling rescue, connecting, and ending it, but **does not document mounting the server's disk**. The `lsblk` / `mount /dev/sda1 /mnt` sequence is standard Linux, not Hetzner-documented. The device name in particular may differ (`/dev/sda1`, `/dev/vda1`, or an LVM/btrfs layout). Run `lsblk` and read the output rather than copying the path. |
+| **Where the Hetzner Cloud Firewall is enforced** | §2.1, §2.2 | Neither the [overview](https://docs.hetzner.com/cloud/firewalls/overview/) nor the [FAQ](https://docs.hetzner.com/cloud/firewalls/faq/) states explicitly whether filtering happens on Hetzner's network infrastructure or on the hypervisor host. My claim that "Docker cannot bypass it" follows from it being outside the guest OS, which the documentation implies (it applies with no configuration inside the server) but does not state. The practical conclusion — that it is an independent layer — is sound; the mechanism is inferred. |
+| **Hetzner Cloud Firewall IPv6 rule semantics** | §2.7 | The FAQ addresses GRE-over-IPv6 but does not comprehensively describe IPv6 rule handling. If you keep public IPv6, verify with an external IPv6 scan rather than assuming symmetry with IPv4. |
+| **Whether Hetzner backups/snapshots require the server to be powered off** | §7.4 | The [backups and snapshots overview](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/) does not say. It also does not state pricing on that page (the +20% figure is from Hetzner's pricing pages, which I did not fetch). Nor does it clarify cross-project snapshot restore. |
+| **`bantime.increment` / `bantime.factor` / `bantime.maxtime`** | §5.2 | Not documented in the Ubuntu [jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html) manpage. They are fail2ban 0.11+ options documented in the shipped `jail.conf` comments. Confirm on your machine: `grep -n 'bantime.increment' /etc/fail2ban/jail.conf`. If absent, remove those three lines — fail2ban refuses to start on unknown options in some versions. |
+| **Whether recent Debian 13 / Ubuntu 24.04 images ship without `rsyslog`** | §5.2 trap 1, §9.4 | I could not confirm from primary distribution documentation which releases install `rsyslog` by default. The failure mode (fail2ban's `sshd` jail reading a non-existent `/var/log/auth.log`) is real and `backend = systemd` avoids it either way, but the claim "recent images often ship without rsyslog" is from general knowledge, not a cited source. **Check with `ls -l /var/log/auth.log` and `systemctl status rsyslog` on your own machine.** |
+| **`auditd` competing with Docker for the audit netlink socket** | §5.3.1 | Stated from general knowledge. Not confirmed against Docker or Debian documentation. |
+| **Caddy's `client_auth` / `trust_pool` syntax for AOP** | §3.6 | Cloudflare documents Apache (`SSLCACertificateFile`, `SSLVerifyClient require`) and nginx (`ssl_client_certificate`, `ssl_verify_client`) only ([Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). The Caddy block is from Caddy's own documentation family and its syntax has changed across Caddy 2.x versions. **Verify against your Caddy version's docs before deploying.** |
+| **Cloudflare Tunnel pricing** | §3.8 | The [Cloudflare Tunnel page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/) I fetched does not state pricing or free-tier limits. Widely used on free plans, but confirm on Cloudflare's pricing page before depending on it. |
+| **Cloudflare IP ranges API authentication** | §3.2 | The [API reference](https://developers.cloudflare.com/api/resources/ips/methods/list/) does not state whether `GET /client/v4/ips` requires authentication. The plain-text endpoints (`cloudflare.com/ips-v4`, `ips-v6`) certainly do not, which is why §3.4's script uses those. |
+| **The `pgvector/pgvector:pg17` image's internal UID, and its behaviour under `read_only: true`** | §6.4 | I used `999:999` and a `tmpfs` for `/run/postgresql` by analogy with the official `postgres` image. **This must be verified before deploying:** `docker run --rm pgvector/pgvector:pg17 id postgres`. A wrong UID means Postgres cannot write its data directory, and `read_only: true` on Postgres in particular needs the right set of tmpfs mounts or the container will not start. Test locally first. |
+| **`DATABASE_URL_FILE`** | §6.4 | `POSTGRES_PASSWORD_FILE` is a documented feature of the official Postgres image. `DATABASE_URL_FILE` is **not a standard convention** — your Next.js app must be written to read that file itself. If it is not, you will need an entrypoint wrapper or fall back to an environment variable for that one value. |
+| **Lynis's relationship to CIS** | §11 | Lynis is a general hardening auditor, not a CIS-certified implementation. Its "hardening index" is not a CIS score and should not be treated as one. |
+| **`chaifeng/ufw-docker`** | §2.4.4 | Community project; I did not review its source. My recommendation to skip it is a judgement about risk and auditability, not a finding about the code. |
+| **Exact ports Shodan and similar scanners cover, and time-to-first-scan** | §9.8 | [Shodan's 2025 release notes](https://book.shodan.io/release-notes/2025/) mention adding 1,000+ ports, and [Shodan Monitor](https://monitor.shodan.io/) advertises detection "within 5 minutes". The broader claims about exposed Redis being exploited "within hours" are well-established in the security community but I did not locate a citable primary study within this research window. Treat the direction as certain and the specific timings as illustrative. |
+| **Debian's default `Unattended-Upgrade::Origins-Pattern`** | §4.3 | The [Debian wiki page](https://wiki.debian.org/UnattendedUpgrades) references the section but does not reproduce it; it points to `/usr/share/doc/unattended-upgrades/README.md.gz`. The `Allowed-Origins` block quoted in §4.3 is from [Ubuntu's documentation](https://ubuntu.com/server/docs/how-to/software/automatic-updates/) and Debian's shipped file differs (it uses `Origins-Pattern` with `origin=Debian,codename=${distro_codename}-security`). **On Debian, read your own `/etc/apt/apt.conf.d/50unattended-upgrades` rather than copying Ubuntu's block.** |
+| **`+20%` cost of Hetzner backups, CX23/CX33 specs and pricing** | §1.2, §7.4 | From Hetzner's pricing pages, which I did not fetch in this research. Verify current pricing and specifications before purchase. |
+
+### Judgement calls, not facts
+
+These are my recommendations. Each is defensible, and each has a reasonable opposing view.
+
+1. **Non-standard SSH port** (§1.9) — I recommend it for log signal-to-noise, and explicitly *not* as security. Competent administrators disagree in both directions. Nothing depends on this choice.
+2. **fail2ban over CrowdSec** (§5.1) — grounded in the specific fact that all your web traffic arrives from Cloudflare IPs, making origin-side IP bans useless or actively harmful. If you drop Cloudflare, revisit.
+3. **Skip `auditd` at launch** (§5.3) — based on my read of what you will actually do, not on a security argument. If you would genuinely review audit logs, install it.
+4. **Skip egress filtering** (§2.8) in favour of `internal: true` networks — an availability-versus-security trade-off weighted toward "a non-developer must be able to debug this at 2am".
+5. **Disable public IPv6** (§2.7) — halves the firewall surface at the cost of some purity. If you are comfortable maintaining two rule sets, keep it.
+6. **Ubuntu 24.04 LTS over Debian 13** (§1.2) — marginal, driven mainly by free Livepatch (§4.8) and by more Docker documentation matching Ubuntu. Debian is an entirely reasonable choice.
+7. **Cloudflare Tunnel as the better architecture** (§3.8) — I believe this, but it trades a class of network risk for a hard availability dependency on Cloudflare, and it is one more component. Reasonable people ship the §3.1–3.7 configuration instead.
+8. **Automatic reboots on** (§4.5) — trades ~40 seconds of monthly downtime for timely kernel patching. A service with an SLA and a second machine would decide differently; you have neither.
+
+---
+
+## 13. Sources
+
+**Docker**
+- [Packet filtering and firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/) — Docker and ufw, `iptables: false`, firewalld, IP forwarding
+- [Docker with iptables](https://docs.docker.com/engine/network/firewall-iptables/) — `DOCKER-USER`, conntrack matching, restricting external connections
+- [Port publishing](https://docs.docker.com/engine/network/port-publishing/) — `-p` syntax, "insecure by default", `host_binding_ipv4`, gateway modes
+- [dockerd reference](https://docs.docker.com/reference/cli/dockerd/) — `--ip`, `--iptables`, `--userland-proxy`
+- [Docker Engine security](https://docs.docker.com/engine/security/) — daemon attack surface, capabilities, non-root containers
+- [Compose file: Services](https://docs.docker.com/reference/compose-file/services/) — `user`, `read_only`, `cap_drop`, `security_opt`, `tmpfs`, `secrets`
+- [Compose: Use secrets](https://docs.docker.com/compose/how-tos/use-secrets/) — `/run/secrets/`, the environment-variable warning
+
+**Hetzner**
+- [Cloud Firewalls overview](https://docs.hetzner.com/cloud/firewalls/overview/) · [Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)
+- [Creating a server](https://docs.hetzner.com/cloud/servers/getting-started/creating-a-server/) · [Using the console](https://docs.hetzner.com/cloud/servers/getting-started/vnc-console/) · [Using Rescue](https://docs.hetzner.com/cloud/servers/getting-started/rescue-system/) · [Resetting the password](https://docs.hetzner.com/cloud/servers/how-to-rescue/reset-password/)
+- [Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)
+
+**Cloudflare**
+- [Cloudflare IP addresses](https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/) · [IP Ranges](https://www.cloudflare.com/ips/) · [API: List IPs](https://developers.cloudflare.com/api/resources/ips/methods/list/)
+- [Authenticated Origin Pulls](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/) · [Set up](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/) · [Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)
+- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/)
+
+**OpenSSH, Debian, Ubuntu**
+- [sshd_config(5)](https://man.openbsd.org/sshd_config) — all directive defaults quoted in §1.7
+- [Debian Wiki: UnattendedUpgrades](https://wiki.debian.org/UnattendedUpgrades)
+- [Ubuntu Server: Automatic updates](https://ubuntu.com/server/docs/how-to/software/automatic-updates/)
+- [Ubuntu: Livepatch](https://ubuntu.com/security/livepatch)
+- [ufw(8)](https://manpages.ubuntu.com/manpages/noble/man8/ufw.8.html) · [jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html) · [auditctl(8)](https://manpages.ubuntu.com/manpages/noble/man8/auditctl.8.html)
+
+**CrowdSec, CIS, scanning**
+- [CrowdSec: Intro](https://docs.crowdsec.net/docs/next/getting_started/intro/) · [Linux installation](https://docs.crowdsec.net/u/getting_started/installation/linux/) · [Firewall bouncer](https://docs.crowdsec.net/u/bouncers/firewall/)
+- [CIS Benchmarks](https://www.cisecurity.org/cis-benchmarks) · [Ubuntu Linux](https://www.cisecurity.org/benchmark/ubuntu_linux) · [Debian Linux](https://www.cisecurity.org/benchmark/debian_linux)
+- [Shodan Book: 2025 release notes](https://book.shodan.io/release-notes/2025/) · [Shodan Monitor](https://monitor.shodan.io/) · [Shodan Internet Exposure Dashboard](https://exposure.shodan.io/)
+
+---
+
+## 14. One-page summary
+
+**Runbook order (first hour):**
+1. Generate an ed25519 SSH key on your laptop, with a passphrase, and back it up.
+2. Create the Hetzner Cloud Firewall (deny all inbound except SSH/80/443).
+3. Create the server: Ubuntu 24.04 LTS, SSH key, firewall attached at creation, backups on, no public IPv6.
+4. `apt full-upgrade`, reboot.
+5. Create `founditops`, add to `sudo`, copy the SSH key.
+6. **Open a second terminal. Verify `ssh founditops@…` and `sudo whoami` work.** Keep the first session open.
+7. Write `/etc/ssh/sshd_config.d/99-foundit-hardening.conf`; `sshd -t`; restart; **verify from a third terminal.**
+8. `passwd -l root`. Change the SSH port only after 1–7 are proven (and remember `ssh.socket`).
+9. ufw: default deny in, allow SSH, enable.
+10. Install Docker; write `/etc/docker/daemon.json` with `"ip": "127.0.0.1"` **and** `default-network-opts.bridge.host_binding_ipv4`.
+11. Deploy the Compose stack with **no `ports:` on Postgres**, `internal: true` backend, non-root + read-only + `cap_drop: ALL` everywhere.
+12. Install and enable `/usr/local/sbin/foundit-cf-firewall.sh` + its systemd unit and weekly timer.
+13. `unattended-upgrades` with `Automatic-Reboot "true"` at 04:30; `needrestart` set to `a`.
+14. `fail2ban` with `backend = systemd`, sshd jail only, your IP in `ignoreip`.
+15. Backups: nightly encrypted `pg_dump` pushed off-site, with failure alerts and a dead-man's switch.
+16. **Verify from outside** (§8). Nothing is done until an external scan says so.
+
+**The Docker/ufw trap, in three lines:**
+1. ufw filters the `INPUT` chain; Docker DNATs published ports in the `nat` table so they traverse `FORWARD` instead, where Docker's own ACCEPT rules run first — so `ufw deny` never sees the packet.
+2. Detect it with `docker ps --format '{{.Ports}}'` (anything showing `0.0.0.0:` is public) and prove it with an external `nmap -p-`.
+3. Fix it by not publishing (`ports:` deleted, service-name networking), binding to `127.0.0.1`, setting `host_binding_ipv4: 127.0.0.1` in `daemon.json`, and filtering in `DOCKER-USER` — **never** with `"iptables": false`.
+
+**The three things most likely to get this server owned:**
+1. **Postgres published on `0.0.0.0:5432`** while ufw reports "active — deny incoming". A public IPv4 is scanned within minutes; an exposed database is found, read, and ransom-wiped. One line in `docker-compose.yml`.
+2. **An open origin IP behind Cloudflare.** All the WAF, rate limiting and DDoS protection is optional to an attacker who connects to the origin directly — and the origin IP is discoverable through DNS history, certificate transparency, and a single grey-clouded subdomain.
+3. **Secrets that leak, and containers that cannot be contained when they do** — a `.env` committed to a public repo (scanned in minutes, and irreversible once pushed), or a container running as root with a writable filesystem and `docker.sock` mounted, which turns one application bug into root on the host.
