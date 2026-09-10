@@ -1581,3 +1581,126 @@ The static/edge layer is global regardless; this is about where the server-side 
 **The model provider is a transfer, and you should know it.** Search queries go to whichever provider you use, running wherever they run — most likely the US. That is a cross-border transfer of the most sensitive text in the product (§7.1). It is completely normal, it is what everyone building this does, and it needs to be *named in your privacy notice* rather than quietly assumed. Check whether your provider offers EU data residency or a zero-retention option on your plan; if it does, take it.
 
 **Get the DPA.** Supabase *"provides a Data Processing Agreement (DPA)"* for customers who need a formal processing contract; Vercel and your other processors offer equivalents. Signing them is a form to fill in, costs nothing, and is the paperwork a lawyer will ask for first.
+
+---
+
+## 8. Mistakes people make shipping AI-assisted apps
+
+### 8.1 The pattern underneath all of them
+
+Every mistake in this section is the same mistake wearing a different hat: **something blocked the developer, and the fastest way to unblock was to remove the control rather than satisfy it.** That instinct is human, but an AI assistant amplifies it, because the assistant is optimising for "the error goes away and the feature works" and has no stake in what happens six months later. It does not know your threat model, it cannot see your Supabase dashboard, and — this is the important part — **it will confidently produce a working fix that is a security hole**, because a working hole and a working fix look identical in a terminal.
+
+Two consequences follow, and they are the actual advice of this section:
+
+- **Security controls must be verified in the dashboard, not in the chat.** "I've enabled RLS on that table" from an assistant is a claim about a file it wrote, not a fact about your database. Look at the table's RLS toggle yourself.
+- **The dangerous diffs are small.** Three characters (`disable row level security`), one environment variable name changed, one `if` removed. Reviewing a 400-line feature is easy to skip; these are the lines that matter, and they are the ones a large diff hides.
+
+### 8.2 The catalogue
+
+| # | Mistake | What it looks like | Why an assistant produces it | The fix | How you detect it |
+|---|---|---|---|---|---|
+| 1 | **Secret key in the repo** | `const supabase = createClient(url, 'sb_secret_…')` in a file, or a key pasted into `next.config.js` | The assistant needs a value to make the code run and you pasted the key into the chat | Keys only in `process.env`, only read from a `server-only` module (§3.5) | `git grep -nE "sb_secret_|service_role|eyJhbGciOi"` across **all history**, not just HEAD |
+| 2 | **RLS never enabled** | Table created with plain `create table`, no `enable row level security` | RLS was not in the prompt, so it is not in the migration | `alter table … enable row level security` on every table in an exposed schema, plus at least one policy (§1.3) | Supabase **Security Advisor** (§2.9) flags every one. Run it; it is free and takes ten seconds |
+| 3 | **RLS enabled, no policies** | Table locked to everyone, so someone "fixes" it by disabling RLS | Enabling RLS with zero policies denies all access, which looks broken | Add the policy. RLS on + no policy = deny, which is the safe failure — never resolve it by turning RLS off | Advisor, plus "it worked in the SQL editor but not in the app" (the editor runs as `postgres`, which bypasses RLS) |
+| 4 | **Trusting a client-supplied user id** | `insert into reviews (author_id, …) values (body.userId, …)`, or `.eq('user_id', req.body.userId)` | It is the obvious way to write the code, and it works in testing | Read the id from the session server-side; in policies use `auth.uid()`, in code use `supabase.auth.getUser()`. Next.js is explicit: *"always validate input from client, as they can be easily modified"* ([Next.js data security](https://nextjs.org/docs/app/guides/data-security)) | Grep route handlers and actions for `userId`, `user_id`, `authorId` arriving from `req.json()`, `searchParams` or `formData` |
+| 5 | **Admin route with no server-side check** | `/app/admin/page.tsx` renders an admin UI; the API routes behind it check nothing | The page-level check *looks* like the check | Re-verify inside every entry point. Next.js: *"A page-level authentication check does not extend to the Server Actions defined within it. Always re-verify inside the action"* | List every file under `app/api/**` and every `'use server'` export and confirm each begins with an auth check |
+| 6 | **Middleware treated as the authorization layer** | `middleware.ts` redirects unauthenticated users; nothing else checks | It works in the browser | Middleware is for redirects and session refresh; authorization belongs at the data layer. Next.js's audit list singles out `proxy.ts` and `route.ts` as files that *"have a lot of power"* | If deleting `middleware.ts` would expose data, your authorization is in the wrong place |
+| 7 | **`.env` pushed to GitHub** | `.env.local` or `.env` tracked in git; a public repo | `.gitignore` was never written, or an assistant ran `git add -A` | `.gitignore` containing `.env*` (with `!.env.example`), plus GitHub **push protection**. Secret scanning *"runs automatically for free"* on public repos and scans *"your entire Git history on all branches"* ([GitHub secret scanning](https://docs.github.com/en/code-security/secret-scanning/introduction/about-secret-scanning)) | `git ls-files \| grep -E "^\.env"` — if it returns anything, you have an incident (§8.4) |
+| 8 | **Public storage bucket** | Bucket created "public" so images render | Private buckets need signed URLs, which is extra work | Public buckets have no access control at all — *"This is not needed for public buckets, as they are already publicly accessible"* ([Supabase storage access control](https://supabase.com/docs/guides/storage/security/access-control)). Public is fine for tool logos; it is **never** fine for anything user-private. And remember `storage.objects` RLS is what stops arbitrary uploads: *"By default Storage does not allow any uploads to buckets without RLS policies"* | Dashboard → Storage → each bucket's public flag; then try the object URL in a private window |
+| 9 | **No rate limits anywhere** | Every route unmetered | Nobody prompts for rate limiting on the first version | §5.3. At minimum: search, submit, review, and the email-code request | Your bill |
+| 10 | **The secret key in a route any visitor can call** | `createClient(url, SUPABASE_SECRET_KEY)` inside a public route handler | It makes the RLS error go away instantly, and the assistant knows that | The secret key bypasses RLS entirely (§3.3). A public route holding it is a full database read/write exposed behind whatever `if` statements you remembered to write | `grep -rn "SECRET_KEY\|service_role" app/` and check each hit is in a route that starts with an auth check |
+| 11 | **Secret leaked into the client bundle** | `NEXT_PUBLIC_SUPABASE_SECRET_KEY` | The variable "wasn't available in the component", and adding the prefix fixed it | §3.4. `NEXT_PUBLIC_` means "print this in the browser". Only the Data Access Layer should touch `process.env` at all | `npm run build` then `grep -r "sb_secret_" .next/static/` — this is the definitive test, run it before every launch |
+| 12 | **Server Action assumed to be private** | An exported `'use server'` function with no auth check because "only my form calls it" | Actions look like local functions | *"even if a Server Action or utility function is not imported elsewhere in your code, it can still be called externally"* — Next.js's own obfuscated action IDs are explicitly not an authorization substitute: *"you should still treat Server Actions as reachable via direct POST requests"* | Every `'use server'` export, read top to bottom |
+| 13 | **Authorization on `user_metadata`** | A policy or route reading `is_admin` out of the JWT's user metadata | It is right there in the token | Covered in §2.6 — `user_metadata` is *"editable by the user without any checks"* ([Supabase users](https://supabase.com/docs/guides/auth/users)). Self-elevation in one API call | Grep policies and code for `user_metadata` |
+| 14 | **Over-returning from queries and actions** | `select('*')` piped into a Client Component; actions returning whole DB rows | Simplest code | Return DTOs. Next.js: *"Only return what the UI needs, not raw database records"* | Look at `'use client'` prop types: are they `User` and `Tool`, or the four fields the component renders? |
+| 15 | **The migration that was never run in production** | Policies exist in a local file; the deployed database does not have them | Local and remote drift silently | Apply migrations through the CLI, and re-run the advisors against **production** after every deploy | Advisor on the production project, not the local one |
+
+### 8.3 The specific failure: an assistant "fixing" a permission error
+
+This deserves its own treatment because it is the most likely way Foundit gets breached, and because it does not look like an attack — it looks like helpful debugging.
+
+**The setup:** you ask for a feature. The code returns `new row violates row-level security policy for table "tools"` or an empty array where rows should be. You paste the error into the assistant. The assistant has two ways to make it stop.
+
+**The wrong fixes, verbatim, so you recognise them in a diff:**
+
+```sql
+-- ❌ never
+alter table public.tools disable row level security;
+drop policy "tools_insert_own" on public.tools;
+create policy "temp" on public.tools for all using (true) with check (true);
+grant all on public.tools to anon;
+```
+
+```ts
+// ❌ never, in a route reachable by a visitor
+const supabase = createClient(url, process.env.SUPABASE_SECRET_KEY!)
+// "using the service role key to bypass RLS for now"
+```
+
+Watch for the words **"for now"**, **"temporarily"**, **"to bypass RLS"**, **"since this is server-side anyway"**, and **`using (true)`**. Every one of them is the sound of a control being removed. The `using (true)` policy is the most insidious, because RLS still shows as *enabled* in the dashboard and the advisor is satisfied — the table is world-readable and everything looks green.
+
+**The right fix is always one of three things:**
+
+1. The policy is correct and the client is wrong — you are calling with the anon key while unauthenticated, so `auth.uid()` is null (§2.2).
+2. The policy is missing a `WITH CHECK` clause for the write path, or has `USING` where it needed `WITH CHECK` (§2.3).
+3. The operation genuinely is privileged, in which case it belongs in a `SECURITY DEFINER` function with a fixed `search_path` and its own internal authorization check (§2.4) — *not* in a route holding the secret key.
+
+**Give the assistant the rules in writing.** A `CLAUDE.md` (or equivalent rules file) at the repo root is read on every session and is the cheapest control in this document:
+
+```markdown
+## Security rules — do not violate, do not "temporarily" violate
+
+- NEVER disable row level security. Not to debug, not temporarily, not with a TODO.
+- NEVER write a policy with `using (true)` or `with check (true)` on a table
+  containing user data.
+- NEVER use the Supabase secret/service_role key in any file under `app/`
+  except `app/api/admin/**`, and every such route must call `getUser()` and
+  check the admin allowlist as its first statement.
+- NEVER prefix a secret with `NEXT_PUBLIC_`.
+- NEVER read a user id, owner id or author id from a request body, query string
+  or form field. Read it from the session.
+- NEVER add `dangerouslySetInnerHTML`, `rehype-raw`, or a `urlTransform`
+  override to anything that renders user text.
+- NEVER commit a file matching `.env*` other than `.env.example`.
+- If a permission error blocks you, STOP and explain the policy that is
+  rejecting the operation. Do not work around it.
+```
+
+**And check the work.** Before merging anything an assistant wrote: `git diff` filtered for the danger words, the production advisor, and the build-output grep. Three commands, two minutes.
+
+```bash
+git diff | grep -inE "disable row level|using \(true\)|with check \(true\)|service_role|SECRET_KEY|NEXT_PUBLIC_.*(SECRET|SERVICE)|dangerouslySetInnerHTML"
+```
+
+### 8.4 What to do when a key has already leaked
+
+**Assume it has been used.** Public repositories are scraped continuously by automation that is faster than you; the interval between a push and the first use of a leaked key is routinely measured in minutes. Do not begin by deciding whether it was exploited. Begin by making the key worthless.
+
+**In order — the order is the advice:**
+
+1. **Rotate first, investigate second.** GitHub's guidance is to *"rotate the affected credential immediately to prevent unauthorized access."* OWASP's incident sequence is the same: **revocation**, then **rotation**, then deletion, then investigation ([OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)). Nothing else you do matters while the key still works.
+
+2. **Do not start by rewriting git history.** It feels like the fix and it is not. GitHub: removing secrets from history *"is time-intensive and often unnecessary if you've already revoked the credential."* Clean the history afterwards if you want to; rotate now.
+
+3. **Rotate every key in that file, not just the obvious one.** A leaked `.env` leaks the whole file. The list for Foundit: the Supabase secret key, the database password, the JWT signing secret if the legacy key format is in play, the LLM/embeddings provider key, the email provider key, the Turnstile secret, and any Upstash token.
+   - With Supabase's current publishable/secret key system you can **create a second secret key, deploy it, and then revoke the old one** — no downtime. With a legacy `service_role` JWT there is no per-key revocation; invalidating it means rotating the project's JWT secret, which signs every user out. Know which you are on **before** the incident (§3.1). *(Verify the exact rotation flow in your dashboard — see §10.)*
+
+4. **Update the secret everywhere it lives**, in one pass: Vercel project environment variables (all three of Production, Preview and Development), your local `.env.local`, any GitHub Actions secrets, and then **redeploy** — Vercel environment variables take effect on the next deployment, not instantly.
+
+5. **Look for what was done with it.** A Supabase secret key means full database access, so:
+   ```sql
+   select id, email, created_at from auth.users order by created_at desc limit 50;
+   select count(*), max(created_at) from public.tools;
+   select count(*), max(created_at) from public.reviews;
+   ```
+   Look for accounts you did not expect, rows created in a burst, listings whose `owner_id` changed, and deletions. Check Storage for objects you did not upload. Check the model provider's usage graph and your billing for a spike — a stolen LLM key is most often used for free inference, and the bill is the alarm. Check Supabase's logs for the window; know your plan's retention *before* you need it.
+
+6. **Assume the data was read.** With RLS bypassed, the realistic worst case is that every row was copied: email addresses, collections, and — the one that matters most — any stored search-query text (§7.1). Decide, honestly, whether that requires telling your users. If personal data was accessed, notification duties may apply in both the EU and Israel, on short clocks. This is the point at which a hobby project needs a lawyer, and it is much cheaper to have thought about it in advance.
+
+7. **Then clean up the repository.** Make it private if it should have been. Remove the file, add `.env*` to `.gitignore`, and if the repo is public and you want the history clean, rewrite it (`git filter-repo`, then force-push, then ask GitHub Support to purge cached views) — knowing that forks and clones already taken are beyond your reach. This is exactly why step 1 is step 1.
+
+8. **Close the hole that let it out.** Turn on GitHub **push protection**, add a pre-commit secret scanner (`gitleaks`, `detect-secrets` — OWASP recommends detection *"at the developer level"* via IDE or pre-commit hook), and add the `.env*` rule to your `CLAUDE.md`. A leak that recurs is a process problem, not an accident.
+
+9. **Write down what happened** — the date, which key, how it got out, what you rotated, what you found in the logs. Four sentences in a file. If it ever matters, it matters a great deal, and you will not remember.
+
+**One reassurance and one warning.** The reassurance: leaking the **publishable/anon key** is not an incident. It is designed to be public, and if your RLS is right it grants exactly what an anonymous visitor already has (§3.2). The warning: that is only true *if your RLS is right* — which is why mistake #2 in the table above is the one that turns a non-event into a breach.
