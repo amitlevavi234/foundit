@@ -150,18 +150,18 @@
   <header class="mast">
     <div class="kicker">Foundit &middot; engineering plan</div>
     <h1>What we build, and what it costs</h1>
-    <p class="standfirst">Six research passes — cost, matching, security, database, devops, performance — reduced to one set of decisions and an order to build them in.</p>
+    <p class="standfirst">Eleven research passes — cost, matching, security, schema, devops, performance, hardening, PostgreSQL, auth, deployment, edge — reduced to one set of decisions and an order to build them in.</p>
     <div class="meta">
-      <span>10 September 2026</span>
+      <span>Revision 2 &middot; 10 September 2026 &middot; self-hosted</span>
       <span>Sources in <code>research/</code></span>
       <span>Repository <code>amitlevavi234/foundit</code></span>
     </div>
   </header>
 
   <div class="figures">
-    <div class="fig"><b class="num">$20</b><span>Total cost, year one — $12 of it the domain</span></div>
     <div class="fig"><b class="num">$0.04</b><span>To turn all 5,000 tools into searchable vectors, once</span></div>
-    <div class="fig"><b class="num">153 MB</b><span>Database in year one, against a 500 MB free cap</span></div>
+    <div class="fig"><b class="num">5 min</b><span>Worst case data loss, if the machine dies mid-afternoon</span></div>
+    <div class="fig"><b class="num">0</b><span>Ports open to the internet, by design</span></div>
     <div class="fig"><b class="num">60</b><span>Test queries needed before any tuning is meaningful</span></div>
   </div>
 
@@ -179,32 +179,36 @@
     <main>
       <section id="stack">
         <h2>The stack</h2>
-        <h3>Everything free, and none of it a toy</h3>
-        <p class="lede">The whole product runs on free tiers that are real products rather than trials. The only recurring bill is about a dollar a month, for the small model that reads the constraints out of your sentence.</p>
+        <h3>One machine, and everything on it</h3>
+        <p class="lede">Foundit runs on a single server you own, described entirely by files in this repository, so the worst case is rebuilding it in an hour rather than debugging it under pressure. The only usage-based bill is about a dollar a month, for the small model that reads the constraints out of your sentence.</p>
         <div class="scroll">
           <table>
             <thead><tr><th>Layer</th><th>Choice</th><th>Why this one</th></tr></thead>
             <tbody>
-              <tr><td class="k">App</td><td>Next.js 16 on Vercel</td><td>Free; the only limit that bites is that it must stay non-commercial</td></tr>
-              <tr><td class="k">Database</td><td>Supabase, two projects, <strong>both in us-east-1</strong></td><td>Postgres, vectors, sign-in, security rules — one service, no bill</td></tr>
+              <tr><td class="k">Machine</td><td>One Hetzner VPS, <strong>8 GB</strong>, Ubuntu 24.04</td><td>App, database and proxy share it; 4 GB leaves no headroom</td></tr>
+              <tr><td class="k">Everything on it</td><td>Docker Compose: Next.js 16, PostgreSQL 17, Caddy</td><td>One file describes the whole machine, so it can be rebuilt</td></tr>
+              <tr><td class="k">Edge</td><td>Cloudflare free plan, over a <strong>Tunnel</strong></td><td>Nothing listens on the public internet at all</td></tr>
               <tr><td class="k">Vectors</td><td><code>halfvec(512)</code>, no index</td><td>An exact scan of a few thousand rows takes 3–25 ms and never misses a match</td></tr>
               <tr><td class="k">Embeddings</td><td>OpenAI <code>text-embedding-3-small</code></td><td>Four cents for the entire catalogue</td></tr>
               <tr><td class="k">Reading the query</td><td>Rules first, then <code>gpt-5-nano</code></td><td>The rules pass catches most phrasings for nothing</td></tr>
               <tr><td class="k">Retrieval</td><td>Text search + vectors + fuzzy names, fused</td><td>Vectors alone are bad at exact tool names</td></tr>
-              <tr><td class="k">Sign-in</td><td>Supabase Auth — Google, Apple, emailed code</td><td>Already included; no second service to secure</td></tr>
+              <tr><td class="k">Sign-in</td><td><strong>Better Auth</strong> — Google and an emailed code</td><td>An npm package inside the app, not thirteen more containers</td></tr>
+              <tr><td class="k">Permissions</td><td>PostgreSQL row-level security</td><td>The database refuses bad reads and writes even if the app has a bug</td></tr>
+              <tr><td class="k">Backups</td><td>Continuous, to Cloudflare R2</td><td>Off-site has to mean off-provider</td></tr>
+              <tr><td class="k">Domain</td><td><strong>foundit.tools</strong></td><td>$29.35 a year, DNS at Cloudflare</td></tr>
             </tbody>
           </table>
         </div>
-        <div class="callout warn">
-          <h4>Create both databases in us-east-1</h4>
-          <p>It has to match where the app runs. Getting this wrong adds 160–360 milliseconds to every single search, forever, and moving a database between regions afterwards is a job nobody wants.</p>
+        <div class="callout risk">
+          <h4>The firewall you can watch lie to you</h4>
+          <p>Docker publishes container ports through a different part of the kernel's firewall than <code>ufw</code> filters, and Docker's own rules run first. So a database can be open to the entire internet while <code>ufw status</code> reports, truthfully as far as it knows, that everything is blocked. This is how self-hosted databases end up publicly readable. It is guarded four separate ways, and the build is not finished until a scan from another network proves nothing is listening.</p>
         </div>
       </section>
 
       <section id="rulings">
         <h2>Where the research disagreed</h2>
         <h3>Six rulings</h3>
-        <p>Each report optimised for its own concern, so they collided in six places. These are the calls, and they are recorded so we don't relitigate them in three weeks.</p>
+        <p>Each report optimised for its own concern, so they collided. These are the calls, recorded so we don't relitigate them in three weeks. The first six settled the search; the last four settled the machine.</p>
 
         <div class="ruling"><div class="n num">1</div><div>
           <div class="q">How much detail should each vector carry — 512 numbers or 1024?</div>
@@ -235,6 +239,26 @@
           <div class="q">What do we keep from a search?</div>
           <div class="a"><span class="verdict">A fingerprint of the query, never the words next to a name.</span> "Describe your problem" collects health, money and relationship troubles. Counts tell us what people need; transcripts are a liability.</div>
         </div></div>
+
+        <div class="ruling"><div class="n num">7</div><div>
+          <div class="q">Run the Supabase stack on our own machine, or plain PostgreSQL?</div>
+          <div class="a"><span class="verdict">Plain PostgreSQL, with Better Auth.</span> The Supabase stack is thirteen services, and its one unique gift was telling the database who the current user is — about twenty lines of code. Every container is something that breaks at 3am in front of someone who is not a developer.</div>
+        </div></div>
+
+        <div class="ruling"><div class="n num">8</div><div>
+          <div class="q">Firewall the server's public address, or open no ports at all?</div>
+          <div class="a"><span class="verdict">No ports at all.</span> The server dials out to Cloudflare and traffic returns down that pipe, so there is nothing on the internet to scan or attack — and no published port for Docker to expose past the firewall.</div>
+        </div></div>
+
+        <div class="ruling"><div class="n num">9</div><div>
+          <div class="q">One machine, or one for production and one for development?</div>
+          <div class="a"><span class="verdict">One, with a written trigger to split:</span> a second person getting access, or development work visibly slowing the live site. The honest cost is that big changes — a database version upgrade, a kernel update — can never be rehearsed first.</div>
+        </div></div>
+
+        <div class="ruling"><div class="n num">10</div><div>
+          <div class="q">How much downtime is acceptable when deploying?</div>
+          <div class="a"><span class="verdict">Two to ten seconds, hidden by the proxy retrying.</span> Eliminating it entirely on four cores costs more than it returns.</div>
+        </div></div>
       </section>
 
       <section id="quality">
@@ -262,8 +286,8 @@
             <thead><tr><th>Where</th><th>What to set</th></tr></thead>
             <tbody>
               <tr><td class="k">OpenAI</td><td>Prepaid credit of $5–10 with <strong>auto-recharge off</strong>, plus a monthly cap. The worst case becomes "it stops", not "it bills"</td></tr>
-              <tr><td class="k">Vercel</td><td>Spend Management, <em>and</em> switch on "pause production deployment" — the amount on its own does nothing</td></tr>
-              <tr><td class="k">Supabase</td><td>The free plan cannot bill you; it stops instead. Set the usage alerts</td></tr>
+              <tr><td class="k">Hetzner</td><td>A fixed monthly server price — it cannot surprise you, which is half the reason for owning it</td></tr>
+              <tr><td class="k">Cloudflare</td><td>Free plan. One rate-limiting rule with a ten-second window: a burst brake, not a budget guard</td></tr>
               <tr><td class="k">The app</td><td>A rate limit per visitor, a 200-character cap on queries, a daily ceiling on embedding calls</td></tr>
             </tbody>
           </table>
@@ -271,35 +295,36 @@
         <p>The search page is public, needs no account, and calls a paid model on every miss. That is precisely the shape someone points a script at, so the app's own limits matter as much as the suppliers' caps.</p>
 
         <h4>Security gates before launch</h4>
-        <p>The database is the real boundary — the key the browser holds is safe <em>only</em> because rules inside the database say who may read and write each row. Four checks, all of them one command:</p>
+        <p>The database is the real boundary: rules inside PostgreSQL decide who may read and write each row, so an application bug cannot become a data breach. Self-hosted, that boundary breaks silently in three ways, and each has an automatic check:</p>
         <ul class="plain">
-          <li>Every table has its row rules switched on.</li>
-          <li>No rule anywhere evaluates to "always allow" — that version still shows green in the dashboard while the database is wide open.</li>
-          <li>The secret key appears in no built file and in no commit, ever.</li>
-          <li>If a key has already leaked: rotate it first, tidy the history afterwards.</li>
+          <li><strong>The app connects as the table's owner.</strong> The rules are all still there, the tests still pass, and nothing is enforced — owners bypass their own tables' rules.</li>
+          <li><strong>A request's identity leaks into the next request</strong> through a reused database connection, so one person is served as another. It never reproduces in testing, because testing is not concurrent.</li>
+          <li><strong>A table added later never gets its rules switched on.</strong> The only one of the three that fails <em>open</em>.</li>
         </ul>
+        <p>Plus the unchanging two: no rule anywhere evaluates to "always allow", and no secret appears in any built file or any commit, ever.</p>
         <div class="callout risk">
           <h4>The most likely breach is not an attacker</h4>
           <p>It is an assistant — me, or any other — hitting a permissions error and "fixing" it by switching the row rules off or reaching for the master key. Both are forbidden on this project, and both are checked automatically on every change.</p>
         </div>
 
         <div class="callout risk">
-          <h4>The free database plan takes no backups. None.</h4>
-          <p>A scheduled export, plus one restore we have actually performed, is a launch blocker rather than a nice-to-have. A backup nobody has restored is not a backup.</p>
+          <h4>Backups are now entirely ours</h4>
+          <p>The database ships its changes continuously to Cloudflare R2 — a different company from the one hosting the server, because off-site has to mean off-provider. Worst case is losing five minutes, not a day. A separate encrypted dump runs nightly, because two mechanisms fail independently.</p>
+          <p>And once a week a job restores the whole thing from scratch, counts the rows, runs a real search against it, and only then reports success. <strong>Silence is the alarm.</strong> A backup nobody has restored is not a backup.</p>
         </div>
       </section>
 
       <section id="yours">
-        <h2>Waiting on you</h2>
-        <h3>Four decisions I shouldn't make alone</h3>
+        <h2>Settled</h2>
+        <h3>The four decisions that were yours</h3>
         <div class="scroll">
           <table>
-            <thead><tr><th>Decision</th><th>Recommendation</th><th>Why</th></tr></thead>
+            <thead><tr><th>Decision</th><th>Outcome</th><th>Consequence</th></tr></thead>
             <tbody>
-              <tr><td class="k">Repository public or private?</td><td><strong>Public</strong></td><td>On the free plan it unlocks unlimited automated checks, branch protection and secret scanning. Secrets live in Vercel, not in files</td></tr>
-              <tr><td class="k">Auto-fill from a submitted link?</td><td><strong>Not yet</strong></td><td>Ship manual entry; add the hardened version once there is something to protect</td></tr>
-              <tr><td class="k">Domain name</td><td>Pick one before launch</td><td>The only real expense in the whole project</td></tr>
-              <tr><td class="k">Any money-making, ever?</td><td>Say now if yes</td><td>A single affiliate link makes the free hosting tier ineligible — $20 a month from that day</td></tr>
+              <tr><td class="k">Repository public or private?</td><td><strong>Public</strong></td><td>Unlimited automated checks, branch protection and secret scanning, all free. Nothing secret lives in a file</td></tr>
+              <tr><td class="k">Where does it run?</td><td><strong>Our own machine</strong></td><td>No pausing, no traffic cliff, no rule against charging money later — in exchange for being the operator</td></tr>
+              <tr><td class="k">Apple sign-in?</td><td><strong>Deferred</strong></td><td>$99 a year against a project that costs a fraction of that. It returns with the iOS app, when it stops being optional</td></tr>
+              <tr><td class="k">Domain</td><td><strong>foundit.tools</strong></td><td>$29.35 a year. DNS moved to Cloudflare before the server exists, which is the order that matters</td></tr>
             </tbody>
           </table>
         </div>
@@ -311,8 +336,12 @@
         <p>Phases 2 through 5 each end by scoring the same sixty queries. If a change doesn't move the score, it doesn't ship — that rule is what keeps this from becoming a pile of plausible-looking machinery.</p>
         <ol class="phases">
           <li><div class="ph">Phase 0</div><div>
-            <div class="phase-head"><b>Accounts and guards</b><span class="chip you">You</span></div>
-            <div class="phase-body">Two databases in us-east-1, hosting connected to both branches, prepaid credit with auto-recharge off, every cap above set. I can't hold these credentials and shouldn't.</div>
+            <div class="phase-head"><b>The domain</b><span class="chip you">You</span><span class="chip gate">Done</span></div>
+            <div class="phase-body">Bought, and its DNS moved to Cloudflare <em>before</em> the machine exists — because the first time a domain resolves to a raw server address, that pairing is public forever and the protection is undone.</div>
+          </div></li>
+          <li><div class="ph">Phase 0b</div><div>
+            <div class="phase-head"><b>The machine, built once</b><span class="chip you">You</span><span class="chip me">Me</span></div>
+            <div class="phase-body">A key made and backed up, the firewall created before the server, a non-root user proved in a second terminal before anything is locked, password logins off, Docker configured so containers cannot publish to the world, automatic security updates, the tunnel, and the backup job. Finished only when a scan from another network finds nothing listening.</div>
           </div></li>
           <li><div class="ph">Phase 1</div><div>
             <div class="phase-head"><b>The database</b><span class="chip me">Me</span></div>
@@ -356,13 +385,13 @@
         <ul class="plain">
           <li><strong>The speed of the outside model calls is an estimate</strong>, not a published figure — and those calls dominate a search. Measure on day one.</li>
           <li><strong>Whether generated problem statements really beat plain descriptions</strong> is unproven for this kind of search. The test set settles it in an afternoon.</li>
-          <li><strong>How far back the free database plan can restore</strong> is documented as a year in one place and ninety days in another. Assume ninety.</li>
+          <li><strong>What the server actually costs.</strong> Hetzner raised cloud prices by a third to more than double on 15 June 2026, and renders prices in JavaScript, so no figure I have is trustworthy until you read it from their console.</li>
           <li><strong>None of the database code in the reports has ever been run.</strong> It is a starting point to execute and fix, not to trust.</li>
         </ul>
       </section>
 
       <footer>
-        Full reasoning, arithmetic and every source URL: <code>research/00-SUMMARY.md</code> and the six numbered reports beside it. Where this page and a single report disagree, the summary is the one that has been reconciled.
+Full reasoning, arithmetic and every source URL: <code>research/00-SUMMARY.md</code> and the eleven numbered reports beside it — around 16,000 lines, every claim carrying its source. Where this page and a single report disagree, the summary is the one that has been reconciled.
       </footer>
     </main>
   </div>
