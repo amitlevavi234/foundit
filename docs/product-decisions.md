@@ -99,3 +99,41 @@ made type render soft.
 
 The 37 designed screens are in `design/canvas/`, regenerated with
 `node design/canvas/build.mjs`.
+
+---
+
+## 10. Operator dashboard (added 10 September 2026)
+
+A private dashboard for the owner, at `/admin`, visible to nobody else. Its job is to
+answer "is this working, and what should I build next" — and to show the money.
+
+**What it shows**
+
+| Panel | Contents |
+| --- | --- |
+| Demand | Searches per day; searches that returned nothing good — the most valuable list on the page, because it is demand the catalogue cannot serve yet |
+| What people ask for | The most frequent queries, grouped, with counts. Text without names attached |
+| Catalogue | Tools added this week, by whom; tools nobody has ever matched; claims made |
+| People | Signups per day, returning visitors, and each user's **public** activity: tools added, reviews written, likes given, last seen |
+| Words | Reviews posted, reports received |
+| Money | Embedding calls today, model calls today, estimated spend this month against the cap, database size and egress against the free-tier limits |
+
+**The privacy line.** Search text is visible in aggregate — deduplicated, counted, not
+attached to a person. Individual users are visible through what they did in public.
+The two are never joined, so the dashboard can never become a record of what a named
+person went looking for. This costs nothing in usefulness: product decisions come from
+what many people ask, not from what one person asked.
+
+Access is enforced in the database, not just the page: an `is_admin` flag on the
+profile, checked by the row-level rules, so the dashboard cannot be reached by
+guessing the URL.
+
+## 11. Paid accounts, later (added 10 September 2026)
+
+Premium accounts are expected eventually, not soon. Two consequences to plan for now,
+neither of which is work today:
+
+1. **The day the first payment is taken, the free hosting tier becomes ineligible** —
+   it is non-commercial only. Budget $20/month from that day.
+2. The database gets a `plan` column on the profile from the first migration, so that
+   adding tiers later is a change of behaviour rather than a migration of everyone.
