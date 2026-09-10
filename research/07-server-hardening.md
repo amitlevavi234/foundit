@@ -1308,3 +1308,295 @@ Debian has no equivalent free offering. If you chose Debian, automatic reboots a
 
 ---
 
+
+## 5. Intrusion prevention and detection
+
+### 5.1 fail2ban or CrowdSec? â€” the recommendation and the reasoning
+
+**Recommendation: fail2ban, with an SSH jail only. Do not install CrowdSec at launch.**
+
+This will look like the boring answer, so here is the reasoning, which is specific to *your* architecture rather than generic.
+
+**What CrowdSec is genuinely better at.** CrowdSec is an "Open-source agent that parses logs, applies scenarios, and bans IPs", and users are "Immediately protected with the Community Blocklist" ([CrowdSec: Intro](https://docs.crowdsec.net/docs/next/getting_started/intro/)). Its firewall bouncer solves the Docker problem correctly â€” its docs say: *"If you are using a dockerized application and allow remote connections to the exposed port, you need to add the `DOCKER-USER` chain to the list"* ([CrowdSec: Firewall bouncer](https://docs.crowdsec.net/u/bouncers/firewall/)), configured as:
+
+```yaml
+iptables_chains:
+  - INPUT
+  - FORWARD
+  - DOCKER-USER
+```
+
+That is a real advantage over fail2ban, whose default `banaction` is `iptables-multiport` ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)) writing to `INPUT` â€” which, per Â§2.4, **does not affect Docker-published ports at all.**
+
+**Why that advantage does not pay off here.** Your web traffic reaches the origin **only from Cloudflare IP ranges** (Â§3). Therefore:
+
+1. Every HTTP request in your proxy's logs has a Cloudflare source IP unless you configure real-IP restoration.
+2. If CrowdSec bans an attacker's IP at the origin firewall, it bans nothing â€” the attacker's packets never carried that IP to your box.
+3. If real-IP restoration *is* configured and CrowdSec bans the restored address in `DOCKER-USER`, it still bans nothing, because the packets arrive from a Cloudflare IP.
+4. If it somehow banned the Cloudflare IP the request came from, it would **take a slice of your legitimate users offline.** This is a real, common self-inflicted outage.
+
+**Web-layer IP blocking belongs at Cloudflare, not on your origin.** Cloudflare's WAF, rate-limiting rules and bot controls act at the edge where the attacker's real IP is the connecting IP. That is the correct place, it is included in your plan, and it costs nothing extra.
+
+**What is left for a host-based tool?** SSH. And SSH traffic goes to the host, hits `INPUT`, and is exactly what fail2ban was built for and handles correctly.
+
+So the division of labour is:
+
+| Layer | Tool | Blocks |
+|---|---|---|
+| Web (80/443) | **Cloudflare WAF + rate limiting rules** | Real attacker IPs, at the edge, before they reach you |
+| Origin network | **Hetzner Cloud Firewall + `DOCKER-USER` allowlist** | Everything not from Cloudflare |
+| SSH | **fail2ban** | Repeated failed auth from the same source |
+
+**When to revisit and adopt CrowdSec:** if you ever stop fronting the app with Cloudflare, if you expose a non-HTTP service to the internet, or if you want the community blocklist applied pre-emptively. If you do adopt it *while* still on Cloudflare, use the **Cloudflare bouncer** (which pushes decisions into Cloudflare's own firewall) rather than the origin firewall bouncer â€” that puts the block where the attacker's IP actually is.
+
+For completeness, the CrowdSec install path is `curl -s https://install.crowdsec.net | sudo sh` then `sudo apt install crowdsec`, plus `sudo apt install crowdsec-firewall-bouncer-iptables`; note their warning that *"the Security Engine by itself is a detection engine â€” it will not block anything"* without a bouncer ([CrowdSec: Linux installation](https://docs.crowdsec.net/u/getting_started/installation/linux/)).
+
+### 5.2 fail2ban configuration
+
+Never edit `jail.conf` â€” settings in a file parsed later take precedence, so `jail.local` is the supported override ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)).
+
+```bash
+sudo tee /etc/fail2ban/jail.local > /dev/null <<'EOF'
+[DEFAULT]
+# Never lock yourself out. Add your home/office IP and any monitoring source.
+ignoreip = 127.0.0.1/8 ::1 203.0.113.45
+
+# Read from the systemd journal rather than a log file that may not exist.
+backend  = systemd
+
+# Escalating bans: 1h first, doubling, capped at a week.
+bantime            = 1h
+bantime.increment  = true
+bantime.factor     = 2
+bantime.maxtime    = 1w
+findtime           = 10m
+maxretry           = 3
+
+# Ban all ports for this source, not just the one they attacked.
+banaction       = iptables-allports
+banaction_allports = iptables-allports
+
+destemail = you@example.com
+sender    = foundit-server@example.com
+action    = %(action_mw)s
+
+[sshd]
+enabled  = true
+port     = 52242
+filter   = sshd
+mode     = aggressive
+maxretry = 3
+
+# Everything else stays off. There is nothing else on this host to protect,
+# and a jail reading Cloudflare-sourced web logs would ban your own users.
+[sshd-ddos]
+enabled = false
+EOF
+
+sudo systemctl enable --now fail2ban
+sudo systemctl restart fail2ban
+```
+
+The options used are all documented in [jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html): `bantime` ("effective ban duration"), `findtime` ("time interval ... before the current time where failures will count towards a ban"), `maxretry` ("number of failures that have to occur in the last findtime seconds to ban the IP"), `ignoreip` ("list of IPs not to ban ... can include a DNS resp. CIDR mask too"), `banaction` ("banning action (default iptables-multiport)"), `backend` ("backend to be used to detect changes in the logpath. It defaults to 'auto'"), `filter`, `action` and `logpath`.
+
+`bantime.increment`, `bantime.factor` and `bantime.maxtime` are **not** in the Ubuntu manpage excerpt â€” they are fail2ban 0.11+ features documented in the shipped `jail.conf` comments. Verify on your machine with `grep -n 'bantime.increment' /etc/fail2ban/jail.conf` before relying on them; see [What I could not confirm](#what-i-could-not-confirm).
+
+**Three fail2ban traps, in order of how often they bite:**
+
+1. **`backend = auto` finds no log and silently does nothing.** Recent Debian and Ubuntu images often ship without `rsyslog`, so `/var/log/auth.log` does not exist and the `sshd` jail reads an empty file forever, while `systemctl status fail2ban` reports "active (running)". Setting `backend = systemd` reads the journal directly and removes the failure mode. **Verify it is actually seeing events** â€” this is the only proof that matters:
+   ```bash
+   sudo fail2ban-client status sshd
+   # "Total failed" must be > 0 after you deliberately fail a login.
+   ```
+   Test it for real from a phone hotspot or another machine:
+   ```bash
+   for i in 1 2 3 4; do ssh -p 52242 -o PubkeyAuthentication=no nosuchuser@YOUR.SERVER.IP; done
+   # then on the server:
+   sudo fail2ban-client status sshd     # your test IP should be listed as banned
+   sudo fail2ban-client set sshd unbanip YOUR.TEST.IP
+   ```
+2. **fail2ban does not protect Docker-published ports.** Its default `iptables-multiport` action writes to `INPUT` ([jail.conf(5)](https://manpages.ubuntu.com/manpages/noble/man5/jail.conf.5.html)); Docker's published ports never traverse `INPUT` (Â§2.4). Do not add a web jail expecting it to work. This is not a bug you can configure away with `banaction`; it is the same architectural fact as Â§2.4.
+3. **`ignoreip` is your seatbelt.** Put your own address in it before you start testing bans. If your ISP address is dynamic, keep the Hetzner web console tab open while testing (Â§1.10 Path A defeats any fail2ban ban, because the console is not on the network).
+
+Useful commands:
+
+```bash
+sudo fail2ban-client status                 # which jails are running
+sudo fail2ban-client status sshd            # failures, bans, currently banned list
+sudo fail2ban-client set sshd unbanip 1.2.3.4
+sudo fail2ban-client set sshd banip 1.2.3.4
+sudo journalctl -u fail2ban -n 50 --no-pager
+```
+
+### 5.3 Auditing what changed: auditd, and the lighter alternative
+
+**Recommendation: skip `auditd` at launch. Adopt the light stack in Â§5.3.2. Add `auditd` only if you ever have a compliance requirement or an actual incident to investigate.**
+
+#### 5.3.1 What auditd would give you, and why it is the wrong first tool here
+
+`auditd` records kernel-level events. Watch rules use `auditctl -w path -p permissions -k key`, where permissions are "r=read, w=write, x=execute, a=attribute change" and the key "can uniquely identify the audit records produced by a rule" ([auditctl(8)](https://manpages.ubuntu.com/manpages/noble/man8/auditctl.8.html)). Syscall rules use `auditctl -a always,exit -F field=value -S syscall`, where "always" means the kernel will "always fill it in at syscall entry time, and always write out a record at syscall exit time" ([auditctl(8)](https://manpages.ubuntu.com/manpages/noble/man8/auditctl.8.html)). Rules persist in `/etc/audit/audit.rules` and the `/etc/audit/` directory ([auditctl(8)](https://manpages.ubuntu.com/manpages/noble/man8/auditctl.8.html)), and `auditctl -e 2` locks the configuration so that changes require a reboot ([auditctl(8)](https://manpages.ubuntu.com/manpages/noble/man8/auditctl.8.html)).
+
+If you did install it, a minimal ruleset appropriate to this server would be:
+
+```bash
+sudo apt install -y auditd audispd-plugins
+sudo tee /etc/audit/rules.d/50-foundit.rules > /dev/null <<'EOF'
+# Identity and privilege
+-w /etc/passwd    -p wa -k identity
+-w /etc/shadow    -p wa -k identity
+-w /etc/group     -p wa -k identity
+-w /etc/sudoers   -p wa -k privilege
+-w /etc/sudoers.d/ -p wa -k privilege
+
+# Remote access configuration
+-w /etc/ssh/sshd_config    -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+-w /root/.ssh/             -p wa -k ssh_keys
+-w /home/founditops/.ssh/  -p wa -k ssh_keys
+
+# The things this document told you to configure
+-w /etc/docker/daemon.json -p wa -k docker_cfg
+-w /srv/foundit/           -p wa -k app
+-w /usr/local/sbin/        -p wa -k local_bin
+
+# Docker socket access is a root-equivalent action
+-w /var/run/docker.sock -p rwa -k docker_sock
+
+# Scheduled tasks
+-w /etc/crontab   -p wa -k cron
+-w /etc/cron.d/   -p wa -k cron
+-w /etc/systemd/system/ -p wa -k systemd_units
+
+# Kernel module loading
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k modules
+
+-b 8192
+EOF
+sudo augenrules --load && sudo systemctl restart auditd
+sudo ausearch -k sshd -i | tail -20
+```
+
+**Why not to, for this owner:** `auditd` on a busy container host produces a large volume of records in a format that is genuinely hard to read, it competes with Docker for the audit netlink socket in some configurations, and â€” decisively â€” **an audit log that nobody reads provides zero security and non-zero disk consumption and CPU.** It is a tool for someone who will look at it. You have told me, honestly, that you are not that person yet.
+
+#### 5.3.2 The lighter alternative that a non-developer will actually use
+
+Four sources, all already on the machine, all readable:
+
+**a) What packages changed, and when.**
+```bash
+# Human-readable APT history, including who ran it
+sudo less /var/log/apt/history.log
+grep -E '^(Start-Date|Commandline|Upgrade|Install|Remove)' /var/log/apt/history.log | tail -40
+```
+
+**b) Who logged in, and who failed.**
+```bash
+last -20                                     # successful logins
+lastb -20                                    # failed logins (needs /var/log/btmp)
+sudo journalctl -u ssh --since "7 days ago" | grep -E 'Accepted|Failed|Invalid'
+sudo journalctl _COMM=sudo --since "7 days ago" --no-pager    # every sudo invocation
+```
+
+**c) Did any *shipped* file change?** `debsums` verifies installed files against the package manager's checksums. This catches a trojanised system binary â€” the single highest-value integrity check on a Debian-family box, and it takes one command:
+```bash
+sudo apt install -y debsums
+sudo debsums -c        # lists any file whose checksum no longer matches its package
+```
+An empty output is the expected, good result.
+
+**d) File integrity monitoring for the paths that matter.** `AIDE` builds a baseline database and reports differences. Scope it tightly so the report is short enough to read:
+```bash
+sudo apt install -y aide aide-common
+sudo tee /etc/aide/aide.conf.d/99_foundit > /dev/null <<'EOF'
+/etc/ssh          FIPSR
+/etc/sudoers      FIPSR
+/etc/sudoers.d    FIPSR
+/root/.ssh        FIPSR
+/home/founditops/.ssh FIPSR
+/usr/local/sbin   FIPSR
+/etc/docker       FIPSR
+/srv/foundit      FIPSR
+EOF
+sudo aideinit          # builds the baseline â€” do this on day one, before going live
+sudo aide.wrapper --check | head -50
+```
+âš ï¸ **A baseline built after a compromise is a baseline of the compromise.** Run `aideinit` on day one. The Debian `aide-common` package installs a daily cron job that emails the report; if you use that, make sure Â§4.7's mail actually works, otherwise it is theatre.
+
+**Something to be honest about:** an attacker with root can edit `/var/log`, `/var/lib/aide/aide.db`, and the AIDE config. Local logs and local integrity databases detect *mistakes and unsophisticated intrusions*, not a competent attacker who got root. The only real defences against that are (i) shipping logs off the box, and (ii) rebuilding rather than cleaning (Â§7). Given the scale, ship the logs somewhere free â€” Cloudflare Logpush, a Grafana Cloud free tier, or even `journalctl` output rsynced nightly to a different provider â€” and accept that on-box detection is best-effort.
+
+### 5.4 What to look at weekly, and what to never look at
+
+This table is the whole point of section 5. A monitoring setup nobody reads is worse than none, because it manufactures false confidence.
+
+| Frequency | What | Command / place | Why this one |
+|---|---|---|---|
+| **Automatic, pushes to you** | Site down | Free uptime monitor (UptimeRobot, Better Stack free tier) hitting `https://foundit.app/healthz` every 5 min, alerting to your phone | The single highest-value alert you will ever configure. Most compromises that matter eventually break something. |
+| **Automatic** | Disk filling | `df -h` in the weekly digest; alert at 80% | A full disk takes Postgres down and looks exactly like a hack. Docker logs and images are the usual culprit â€” `daemon.json` in Â§2.4.3 caps log size. |
+| **Automatic** | unattended-upgrades report | Email, `MailReport "on-change"` (Â§4.4) | Tells you patching is alive. Silence for two weeks means it broke. |
+| **Weekly, 5 minutes** | Failed and successful SSH logins | `sudo journalctl -u ssh --since "7 days ago" \| grep -E 'Accepted\|Failed'` | With key-only auth on a non-standard port this should be nearly empty. **A single `Accepted publickey` you do not recognise is the alarm.** |
+| **Weekly, 1 minute** | fail2ban state | `sudo fail2ban-client status sshd` | Confirms the tool is alive and counting. `Total failed: 0` after weeks is suspicious, not reassuring. |
+| **Weekly, 1 minute** | What is listening, and where | `sudo ss -tlnp` and `docker ps --format 'table {{.Names}}\t{{.Ports}}'` | The Â§2.4 regression check. A deploy that added `ports: - "6379:6379"` shows up here and nowhere else. |
+| **Weekly, 30 seconds** | Firewall still on | `sudo ufw status verbose` and `sudo iptables -L FOUNDIT-CF -n \| head` | Both must be non-empty. |
+| **Monthly** | Package integrity | `sudo debsums -c` | Should print nothing. |
+| **Monthly** | Container rebuild | Â§4.6 | The most-skipped and most-important task. |
+| **Monthly** | Restore a backup | Â§7.4 | An untested backup is a hope. |
+| **Quarterly** | Cloudflare IP list eyeball | `https://www.cloudflare.com/ips/` vs `/var/lib/foundit/cloudflare-ips-v4.txt` | The automation should make this unnecessary. Check anyway. |
+| **Quarterly** | External port scan | Â§8 | The only check that proves what the internet sees. |
+| **Never** | Raw `auditd` records | â€” | Unless you are investigating a specific incident, with a specific question. |
+| **Never** | Raw nginx/Caddy access logs, line by line | â€” | Behind Cloudflare these are Cloudflare IPs hitting your app. Use Cloudflare's own analytics dashboard instead â€” it has the real client IPs, the country, the bot score, and a UI. |
+| **Never** | `/var/log/syslog` in full | â€” | It is the wrong altitude. Query it when you have a question; do not read it as a practice. |
+
+Automate the weekly ones into a single email so "weekly review" is reading one message, not running eight commands:
+
+```bash
+sudo tee /usr/local/sbin/foundit-weekly-digest.sh > /dev/null <<'DIGEST'
+#!/bin/bash
+{
+  echo "=== FOUNDIT WEEKLY DIGEST â€” $(date -u) ==="
+  echo; echo "--- Uptime / load ---"; uptime
+  echo; echo "--- Disk ---"; df -h / /var/lib/docker 2>/dev/null
+  echo; echo "--- Memory ---"; free -h
+  echo; echo "--- Reboot required? ---"
+  [ -f /var/run/reboot-required ] && cat /var/run/reboot-required.pkgs || echo "no"
+  echo; echo "--- Listening sockets (check for 0.0.0.0 on anything but 80/443) ---"
+  ss -tlnp
+  echo; echo "--- Published container ports ---"
+  docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  echo; echo "--- ufw ---"; ufw status verbose
+  echo; echo "--- Cloudflare allowlist chain (first 5) ---"
+  iptables -L FOUNDIT-CF -n | head -8
+  echo; echo "--- fail2ban ---"; fail2ban-client status sshd 2>/dev/null
+  echo; echo "--- SSH logins, last 7 days ---"
+  journalctl -u ssh --since "7 days ago" --no-pager | grep -E 'Accepted|Failed|Invalid' | tail -30
+  echo; echo "--- sudo use, last 7 days ---"
+  journalctl _COMM=sudo --since "7 days ago" --no-pager | tail -20
+  echo; echo "--- Package changes, last 7 days ---"
+  grep -A3 "$(date -d '7 days ago' +%Y-%m)" /var/log/apt/history.log 2>/dev/null | tail -30
+  echo; echo "--- Last unattended-upgrades run ---"
+  tail -5 /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null
+} | mail -s "Foundit weekly digest â€” $(hostname)" you@example.com
+DIGEST
+sudo chmod 700 /usr/local/sbin/foundit-weekly-digest.sh
+
+# Run it Mondays at 08:00
+sudo tee /etc/systemd/system/foundit-digest.timer > /dev/null <<'EOF'
+[Unit]
+Description=Weekly Foundit digest
+[Timer]
+OnCalendar=Mon 08:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+sudo tee /etc/systemd/system/foundit-digest.service > /dev/null <<'EOF'
+[Unit]
+Description=Weekly Foundit digest
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/foundit-weekly-digest.sh
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable --now foundit-digest.timer
+```
+
+---
+

@@ -14,7 +14,7 @@
 | One box or two | **One box** for now (CX32/CX42 class, 8 GB), with hard isolation between prod and dev. Move dev to a second €4–5/mo box the moment dev load starts making prod latency wobble, or the moment a second person joins. |
 | Build & deploy | **GitHub Actions → build image → push to GHCR (tagged by commit SHA) → SSH to host → `docker compose up -d --wait`**. Never build on the VPS. |
 | Reverse proxy | **Caddy.** Automatic TLS with zero config, one-line HTTP→HTTPS redirect, trivial `trusted_proxies` for Cloudflare. Traefik if you later want label-driven routing; nginx only if you already know nginx. |
-| Downtime at deploy | **Accept 2–10 seconds of honest downtime**, absorbed by Caddy retry + a Cloudflare "Always Online"-ish buffer. Do *not* build blue/green on a 4-vCPU box until you have paying users who notice. |
+| Downtime at deploy | **Accept 2–10 seconds of honest downtime**, absorbed by Caddy's `lb_try_duration` retry window. Do *not* build blue/green on a 4-vCPU box until you have paying users who notice. |
 | Migrations | **Expand/contract, run as a separate one-shot container *before* the new app starts, with an automatic `pg_dump` immediately before.** |
 | Monitoring | **Sentry (errors) + an external uptime check (HTTP + a `/api/health` that touches the DB) + Beszel (host metrics).** Page at night only on "site is down" and "disk >90%". |
 
@@ -258,6 +258,9 @@ STACK_DIR=/srv/prod
 STATE_DIR=/srv/state/prod
 BACKUP_DIR=/srv/backups/prod
 COMPOSE="docker compose --project-directory ${STACK_DIR} -f ${STACK_DIR}/docker-compose.yml"
+
+# load POSTGRES_USER / POSTGRES_DB etc. for the pg_dump step below
+set -a; source "${STACK_DIR}/.env"; set +a
 
 # ---- 1. validate the requested tag -------------------------------------
 # Called as: deploy-prod sha-1a2b3c4     (forced command => read from SSH_ORIGINAL_COMMAND)
@@ -1499,3 +1502,675 @@ printf '%s  %s  %s -> %s\n' "$(date -u +%FT%TZ)" "$USER" "${PREV_TAG:-none}" "$N
 `tail /srv/state/prod/deploy.log` answers "what changed recently" without GitHub, without a browser, and without a working app.
 
 ---
+
+## 8. The runbooks
+
+Design rules these follow, because they will be read by a tired non-developer:
+
+- **Numbered steps, one action per step.** No paragraphs.
+- **Every step says what you should see** if it worked.
+- **A STOP line** before anything irreversible.
+- **Copy-pasteable literal commands.** No `<placeholders>` except where genuinely unavoidable, and then flagged in capitals.
+- **The first step of every runbook is "write down the time".** Incident reconstruction is impossible without it.
+
+Print these. Keep a copy off the machine — on your phone, in a note. **A runbook that lives only on the server you cannot reach is not a runbook.**
+
+Prerequisites assumed on the box:
+
+```bash
+prod   ->  docker compose --project-directory /srv/prod -f /srv/prod/docker-compose.yml
+dev    ->  docker compose --project-directory /srv/dev  -f /srv/dev/docker-compose.yml
+```
+
+---
+
+### 8.1 Runbook: Deploy
+
+**Normal path — you do not touch the server at all.**
+
+```
+ 1. Note the time.
+ 2. Merge your change into `main` on GitHub (or push to `main`).
+ 3. Open the repo -> Actions tab. A run named "Build and deploy" starts
+    within ~10 seconds.
+ 4. Wait. Expect 3-6 minutes total.
+      SEE: green check on both the `build` and `deploy` jobs.
+ 5. Open https://YOURDOMAIN/api/health
+      SEE: {"ok":true,"sha":"sha-XXXXXXX"} where sha matches the new commit.
+ 6. Click through one real page of the site.
+ 7. Done.
+
+IF THE RUN GOES RED:
+ 8. Open the failed job and read the LAST 20 lines of output.
+ 9. If it failed in `build`  -> nothing was deployed. The site is untouched.
+      Fix the code and push again. No server action needed.
+10. If it failed in `deploy` -> the deploy script already rolled back
+      automatically. Confirm with step 5: the sha should be the PREVIOUS one
+      and `ok` should be true.
+11. If step 5 does NOT show a healthy previous version, go to Runbook 8.2.
+```
+
+**Manual deploy of a specific version** (rare — e.g. GitHub Actions is down):
+
+```
+ 1. Note the time.
+ 2. ssh deploy@YOURSERVER   (or use Hetzner Cloud Console if SSH is broken)
+ 3. Find the tag you want:
+        cat /srv/state/prod/deploy.log | tail -20
+ 4. Deploy it:
+        sudo /usr/local/bin/deploy-prod sha-XXXXXXX
+      SEE: "==> deployed sha-XXXXXXX OK" as the last line.
+ 5. Verify: curl -s https://YOURDOMAIN/api/health
+```
+
+---
+
+### 8.2 Runbook: Roll back
+
+Use when: the site is broken and the last thing that changed was a deploy.
+
+```
+ 1. Note the time.
+ 2. ssh deploy@YOURSERVER
+ 3. Find the previous good tag:
+        cat /srv/state/prod/previous_tag
+      SEE: something like  sha-9f8e7d6
+      (If that file is empty, use: tail -5 /srv/state/prod/deploy.log
+       and take the tag on the left side of the second-to-last "->")
+ 4. Roll back:
+        sudo /usr/local/bin/deploy-prod "$(cat /srv/state/prod/previous_tag)"
+      SEE: "==> deployed sha-9f8e7d6 OK"
+      This takes about 30 seconds.
+ 5. Verify:
+        curl -s https://YOURDOMAIN/api/health
+      SEE: {"ok":true,"sha":"sha-9f8e7d6"}
+ 6. Open the site in a browser. Click one real page.
+ 7. Tell Sentry which release is live: nothing to do, it reads SENTRY_RELEASE
+    from the container automatically.
+ 8. Write in the deploy log why:
+        echo "$(date -u +%FT%TZ)  ROLLED BACK - reason: WHAT HAPPENED" \
+          | sudo tee -a /srv/state/prod/deploy.log
+
+IF THE ROLLBACK ALSO FAILS:
+ 9. The problem is probably NOT the app image. Go to Runbook 8.3.
+10. If the app rolls back fine but data looks wrong, the migration is the
+    problem. Go to §4.4 Scenario C.
+
+DO NOT:
+ - Do not roll back MORE than one version without checking whether a
+   migration ran in between. An old image against a newer schema is only safe
+   if migrations were expand/contract (§4.2).
+ - Do not edit files on the server to "quickly fix" it. See §9.1.
+```
+
+---
+
+### 8.3 Runbook: Restart a stuck service
+
+Use when: the site is down or slow, and no deploy happened recently.
+
+```
+ 1. Note the time.
+ 2. ssh deploy@YOURSERVER
+
+ 3. LOOK BEFORE TOUCHING. What state is everything in?
+        prod ps
+      SEE: a table. Note the STATUS column for each service.
+        "Up 3 hours (healthy)"    = fine
+        "Up 2 minutes"            = it restarted recently -- suspicious
+        "Up (unhealthy)"          = running but failing its health check
+        "Restarting (1) 5s ago"   = crash loop -- THIS is your problem
+        "Exited (137)"            = KILLED, almost always out of memory
+
+ 4. CHECK DISK FIRST. A full disk causes symptoms that look like everything
+    else, and restarting will not fix it.
+        df -h /
+      IF "Use%" is 90% or more -> go to step 20.
+
+ 5. CHECK MEMORY.
+        free -h
+        docker stats --no-stream
+      Note any container at its memory limit.
+
+ 6. READ THE LOGS of the unhealthy service. Do this BEFORE restarting --
+    restarting can destroy the evidence.
+        prod logs --tail=100 --timestamps app
+        prod logs --tail=100 --timestamps db
+      Look for the FIRST error, not the last. Scroll up.
+
+ 7. Save the logs so you can read them properly later:
+        prod logs --tail=2000 --timestamps > ~/incident-$(date -u +%FT%TZ).log
+
+ 8. NOW restart. Least disruptive first.
+
+    8a. Restart ONE service (try this first):
+            prod restart app
+        Wait 60 seconds.
+            prod ps
+        SEE: "Up ... (healthy)". If yes -> go to step 12.
+
+    8b. Recreate that service from its image (clears a bad container state):
+            prod up -d --force-recreate --wait --wait-timeout 120 app
+        SEE: command exits 0. If it times out, the app is not becoming
+        healthy -- read the logs again (step 6).
+
+    8c. Restart the WHOLE STACK. Expect ~30 seconds of downtime.
+            prod up -d --force-recreate --wait --wait-timeout 180
+        SEE: command exits 0.
+
+ 9. IF POSTGRES IS THE STUCK ONE, be careful.
+        prod logs --tail=200 db
+    - "database system is ready to accept connections" = it is fine, the
+      problem is elsewhere.
+    - "could not write to file ... No space left on device" = go to step 20.
+    - "database system was not properly shut down; automatic recovery in
+      progress" = WAIT. Do not restart it again. Recovery can take minutes.
+      Restarting mid-recovery is how you turn a hiccup into corruption.
+
+10. IF NOTHING WORKS, restart the Docker daemon (last resort, ~1 min down):
+        sudo systemctl restart docker
+    Then:
+        prod up -d --wait
+
+11. IF STILL NOTHING, reboot the box from the Hetzner Cloud Console.
+    Containers with `restart: unless-stopped` come back automatically.
+        SEE after ~90 seconds: curl https://YOURDOMAIN/api/health returns ok.
+
+12. VERIFY and record:
+        curl -s https://YOURDOMAIN/api/health
+        prod ps
+        echo "$(date -u +%FT%TZ)  RESTARTED app - reason: WHAT YOU SAW" \
+          | sudo tee -a /srv/state/prod/deploy.log
+
+--- DISK FULL BRANCH ---
+20. Free space, safest actions first:
+        docker container prune -f
+        docker image prune -af --filter "until=48h"
+        docker builder prune -af
+        sudo journalctl --vacuum-size=100M
+        sudo find /srv/backups -name '*.dump' -mtime +7 -delete
+21. Check again:
+        df -h /
+22. If still full, find the biggest offenders:
+        sudo du -xh /var/lib/docker --max-depth=2 | sort -rh | head -20
+        sudo du -xh /srv --max-depth=2 | sort -rh | head -20
+23. STOP. Do NOT run `docker system prune --volumes`. That flag can delete
+    your DATABASE volume. Never type it.
+24. Once below 80%, restart the stack: prod up -d --wait
+25. Fix the cause: if it was container logs, the daemon log limits (§6.3)
+    are missing or the containers predate them. Recreate everything:
+        prod up -d --force-recreate
+```
+
+---
+
+### 8.4 Runbook: Restore the database
+
+**STOP. Read all of this before typing anything. This runbook can destroy data if steps are skipped.**
+
+Use when: data is corrupted, wrongly deleted, or a migration mangled it.
+
+```
+ 1. Note the time. Write down, in words, what you believe is wrong and what
+    you think caused it. You will need this.
+
+ 2. STOP WRITES. Every second of continued writing makes the restore lossier.
+        ssh deploy@YOURSERVER
+        prod stop app
+      SEE: app stops. The site now shows an error page. THAT IS CORRECT AND
+      INTENTIONAL. A broken site is better than a growing data problem.
+
+ 3. Confirm the database container is still RUNNING (you need it to restore):
+        prod ps db
+      SEE: "Up ... (healthy)"
+
+ 4. Take a dump of the CURRENT, BROKEN database. Do not skip this. You may
+    need rows that were written after the damage.
+        prod exec -T db pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+          -Fc --no-owner --no-acl \
+          > /srv/backups/prod/BROKEN-$(date -u +%Y%m%dT%H%M%SZ).dump
+      SEE: file exists and is NOT zero bytes:
+        ls -lh /srv/backups/prod/ | tail -3
+
+ 5. Choose which backup to restore. List what you have, newest first:
+        ls -lt /srv/backups/prod/*.dump | head -20
+    - "pre-<TIMESTAMP>-<TAG>.dump" = taken automatically before that deploy.
+    - For anything older than 14 days, restore from off-box backup:
+        restic snapshots --tag prod-db
+        restic restore <SNAPSHOT_ID> --target /srv/restore
+    PICK THE NEWEST BACKUP FROM BEFORE THE DAMAGE. Note its exact filename.
+
+ 6. Verify the backup file is readable BEFORE trusting it:
+        prod exec -T db pg_restore --list < /srv/backups/prod/CHOSEN.dump | head
+      SEE: a list of database objects. If you see an error instead, that
+      backup is corrupt -- go back to step 5 and pick an older one.
+
+ 7. Restore into a SCRATCH database. NEVER restore over production first.
+        prod exec -T db psql -U "$POSTGRES_USER" -d postgres \
+          -c 'DROP DATABASE IF EXISTS restore_check;'
+        prod exec -T db psql -U "$POSTGRES_USER" -d postgres \
+          -c 'CREATE DATABASE restore_check;'
+        prod exec -T db psql -U "$POSTGRES_USER" -d restore_check \
+          -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+        prod exec -T db pg_restore -U "$POSTGRES_USER" -d restore_check \
+          --no-owner --no-acl < /srv/backups/prod/CHOSEN.dump
+      SEE: it finishes. Some "already exists" warnings are normal. ERRORS
+      mentioning your actual tables are not -- if you see those, stop and
+      get help.
+
+ 8. CHECK the scratch copy has the data you expect. Adjust table names:
+        prod exec -T db psql -U "$POSTGRES_USER" -d restore_check \
+          -c 'select count(*) from users;'
+        prod exec -T db psql -U "$POSTGRES_USER" -d restore_check \
+          -c 'select max(created_at) from users;'
+      SEE: counts in the right ballpark, and a max date just before the
+      damage. If the numbers look wrong, this is the wrong backup. Go to
+      step 5.
+
+ 9. STOP. Last chance. After the next step, the current production database
+    is renamed away. You have the BROKEN dump from step 4, so this is
+    recoverable -- but only because you did step 4.
+
+10. Swap the databases by RENAME (never DROP):
+        prod exec -T db psql -U "$POSTGRES_USER" -d postgres -c \
+          "ALTER DATABASE \"$POSTGRES_DB\" RENAME TO app_broken_$(date +%s);"
+        prod exec -T db psql -U "$POSTGRES_USER" -d postgres -c \
+          "ALTER DATABASE restore_check RENAME TO \"$POSTGRES_DB\";"
+      SEE: two "ALTER DATABASE" confirmations.
+      IF you get "database is being accessed by other users", the app is
+      still connected -- confirm step 2 actually stopped it, then retry.
+
+11. Start the app on the version that MATCHES the restored schema:
+        sudo /usr/local/bin/deploy-prod "$(cat /srv/state/prod/previous_tag)"
+      SEE: "==> deployed ... OK"
+
+12. VERIFY:
+        curl -s https://YOURDOMAIN/api/health
+      SEE: {"ok":true,...}
+    Open the site. Log in. Look at real data with your own eyes.
+
+13. Record it:
+        echo "$(date -u +%FT%TZ)  RESTORED DB from CHOSEN.dump - reason: ..." \
+          | sudo tee -a /srv/state/prod/deploy.log
+
+14. Do NOT delete app_broken_* today. Wait at least a week.
+
+--- PRACTISE THIS ---
+Once a quarter, run steps 5-8 against the DEV stack instead of prod. It takes
+15 minutes, it refreshes dev with realistic data, and it proves the backups
+are actually restorable. A backup you have never restored is a guess.
+```
+
+---
+
+### 8.5 Runbook: Rotate a secret
+
+Use when: a key leaked, someone left, or a scheduled rotation is due.
+
+```
+ 1. Note the time. Write down WHICH secret and WHY.
+
+ 2. Identify every place the secret lives. For this stack:
+      a) /srv/prod/.env                  (on the server)
+      b) /srv/dev/.env                   (on the server, different value)
+      c) GitHub -> Settings -> Secrets and variables -> Actions
+      d) GitHub -> Settings -> Environments -> production / development
+      e) The service that issued it (Sentry, Cloudflare, the SMTP provider...)
+    If a secret is in a 6th place you forgot, rotation will cause an outage.
+    Keep this list in the repo as docs/SECRETS.md -- names only, never values.
+
+ 3. Generate the new value at the ISSUING service first. Most services let
+    the old and new value both work for a while -- USE THAT. Do not revoke
+    the old one yet.
+      For self-generated secrets:  openssl rand -base64 32
+
+ 4. Update GitHub secrets (c and d above) via the web UI.
+
+ 5. Update the server:
+        ssh deploy@YOURSERVER
+        sudo cp /srv/prod/.env /srv/prod/.env.bak-$(date +%s)
+        sudo nano /srv/prod/.env          # change the ONE line
+        sudo chmod 600 /srv/prod/.env
+        sudo chown root:root /srv/prod/.env
+
+ 6. Apply it. Environment changes require RECREATING containers -- a plain
+    `restart` reuses the old environment and will silently do nothing.
+        prod up -d --force-recreate --wait --wait-timeout 120
+
+ 7. VERIFY the new value is actually in use:
+        curl -s https://YOURDOMAIN/api/health
+        prod logs --tail=50 app | grep -i -E 'auth|unauthor|invalid|denied'
+      SEE: no auth errors.
+    Exercise the feature that uses the secret (send a test email, trigger a
+    Sentry event, etc.).
+
+ 8. ONLY NOW revoke the old value at the issuing service.
+
+ 9. Verify once more after revocation -- this is when a missed location
+    breaks. Watch for 10 minutes.
+
+10. Clean up:
+        sudo shred -u /srv/prod/.env.bak-*
+
+--- SPECIAL CASES ---
+
+POSTGRES PASSWORD: changing POSTGRES_PASSWORD in .env does NOT change it in
+an existing database -- that variable only applies at first initialisation.
+You must change it inside Postgres:
+        prod exec -T db psql -U "$POSTGRES_USER" -d postgres -c \
+          "ALTER USER \"$POSTGRES_USER\" WITH PASSWORD 'NEWPASSWORD';"
+Then update .env (both POSTGRES_PASSWORD and DATABASE_URL) and recreate.
+
+SSH DEPLOY KEY: generate a NEW keypair locally, ADD the new public key to
+/home/deploy/.ssh/authorized_keys as a second line (with the same forced-
+command prefix), update the GitHub secret, run a deploy to prove it works,
+and only then delete the old line. Never remove the old key first -- if the
+new one is wrong you have locked out your own deployments.
+
+SECRET COMMITTED TO A PUBLIC REPO: treat it as compromised the instant it
+was pushed, even if you force-push it away. Bots scrape public GitHub within
+seconds. Rotate immediately, in this order: revoke first, then replace.
+```
+
+---
+
+### 8.6 Runbook: Rebuild the whole machine from scratch
+
+Use when: the box is unrecoverable, compromised, or you are migrating.
+
+**This runbook is only survivable if everything it needs is off the box. Verify quarterly that it is.**
+
+```
+ 0. WHAT YOU MUST HAVE OFF-BOX (check this NOW, not during an incident):
+      [ ] The git repo (GitHub) -- contains docker-compose.yml, Caddyfile,
+          Dockerfile, and the deploy scripts
+      [ ] The images (GHCR) -- every tag ever deployed
+      [ ] The off-box database backups (restic repo) + its password
+      [ ] The .env VALUES, in a password manager -- these are the ONLY thing
+          not in git, and losing them means the rebuild stops here
+      [ ] Cloudflare / DNS login
+      [ ] Hetzner login
+    If any box above is unticked, stop and fix it before you need this.
+
+ 1. Note the time. Decide: rebuild in place, or a new server?
+    A NEW SERVER IS ALMOST ALWAYS RIGHT. It lets you keep the old one for
+    forensics and roll DNS back if the rebuild goes wrong.
+
+ 2. Create the server: Hetzner Cloud Console -> Add Server
+      - Debian 12 (or current LTS)
+      - Same or larger size
+      - Add your personal SSH key
+      - Enable backups
+      Note the new IPv4 address. DO NOT change DNS yet.
+
+ 3. Harden the base OS:
+        ssh root@NEW_IP
+        apt update && apt full-upgrade -y
+        apt install -y ca-certificates curl ufw fail2ban restic
+        # SSH: keys only
+        sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' \
+          /etc/ssh/sshd_config
+        sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' \
+          /etc/ssh/sshd_config
+        systemctl restart ssh
+        # unattended security updates
+        apt install -y unattended-upgrades
+        dpkg-reconfigure -f noninteractive unattended-upgrades
+
+ 4. Swap (§6.2):
+        fallocate -l 2G /swapfile && chmod 600 /swapfile
+        mkswap /swapfile && swapon /swapfile
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        printf 'vm.swappiness=10\n' > /etc/sysctl.d/99-swap.conf
+        sysctl --system
+
+ 5. Install Docker from Docker's official repository (NOT Debian's `docker.io`
+    package, which lags badly):
+        curl -fsSL https://get.docker.com | sh
+        docker --version
+
+ 6. Log rotation BEFORE you start any container (§6.3):
+        cat > /etc/docker/daemon.json <<'JSON'
+        {
+          "log-driver": "json-file",
+          "log-opts": {"max-size":"10m","max-file":"3","compress":"true"},
+          "live-restore": true
+        }
+        JSON
+        systemctl restart docker
+
+ 7. Firewall (§5.3):
+        ufw default deny incoming
+        ufw default allow outgoing
+        ufw allow 22/tcp
+        for c in $(curl -fsS https://www.cloudflare.com/ips-v4) \
+                 $(curl -fsS https://www.cloudflare.com/ips-v6); do
+          ufw allow proto tcp from "$c" to any port 80,443
+        done
+        ufw --force enable
+
+ 8. Deploy user:
+        adduser --disabled-password --gecos "" deploy
+        usermod -aG docker deploy
+        mkdir -p /home/deploy/.ssh && chmod 700 /home/deploy/.ssh
+        chown -R deploy:deploy /home/deploy/.ssh
+
+ 9. Lay down the stack from git:
+        mkdir -p /srv && cd /srv
+        git clone https://github.com/OWNER/REPO.git /srv/repo
+        mkdir -p /srv/prod /srv/dev /srv/state/prod /srv/backups/prod
+        cp /srv/repo/deploy/prod/docker-compose.yml /srv/prod/
+        cp -r /srv/repo/deploy/prod/caddy /srv/prod/
+        cp /srv/repo/deploy/scripts/deploy-prod /usr/local/bin/
+        chmod 755 /usr/local/bin/deploy-prod
+        # (repeat for dev)
+
+10. Recreate .env from the password manager:
+        nano /srv/prod/.env
+        chmod 600 /srv/prod/.env && chown root:root /srv/prod/.env
+
+11. Install the CI deploy key with its forced command:
+        nano /home/deploy/.ssh/authorized_keys
+        # one line:
+        # command="/usr/local/bin/deploy-prod",no-agent-forwarding,\
+        # no-port-forwarding,no-pty,no-user-rc,no-X11-forwarding ssh-ed25519 AAAA...
+        chmod 600 /home/deploy/.ssh/authorized_keys
+        chown deploy:deploy /home/deploy/.ssh/authorized_keys
+
+12. Start the DATABASE ONLY, and let it initialise empty:
+        cd /srv/prod
+        docker compose up -d db
+        docker compose ps
+      SEE: db "Up (healthy)". Wait for healthy before continuing.
+
+13. Restore the data:
+        export RESTIC_REPOSITORY=... RESTIC_PASSWORD=...
+        restic snapshots --tag prod-db
+        restic restore latest --target /srv/restore
+        docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+          -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+        docker compose exec -T db pg_restore -U "$POSTGRES_USER" \
+          -d "$POSTGRES_DB" --no-owner --no-acl \
+          < /srv/restore/<PATH>/prod-<STAMP>.dump
+      SEE: completes. Then check row counts as in Runbook 8.4 step 8.
+
+14. Log in to GHCR so the box can pull images:
+        echo "GITHUB_PAT_WITH_read:packages" | \
+          docker login ghcr.io -u YOUR_GH_USERNAME --password-stdin
+
+15. Deploy the last known-good version:
+        /usr/local/bin/deploy-prod sha-XXXXXXX
+      SEE: "==> deployed ... OK"
+
+16. TEST BEFORE SWITCHING DNS. Bypass DNS with a host header override:
+        curl -sk --resolve YOURDOMAIN:443:NEW_IP https://YOURDOMAIN/api/health
+      SEE: {"ok":true,...}
+    NOTE: Caddy cannot obtain a certificate until DNS points here, so this
+    curl uses -k. That is expected at this stage.
+
+17. Switch DNS in Cloudflare: change the A record to NEW_IP. Keep the orange
+    cloud (proxied) on. Lower the TTL to 60s an hour beforehand if you can
+    plan it.
+      SEE within ~2 minutes: https://YOURDOMAIN loads, with a valid
+      certificate (Caddy gets one automatically once DNS resolves).
+
+18. Reinstall the timers:
+        - nightly backup (backup-nightly)
+        - disk check (check-disk)
+        - weekly prune
+        - weekly Cloudflare IP refresh
+      systemctl list-timers   # confirm they are all scheduled
+
+19. Reinstall monitoring: Beszel agent, and repoint the uptime monitor.
+
+20. Update the GitHub `production` environment secret SSH_HOST to NEW_IP,
+    and SSH_KNOWN_HOSTS to:
+        ssh-keyscan -t ed25519 NEW_IP
+
+21. Prove the pipeline works end to end: push a trivial commit to `main` and
+    watch it deploy. DO THIS BEFORE YOU GO TO BED. A rebuilt server whose
+    pipeline is broken is a rebuilt server you cannot fix tomorrow.
+
+22. Keep the OLD server powered off (not deleted) for at least 7 days.
+
+TIME EXPECTED: 60-90 minutes if step 0 was all ticked.
+                Indefinite if it was not.
+```
+
+---
+
+## 9. Mistakes people make
+
+Ordered by how likely each is to actually happen to this project.
+
+### 9.1 Deploying by SSHing in and editing files
+
+**What it looks like:** the site is broken at 11 p.m., you SSH in, `nano docker-compose.yml`, change one line, `docker compose up -d`. It works. You go to bed.
+
+**Why it destroys you:** the server and the repository now disagree, and nothing records it. The next deploy from GitHub Actions overwrites the file and the bug comes back — but now it comes back *later*, detached from the change that caused it, and you have lost the fix. Multiply by a few months and the server is a unique artifact nobody can reproduce, which means Runbook 8.6 does not work and the box becomes unrebuildable.
+
+**The fix:** the server is a *rendering* of the repo, never a source. Concretely:
+- All of `/srv/prod` except `.env` is copied from git by the deploy script.
+- Add a drift check to the nightly job — if the on-disk compose file differs from the repo's, alert in the morning:
+  ```bash
+  diff -q /srv/prod/docker-compose.yml /srv/repo/deploy/prod/docker-compose.yml \
+    || curl -fsS -d "prod compose file has drifted from git" "$NTFY_URL"
+  ```
+- If you *must* change something live, you have not finished until it is committed. Set a phone alarm for the morning.
+
+### 9.2 No health checks, so a broken container serves errors happily
+
+**What it looks like:** `docker compose ps` shows "Up 4 hours". The site returns 500 on every request. Docker is perfectly content, because the process is running.
+
+**Why it destroys you:** every automated safety net downstream depends on health. Without a healthcheck: `--wait` returns immediately, so a broken deploy reports success; auto-rollback never triggers; `depends_on: service_healthy` is meaningless; Caddy has no way to know the upstream is bad.
+
+**The fix:** §3.2. And specifically — **the health check must touch the database.** A check that only proves the HTTP server is listening will pass during the exact incident you built it for.
+
+### 9.3 `latest` image tags, making rollback impossible
+
+**What it looks like:** `image: ghcr.io/owner/app:latest`, and deploy is `docker compose pull && up -d`.
+
+**Why it destroys you:** you cannot say what is running, and you cannot go back. "Roll back" becomes "rebuild from an older commit and hope the result is byte-identical", which it will not be — base images move, transitive dependencies resolve differently, `npm ci` is only as reproducible as the registry. **`latest` converts a 30-second rollback into a 10-minute rebuild with an uncertain outcome, performed while the site is down.**
+
+It also makes `pull_policy` semantics subtle: Compose documents that with `missing`, "`latest` tag always pulled" — so caching behaves differently for that one magic tag, in ways that surprise people.
+
+**The fix:** immutable tags only, `sha-<shortsha>`, plus `previous_tag` on disk. A branch tag (`:main`) as a *convenience pointer* is fine; never deploy from it.
+
+### 9.4 Migrations that are not reversible
+
+**What it looks like:** a migration that renames a column, or drops one, or backfills with a lossy transform. It succeeds. The new code has a bug. You roll back the image and the old code crashes on a column that no longer exists — **and now you cannot go forward or back.**
+
+**Why it destroys you:** this is the worst incident on this page, because it removes your escape route at the exact moment you need it, and the only remaining option is a restore, which loses every write since the backup.
+
+**The fix:** §4.2 expand/contract, enforced as a review rule, plus the automatic pre-migration dump so the bad case is at least bounded. **The mental model to hold: your schema must always be compatible with the previous release, because the previous release is your parachute.**
+
+### 9.5 Docker logs filling the disk
+
+**What it looks like:** everything is fine for four months. Then the site goes down and it is not the app — Postgres cannot write, `df` says 100%, and `/var/lib/docker/containers/<id>/<id>-json.log` is 34 GB because a container has been logging a stack trace ten times a second since a deploy three weeks ago.
+
+**Why it destroys you:** the default really is unlimited (`max-size` default `-1`). And a full disk is uniquely nasty: it breaks the database, breaks Docker, breaks your monitoring, and makes recovery itself awkward.
+
+**The fix:** §6.3 — daemon-level limits, *plus* recreating existing containers so they pick them up, *plus* disk alerting at 80/90%. All three; the daemon config alone silently does nothing for containers that already exist.
+
+### 9.6 No resource limits
+
+**What it looks like:** a memory leak in the app, or a pgvector index build in dev, drives the host out of memory. The kernel OOM killer chooses the largest process — production Postgres — and kills it mid-transaction. `docker compose ps` shows `Exited (137)`.
+
+**Why it destroys you:** the victim is chosen by a kernel heuristic that knows nothing about what matters to you, and it systematically picks the database, because the database is legitimately the biggest.
+
+**The fix:** §6.1 — a `mem_limit` on **every** container so no single one can exhaust the host, `memswap_limit` equal to `mem_limit` on Postgres so it never swaps, and limits that deliberately sum to *less* than physical RAM.
+
+### 9.7 Secrets in the compose file
+
+**What it looks like:** `POSTGRES_PASSWORD: hunter2` written straight into `docker-compose.yml`, which is committed to a **public** repository.
+
+**Why it destroys you:** bots scan public GitHub continuously and find committed credentials within seconds of the push. Git history is permanent — force-pushing the commit away does not un-leak it. And with the database published on port 5432 (§1.5f), that leak is directly exploitable from the internet.
+
+**The fix:**
+- Compose file references variables (`${POSTGRES_PASSWORD}`), never values.
+- Values live in `/srv/prod/.env`, `chmod 600`, `root:root`, in `.gitignore`.
+- Commit `.env.example` with **key names only** so the shape is documented.
+- Build-time secrets go through BuildKit `--mount=type=secret`, never `ARG` — build args are visible in `docker history`.
+- Enable GitHub secret scanning and push protection on the repo (free for public repos).
+- Note that `NEXT_PUBLIC_*` variables are inlined into the client bundle at build time — Next.js says so explicitly (<https://nextjs.org/docs/app/guides/self-hosting>). **Anything with `NEXT_PUBLIC_` in its name is public. Never put a key there, even briefly.**
+
+### 9.8 A "temporary" manual change nobody records
+
+**What it looks like:** you `docker exec` into the container and tweak a setting. Or `apt install` a package the app needs. Or add a firewall rule by hand. It fixes the problem. Nobody writes it down.
+
+**Why it destroys you:** the change vanishes at the next deploy (containers are recreated from the image) or at the next rebuild (fresh box). The bug returns weeks later with no apparent cause, and the person debugging it — possibly future you — has no way to know a fix ever existed. This is the same disease as 9.1 but harder to detect, because there is no file to diff.
+
+**The fix:**
+- **A `docker exec` that changes anything is an incident, and it gets logged.** Append a line to `/srv/state/prod/deploy.log` describing what you did and why, before you do anything else.
+- Anything that must survive a container recreate belongs in the image or the compose file. If you had to install a package inside a running container, that package belongs in the Dockerfile — open an issue immediately.
+- Anything that must survive a host rebuild belongs in the provisioning steps of Runbook 8.6.
+- Run Runbook 8.6 on a throwaway server once a year. Every manual change you forgot will announce itself.
+
+### 9.9 A few more worth naming
+
+- **Never testing the backup.** The most common backup failure is not "the backup was missing" but "the backup was unrestorable and nobody checked". Add `pg_restore --list` verification (§4.3) and a quarterly drill.
+- **The backup on the same disk as the database.** Convenient for a fumbled migration, useless for the failure modes that actually end companies. Off-box or it does not count.
+- **No `--wait` on deploy.** The CLI returns success while the container crash-loops. Your pipeline goes green over a dead site.
+- **Publishing the database port to the host.** `5432:5432` on a public IP attracts automated password-guessing within hours.
+- **Alerting on everything.** Twenty alerts a day means zero alerts read. Five night-time conditions, each with a runbook (§7.5).
+- **`docker system prune -a --volumes`.** The `--volumes` flag deletes volumes not currently attached to a *running* container — including your database volume while the stack is stopped for maintenance. Never type this command; put it in the destructive-verb blocklist of the `prod` wrapper.
+- **Letting `dev` be publicly reachable and indexable.** Dev often holds a copy of production data with weaker auth. Basic auth plus `X-Robots-Tag` (§5.2).
+- **Shell-form `CMD`.** Node never receives SIGTERM, so every deploy kills in-flight requests, silently (§3.1).
+- **Not persisting Caddy's `/data`.** Certificates are re-issued on every deploy and you hit Let's Encrypt rate limits — then the site is HTTPS-broken for a week.
+- **Rebooting after a kernel update without checking that the stack comes back.** Verify `restart: unless-stopped` actually works by rebooting deliberately, once, at a time you choose — not by discovering it during an unplanned reboot.
+
+---
+
+## 10. What I could not confirm
+
+Everything below is either unverifiable from primary sources at the time of writing, or is a judgement call rather than a documented fact. Treat these as items to check before acting, not as findings.
+
+**Pricing and plan limits (all volatile — check before relying on them):**
+
+1. **Hetzner Cloud prices and specs.** <https://www.hetzner.com/cloud/> renders its pricing table client-side; the fetched page contained only "starting from" placeholders with no vCPU/RAM/price values. The €4–20/month range quoted in §1.2 is from general knowledge, not from the fetched page. **Verify current CX/CPX/CAX specs and prices in the Hetzner Cloud console before sizing.** The *argument* in §1.2 — that the second box is cheap enough that cost should not decide — holds across any plausible price.
+2. **Hetzner backup and snapshot pricing.** The ~20%-of-server-cost figure for automated backups is not confirmed from the fetched page.
+3. **Sentry's free Developer plan quotas.** <https://docs.sentry.io/pricing/> lists the base quota included with **paid** plans (50k errors, 5M spans, 50 replays, 1 GB attachments, 1 uptime monitor, 1 cron monitor) and states there is "one free Developer plan", but does **not** state the Developer plan's own quotas, seat count, or retention. Searches did not resolve it. **Check <https://sentry.io/pricing/> directly.** The §7.2 advice to sample traces aggressively and enable Spike Protection is correct regardless of the exact number.
+4. **UptimeRobot / Better Stack free-tier limits** (check count, interval, notification channels) were not fetched. Requirements are stated as criteria in §7.3 rather than as a specific vendor recommendation, deliberately.
+5. **healthchecks.io free-tier limits** were not fetched.
+
+**Tooling details:**
+
+6. **Beszel's resource footprint.** <https://beszel.dev/guide/getting-started> confirms what it monitors (CPU, memory, disk, containers, S.M.A.R.T., GPU, systemd services) and that it notifies via 20+ services, but "the documentation doesn't explicitly state resource requirements". The "very small" characterisation in §7.4 is inference from its architecture, not a documented figure. **Measure it after installing.**
+7. **Netdata's Docker install page** returned 404 at both <https://docs.netdata.cloud/docs/installing/docker> and the URL it redirects to. The §7.4 comparison of Netdata's weight is from general knowledge, not primary sources.
+8. **Watchtower's maintenance status.** <https://containrrr.dev/watchtower/> states no maintenance status. The critique in §2.6 is architectural (no migrations, no rollback, no health gate, asynchronous deploys) and stands independently, but **check whether the project is actively maintained before considering it for anything.**
+9. **Dokploy / Coolify / CapRover** were not fetched from primary sources. The comparison in §2.6 is a reasoned position on self-hosted PaaS layers generally, not a feature-by-feature evaluation. If the owner leans toward a UI, evaluate the current version of one directly.
+10. **Kamal** was not fetched. Mentioned only as an option to revisit.
+
+**Technical points that need verification in your environment:**
+
+11. **`deploy.resources.limits` on plain Compose.** The spec (<https://docs.docker.com/reference/compose-file/deploy/>) defines the fields but does not state which are honoured outside Swarm; the fetched page says "practical Compose support varies by platform implementation". Compose v2 does apply memory/CPU limits on a plain engine in practice. **Verify with `docker inspect <container> --format '{{.HostConfig.Memory}}'` after deploying** — this is a two-second check and worth doing once.
+12. **`update_config` / `rollback_config`** are Swarm constructs. §3.3 states plain `docker compose up` does not perform rolling updates with them; this is well established but the fetched deploy-spec page did not state it explicitly.
+13. **Docker's HEALTHCHECK Dockerfile defaults.** <https://docs.docker.com/reference/dockerfile/> was fetched but the HEALTHCHECK section was truncated. The Compose-level healthcheck fields *are* confirmed from <https://docs.docker.com/reference/compose-file/services/>, and this report configures health at the Compose level throughout, so nothing here depends on the Dockerfile defaults.
+14. **Caddy's `trusted_proxies` with a Cloudflare module.** <https://caddyserver.com/docs/caddyfile/options> documents only `trusted_proxies static [private_ranges] <ranges...>`. A community module (`caddy-cloudflare-ip`) auto-refreshes Cloudflare's ranges but **requires a custom Caddy build** and is not in the official docs. The Caddyfile in §5.2 uses the documented `static` form with an explicit list — verify the ranges against <https://www.cloudflare.com/ips-v4> and <https://www.cloudflare.com/ips-v6> when you deploy, since the published list on cloudflare.com/ips was last dated 2023-09-28 and the canonical machine-readable endpoints are the ones to automate against.
+15. **Caddy brotli.** <https://caddyserver.com/docs/caddyfile/directives/encode> lists only `gzip` and `zstd`. Brotli at the origin needs a plugin and a custom build. Cloudflare handles brotli at the edge, so §5.2 does not attempt it.
+16. **Next.js 16 specifics.** The self-hosting docs fetched report `version: 16.3.4`, so the guidance is current for Next.js 16. However, **`output: 'standalone'` behaviour with Next.js 16's caching model was not separately verified**, and the `cacheHandler` / `'use cache: remote'` material applies to multi-instance setups which this one is not. Single-instance ISR on local disk is explicitly supported: "This works automatically for a single self-hosted `next start` instance with persistent local disk."
+17. **The Prisma command in the `migrate` service** (`npx prisma migrate deploy`) is a placeholder — substitute your actual migration tool. The *shape* (one-shot container, new image, before the app, gated on DB health) is what matters.
+18. **pgvector image tag.** `pgvector/pgvector:pg17` is the conventional tag but was not verified against the registry. Confirm the tag exists and pin a digest for production.
+19. **The `deploy-prod` script has not been executed.** It is written to be correct — `set -Eeuo pipefail`, an `ERR` trap, tag validation, an idempotency early-exit — but **test it end to end on a throwaway server before it is the thing standing between you and a midnight outage.** In particular verify: (a) a deliberately failing migration triggers rollback, (b) a deliberately unhealthy app triggers rollback via `--wait` timing out, (c) re-running the same tag exits 0 without side effects.
+20. **`.env` loading in the deploy script.** The script sources `${STACK_DIR}/.env` with `set -a` so `$POSTGRES_USER` / `$POSTGRES_DB` are available to the `pg_dump` step. This means the script must run as a user that can read a `0600 root:root` file — hence `sudo` in the runbooks, and hence the forced-command entry should invoke it via a small sudo-wrapper if the `deploy` user is not root. **Verify the permission chain works before relying on it**; a `pg_dump` that fails on an unset variable would abort the deploy, which is the safe direction but is still a broken pipeline.
+21. **Whether the owner should have SSH access at all** is a genuine open question. Every runbook here assumes he does. An alternative worth considering: give him only `workflow_dispatch` buttons in GitHub Actions (Deploy, Roll back, Restart, Backup now) and keep SSH for emergencies. That removes the entire class of mistakes in §9.1 and §9.8 at the cost of flexibility during a real incident. **This is a decision, not a fact, and it deserves an explicit one.**
