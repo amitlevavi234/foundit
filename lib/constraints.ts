@@ -75,10 +75,59 @@ const CLOSE = String.raw`(?![\p{L}\p{N}])`;
  * bare nouns do not: "arrange windows", "a PC game launcher", "mac and cheese"
  * are ordinary English, and reading a platform out of them removes every tool
  * that does not run on that platform — which for "a PC game launcher" is the
- * answer. `phone` has asked for this shape since the rule was written; the rest
- * of the desktop platforms had not, and that is defect 1.
+ * answer.
+ *
+ * The earlier version of this file asked for that shape from `windows`, `mac`
+ * and `phone` only, and let `iphone`, `ipad`, `ios`, `android`, `linux`,
+ * `ubuntu`, `macos` and a bare `mobile` through on the argument that no English
+ * noun collides with them. That is true of the word and false of the role. Each
+ * of these was read as a hard filter and had its subject cut out of the text
+ * search:
+ *
+ *   an app to sell my old iphone            -> ios,     "an app to sell my old"
+ *   learn linux commands from the terminal  -> linux,   "learn commands from…"
+ *   a tool for android developers …         -> android, "a tool developers …"
+ *   generate ios app icons in every size    -> ios,     "generate app icons …"
+ *   ubuntu installation guide               -> linux,   "installation guide"
+ *   a mobile-first website builder          -> ios+android, "a -first website…"
+ *   compare macos and windows file managers -> macos,   "compare and windows…"
+ *
+ * The last is the worst of them: a sentence comparing two platforms was
+ * filtered to one, because `windows` had been gated and `macos` had not. So
+ * every platform word now asks for the same shape, and the table below is one
+ * table rather than two.
+ *
+ * The prepositions and determiners are not only English ones. A Spanish or
+ * French sentence states the requirement in exactly the same shape — "para el
+ * móvil", "pour linux" — and gating on English alone would have made the rule
+ * unreachable in every language but one, which is the mistake `OPEN` above
+ * exists to remember.
  */
-const ON = String.raw`(?:on|for|in|to|under|running)\s+(?:my\s+|our\s+|your\s+|a\s+|an\s+|the\s+)?`;
+const ON = String.raw`(?:on|for|in|to|from|under|running|para|en|pour|sur|auf|f[uü]r)\s+(?:(?:my|our|your|a|an|the|el|la|mi|un|una)\s+)?`;
+
+/**
+ * A possessive with no preposition in front of it: "my mac", "our pc".
+ *
+ * Only the two desktop rules use it, and only because they already did. It is
+ * deliberately *not* extended to the rest of the table: `ON` already covers "on
+ * my phone" and "for my ipad", and a bare possessive with nothing in front of
+ * it is as often a device in a list as a requirement. eval/golden.jsonl q038 —
+ * "password manager that is free and syncs between my laptop and my phone" — is
+ * that sentence, and the judgement on it keeps KeePassXC, which is desktop
+ * only. Reading a phone out of it deletes the answer somebody judged correct.
+ */
+const MINE = String.raw`(?:my|our|your)\s+`;
+
+/**
+ * The platform word names an audience rather than a machine.
+ *
+ * "a tool for android developers to test layouts" has the requirement shape and
+ * still states nothing about where the tool runs — the layouts are Android's,
+ * the tool is a desktop one, and `platforms = {android}` removes every answer.
+ * Same for "for windows users", "for mac designers". The subject after the word
+ * is what tells them apart, so it is the one thing this guard looks at.
+ */
+const NOT_AN_AUDIENCE = String.raw`(?!\s+(?:developers?|devs?|engineers?|programmers?|coders?|designers?|users?|owners?|fans?|enthusiasts?|beginners?|students?|admins?|teams?|market|ecosystem)${CLOSE})`;
 
 /**
  * "Free" means a person can use it without paying, which includes a tool whose
@@ -172,10 +221,31 @@ const RULES: Rule[] = [
           // nothing at all. Not English "gratuitous".
           'gratuit(?!ous)\\p{L}*',
           'kostenlos\\p{L}*',
+          // Turkish builds on the stem: "ücretsiz", "ücretsizdir", "ücretsiz
+          // bir uygulama". Same treatment as the two above.
+          '[uü]cretsiz\\p{L}*',
           // Cyrillic and Hebrew need `OPEN`/`CLOSE` rather than `\b` to match
           // at all; the stem plus any ending is how both languages inflect it.
           'бесплатн\\p{L}*',
-          'חינ[מם]\\p{L}*',
+          // Hebrew attaches its prepositions, its article and its conjunction
+          // to the front of the word rather than writing them separately, and
+          // `OPEN` — which asks for a non-letter before the match — refused
+          // every one of them. "בחינם" is not an inflection of "חינם", it is
+          // *the* ordinary way to say "for free", and the reader was blind to
+          // it: "לחפש אפליקציה בחינם לעריכת וידאו" stated a price and read as
+          // stating nothing.
+          //
+          // ב ל ש ה ו מ כ are the attaching letters. ל is the one with a
+          // second sense — "לחינם" can mean "in vain" — which is a subject
+          // rather than a price; it is accepted anyway because the phrase is
+          // vanishingly rare in a sentence describing a tool, and a missed
+          // constraint is the recoverable direction while a wrong one is not.
+          '[בלשהומכ]?חינ[מם]\\p{L}*',
+          // Arabic, spelled out rather than stemmed: "مجان" is also the first
+          // four letters of "مجانين" (mad people), so the endings are listed,
+          // longest first, and the article and preposition are allowed in
+          // front the way Hebrew's are.
+          '(?:بال|ال|ب|و)?(?:مجانية|مجانيًا|مجانيا|مجاني|مجانًا|مجاناً|مجانا)',
         ].join('|') +
         `)${CLOSE}`,
       'u',
@@ -258,15 +328,23 @@ const RULES: Rule[] = [
     },
   },
   {
-    // "on my phone", "for a phone", "en el móvil". Not "phone calls", which is
-    // a subject rather than a requirement — a wrong constraint filters good
+    // "on my phone", "for a phone", "para el móvil". Not "phone calls", which
+    // is a subject rather than a requirement — a wrong constraint filters good
     // answers out, so this rule asks for the preposition.
     //
     // "mobile" carries the same distinction one word further on: "on mobile" is
     // the platform, "no mobile data" is the network, and "maps I can use when I
     // have no mobile data" is a sentence about being offline that was being
-    // read as a phone and having the word "mobile" cut out of it.
-    test: /\b(on|for|from|to)\s+(my\s+|a\s+|the\s+)?phone\b|\b(mobile(?!\s+(data|network|signal|internet|coverage|number|plan))|smartphone|m[oó]vil)\b/,
+    // read as a phone and having the word "mobile" cut out of it. A bare
+    // "mobile" was still getting through that lookahead in the commonest
+    // adjective there is — "a mobile-first website builder" — so it now asks
+    // for the preposition like everything else here.
+    test: new RegExp(
+      `${OPEN}${ON}(?:phone|smartphone|m[oó]vil|` +
+        `mobile(?!\\s+(?:data|network|signal|internet|coverage|number|plan)))` +
+        `${NOT_AN_AUDIENCE}${CLOSE}`,
+      'u',
+    ),
     constraint: {
       key: 'mobile',
       label: 'On a phone',
@@ -275,15 +353,29 @@ const RULES: Rule[] = [
     },
   },
   {
-    // These three are only ever the platform — no English noun collides with
-    // them, which is the whole difference between them and "windows" or "mac".
-    // The preposition is optional and only there to be *consumed*: "for iphone"
-    // leaves "for" hanging in the text the ranker sees.
-    test: new RegExp(`\\b(${ON})?(iphone|ipad|ios)\\b`),
+    // No English noun collides with these, and it never mattered: "an app to
+    // sell my old iphone" and "generate ios app icons in every size" are a
+    // subject and a job, not a machine somebody has. So the preposition or the
+    // possessive is required, and consumed with the word — "for iphone" must
+    // not leave "for" hanging in the text the ranker sees.
+    //
+    // "<platform> app" is deliberately absent from all four desktop and mobile
+    // rules. An iOS app, a Mac app and a Windows app are as often the thing
+    // being built as the thing being asked for, and "generate ios app icons"
+    // is the sentence that proves it. "<platform> version" stays: nobody asks
+    // for the Mac version of something they are not going to run on a Mac.
+    test: new RegExp(
+      `${OPEN}(?:${ON}(?:iphone|ipad|ios)|(?:iphone|ipad|ios)\\s+version)` +
+        `${NOT_AN_AUDIENCE}${CLOSE}`,
+      'u',
+    ),
     constraint: { key: 'ios', label: 'iPhone or iPad', kind: 'platform', platforms: ['ios'] },
   },
   {
-    test: new RegExp(`\\b(${ON})?(android)\\b`),
+    test: new RegExp(
+      `${OPEN}(?:${ON}android|android\\s+version)${NOT_AN_AUDIENCE}${CLOSE}`,
+      'u',
+    ),
     constraint: { key: 'android', label: 'Android', kind: 'platform', platforms: ['android'] },
   },
   {
@@ -300,9 +392,18 @@ const RULES: Rule[] = [
   },
   {
     // Bare "mac" is a name and half of a sandwich. The preposition, the
-    // possessive, or one of the spellings that is only ever the computer.
+    // possessive, or one of the spellings that names a particular machine
+    // rather than an ecosystem.
+    //
+    // Bare "macos" is gone. It is unambiguously the operating system and that
+    // was never the question: "compare macos and windows file managers" names
+    // two platforms and asks for neither, and reading one of them filtered the
+    // comparison down to half of itself. "macbook" and "mac os x" stay bare
+    // because both name a machine or a release, the way "windows 11" does.
     test: new RegExp(
-      `\\b(${ON}(mac|macos|macbook)|macos|mac ?os ?x?|macbook|(my|our) (mac|macbook)|mac (version|app))\\b`,
+      `${OPEN}(?:(?:${ON}|${MINE})(?:mac|macos|macbook)|mac ?os ?x|macbook|mac\\s+version)` +
+        `${NOT_AN_AUDIENCE}${CLOSE}`,
+      'u',
     ),
     constraint: { key: 'macos', label: 'macOS', kind: 'platform', platforms: ['macos'] },
   },
@@ -312,14 +413,22 @@ const RULES: Rule[] = [
     // and Linux ones that were the answer. Bare "pc" is an adjective at least
     // as often as it is a machine: "a PC game launcher".
     test: new RegExp(
-      `\\b(${ON}(windows|pc)( (pc|laptop|desktop|machine|computer))?|windows ?(10|11)|windows (pc|laptop|desktop|machine|computer|version|app)|(my|our) (windows )?pc)\\b`,
+      `${OPEN}(?:(?:${ON}|${MINE})(?:windows|pc)(?:\\s+(?:pc|laptop|desktop|machine|computer))?` +
+        `|windows ?(?:10|11)|windows\\s+(?:pc|laptop|desktop|machine|computer|version))` +
+        `${NOT_AN_AUDIENCE}${CLOSE}`,
+      'u',
     ),
     constraint: { key: 'windows', label: 'Windows', kind: 'platform', platforms: ['windows'] },
   },
   {
-    // Same: an operating system and a distribution of it, and nothing else in
-    // the language. The preposition is optional and consumed with them.
-    test: new RegExp(`\\b(${ON})?(linux|ubuntu)\\b`),
+    // An operating system and a distribution of it — and, bare, the subject of
+    // "learn linux commands from the terminal" and "ubuntu installation guide",
+    // neither of which says a word about what the answer has to run on. Same
+    // shape as the rest.
+    test: new RegExp(
+      `${OPEN}${ON}(?:linux|ubuntu)${NOT_AN_AUDIENCE}${CLOSE}`,
+      'u',
+    ),
     constraint: { key: 'linux', label: 'Linux', kind: 'platform', platforms: ['linux'] },
   },
 ];

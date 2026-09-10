@@ -15,6 +15,15 @@
 # Nothing here is allowed to fail quietly. No step is marked to keep going
 # after an error, and no command has its exit code swallowed. A step that
 # cannot fail the build is not a check, it is a comment.
+#
+# There is exactly one step that is a comment, and it says so in its own name:
+# "Print how the sentence reader's own parse differs from the golden set".
+# It measures lib/constraints.ts against constraints a person wrote by hand, and
+# the two are *supposed* to differ — the golden set is the judgement, the reader
+# is the guess, and the gap between them is the thing worth reading on every
+# commit. Turning that gap into a pass/fail would either freeze the golden set
+# or force the reader to agree with it, and both defeat the measurement. So it
+# is marked `continue-on-error` and its result changes nothing.
 name: Tests
 
 on:
@@ -201,6 +210,21 @@ jobs:
         # ever will. Exit code 4 means nDCG@10 fell below the recorded
         # baseline in eval/baselines.md by more than the tolerance.
         run: node eval/run.mjs --baseline
+
+      - name: Print how the sentence reader's own parse differs from the golden set
+        # Informational. This is the one step in the workflow that cannot fail
+        # the build, for the reason set out at the top of this file: it prints a
+        # comparison rather than asserting one.
+        #
+        # `--read-query` runs every golden query twice — once with the
+        # constraints and search text a person wrote into eval/golden.jsonl, and
+        # once with whatever lib/constraints.ts reads out of the same sentence —
+        # and prints both slices side by side, with the queries where the two
+        # readings disagree. That table is how a rule that quietly started
+        # over-reading gets noticed by somebody who was not looking for it,
+        # which is how every defect in that file has been found so far.
+        continue-on-error: true
+        run: node eval/run.mjs --read-query
 
       - name: Run the application's unit tests
         # Whatever package.json's "test:unit" script points at, as soon as

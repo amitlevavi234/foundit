@@ -380,26 +380,41 @@ export default function ComponentSheet() {
           </div>
         </Row>
 
-        <Row title="Empty state" note="An empty result is not a shrug. It says what could not be met and offers to loosen one thing at a time.">
+        {/* Same rule as the fit meter above, and it was broken here in three
+            places at once. This specimen printed "14 tools solve the problem
+            itself" and three counts behind the loosen chips — none of which
+            anything has ever counted: app/results/page.tsx leaves the count out
+            of every chip on purpose, because counting would mean one more
+            search per constraint. And it drew the artboard's email capture
+            ("Email me if this changes", docs/product-spec.md §"No results"),
+            which is not built and goes nowhere; a component sheet is a live
+            route, so a field shaped like an input is an invitation to type into
+            one. The counts stay, captioned as specimen widths the way the fit
+            meter's numerals are; the email capture is gone, because a disabled
+            field would still be advertising a feature that does not exist. */}
+        <Row
+          title="Empty state"
+          note="An empty result is not a shrug. It says what could not be met and offers to loosen one thing at a time. Every numeral below is a specimen: nothing counted them, and the shipped screen (app/results/page.tsx) draws these chips with no count at all. The artboard's “Email me if this changes” field is not drawn, because nothing collects an address."
+        >
           <EmptyState
             loosen={[
               { label: 'Drop Icelandic', count: '3 tools' },
               { label: 'Drop offline', count: '2 tools' },
               { label: 'Drop no account', count: '5 tools' },
             ]}
-            actions={
-              <>
-                <Button variant="coral">Know a tool that fits? Add it</Button>
-                <span className="field" style={{ height: 48, width: 260 }}>
-                  <span className="ph">you@example.com</span>
-                </span>
-                <Button size="sm">Email me if this changes</Button>
-              </>
-            }
+            actions={<Button variant="coral">Know a tool that fits? Add it</Button>}
           >
             Foundit only recommends tools people can stand behind, and nothing in our database fits
             all four: <strong>free, Icelandic, offline, no account</strong>. 14 tools solve the
             problem itself; each misses at least one.
+            <div
+              className="muted"
+              style={{ fontSize: 'var(--t-meta-sm)', marginTop: 10, fontStyle: 'italic' }}
+            >
+              Specimen. The four constraints, the 14, and the three counts on the chips below are
+              drawn to show the shape of this state. No search produced them and no screen renders
+              them.
+            </div>
           </EmptyState>
         </Row>
       </main>

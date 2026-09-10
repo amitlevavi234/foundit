@@ -174,12 +174,12 @@
  * then snapping in — strictly worse than the animation they switched off, and
  * inflicted on exactly the person least able to absorb it.
  *
- * The same omission is still in `RM` in design/canvas/build.mjs, and therefore
- * in every generated design/canvas/*.dc.html. It never showed there because an
+ * The same omission was in `RM` in design/canvas/build.mjs, and therefore in
+ * every generated design/canvas/*.dc.html. It never showed there because an
  * artboard is a 900px still: nothing on it is mid-delay when it is screenshot.
- * The canvas needs these two lines added to `RM` and the artboards rebuilt;
- * that is a canvas change, not an app one, so it is recorded here rather than
- * made here.
+ * It has now been added there too and all 37 artboards regenerated, so the
+ * block below and the one the design canvas ships are the same five lines
+ * again — which is the only thing that makes "verbatim", above, true.
  */
 @media (prefers-reduced-motion: reduce) {
   *,

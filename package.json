@@ -11,7 +11,7 @@
     "dev": "next dev",
     "build": "next build",
     "postbuild": "node scripts/postbuild-standalone.mjs",
-    "start": "node .next/standalone/server.js",
+    "start": "node scripts/start.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "eval": "node eval/run.mjs",

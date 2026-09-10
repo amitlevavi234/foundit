@@ -1,9 +1,31 @@
 // Foundit — Toybox direction, every screen (desktop 1440). Static mockups with CSS motion.
 import { writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Written beside this file, not into whatever directory it was run from.
+// README.md and docs/product-decisions.md §9 both say `node
+// design/canvas/build.mjs`, which from the repository root used to scatter 36
+// artboards across the root and leave design/canvas/ untouched — the command
+// as documented regenerated nothing.
+const OUT = path.dirname(fileURLToPath(import.meta.url));
 
 const files = {};
 const A = { bg: '#FFFCF5', surface: '#FFFFFF', tint: '#F1ECFF', sunk: '#F6F2EA', ink: '#1C1A24', muted: '#6B6780', faint: '#9A96AD', coral: '#FF5A3C', violet: '#6E4BF6', lime: '#B8F04A', amber: '#F2B84B', amberInk: '#7A5216', rule: '#E8E3D8', red: '#D93B2B' };
-const RM = `@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }`;
+// Reduced motion. It reduces rather than removes: every animation still runs,
+// for 0.01ms, with `both` fill, so anything whose final state is set by its
+// keyframes lands on that final state instead of being stuck at zero.
+//
+// The two delay lines matter as much as the two duration lines. `.rise` is
+// `both`-filled and nearly every caller staggers it with an inline
+// `animation-delay`; `both` fill means the element holds the keyframe's *from*
+// state — `opacity: 0` — for the whole delay. Zero the duration but not the
+// delay and a reader who asked for less motion gets a blank card that snaps in
+// a second later, which is worse than the animation they switched off. It never
+// showed on an artboard because an artboard is a 900px still, but these files
+// are the specification the app is built from, and styles/motion.css had to
+// carry the fix alone until now.
+const RM = `@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; animation-delay: 0s !important; transition-duration: .01ms !important; transition-delay: 0s !important; } }`;
 const svg = (paths, s = 18, c = 'currentColor', sw = 1.75, extra = '') =>
   `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" style="flex:none;${extra}">${paths}</svg>`;
 const P = {
@@ -1145,5 +1167,5 @@ ${header()}
 </main>
 </div>`);
 
-for (const [name, html] of Object.entries(files)) writeFileSync(name, html);
+for (const [name, html] of Object.entries(files)) writeFileSync(path.join(OUT, name), html);
 console.log('wrote', Object.keys(files).length, 'artboards');

@@ -341,6 +341,65 @@ test('a Turkish capital İ comes back as itself, not as a decomposed lookalike',
   assert.deepEqual(keys('notes for İstanbul in Spanish'), ['lang-es']);
 });
 
+// ---------------------------------------------------------------------------
+// The platform table, which used to be two tables.
+//
+// `windows`, `mac` and `phone` asked for a requirement shape — a preposition or
+// a possessive — and `iphone`, `ipad`, `ios`, `android`, `linux`, `ubuntu`,
+// `macos` and a bare `mobile` did not, on the argument that no English noun
+// collides with them. That is true of the word and false of the role: naming a
+// platform is not requiring one, and each sentence below was turned into a hard
+// WHERE clause with its own subject cut out of the text search.
+// ---------------------------------------------------------------------------
+
+test('naming a platform is not requiring one', () => {
+  const cases = [
+    // sentence                                        constraints  what search ranks on
+    ['an app to sell my old iphone',                   [], 'an app to sell my old iphone'],
+    ['learn linux commands from the terminal',         [], 'learn linux commands from the terminal'],
+    ['a tool for android developers to test layouts',  [], 'a tool for android developers to test layouts'],
+    ['generate ios app icons in every size',           [], 'generate ios app icons in every size'],
+    ['ubuntu installation guide',                      [], 'ubuntu installation guide'],
+    ['a mobile-first website builder',                 [], 'a mobile-first website builder'],
+    ['compare macos and windows file managers',        [], 'compare macos and windows file managers'],
+  ];
+
+  for (const [query, expected, text] of cases) {
+    assert.deepEqual(keys(query), expected, `constraints of: ${query}`);
+    assert.equal(residual(query), text, `ranked on, for: ${query}`);
+  }
+});
+
+test('every platform word still reads when the sentence actually states it', () => {
+  assert.deepEqual(keys('a note taking app on my phone'), ['mobile']);
+  assert.deepEqual(keys('a habit tracker on mobile'), ['mobile']);
+  assert.deepEqual(keys('a screen reader for windows'), ['windows']);
+  assert.deepEqual(keys('a note taking app that runs on linux'), ['linux']);
+  assert.deepEqual(keys('a drawing app for my ipad'), ['ios']);
+  assert.deepEqual(keys('an offline map for android'), ['android', 'offline']);
+  assert.deepEqual(keys('a password manager on my iphone'), ['ios']);
+  assert.deepEqual(keys('a screen recorder for ubuntu'), ['linux']);
+  assert.deepEqual(keys('is there a mac version of it'), ['macos']);
+
+  // The preposition it consumed leaves with it rather than hanging in the text.
+  assert.equal(residual('a drawing app for my ipad'), 'a drawing app');
+  assert.equal(residual('an offline map for android'), 'an map');
+  assert.equal(residual('a note taking app that runs on linux'), 'a note taking app that runs');
+});
+
+test('a platform word in front of a person names an audience, not a machine', () => {
+  // The layouts are Android's; the tool is a desktop one. Filtering to Android
+  // removes every answer there is.
+  assert.deepEqual(keys('a tool for android developers to test layouts'), []);
+  assert.deepEqual(keys('a newsletter for windows users'), []);
+  assert.deepEqual(keys('a course for linux beginners'), []);
+});
+
+test('a platform requirement is stated in other languages too', () => {
+  assert.deepEqual(keys('un editor de fotos para el móvil'), ['mobile']);
+  assert.deepEqual(keys('un lecteur de musique pour linux'), ['linux']);
+});
+
 test('the price is stated in an inflected language too', () => {
   // Same class as the alphabet above: the ending had to be nothing at all, so
   // every inflected form of the word went unread.
@@ -349,4 +408,40 @@ test('the price is stated in an inflected language too', () => {
   assert.ok(keys('une application gratuite').includes('free'));
   // But not the English word that happens to start the same way.
   assert.deepEqual(keys('a filter for gratuitous violence in films'), []);
+});
+
+// ---------------------------------------------------------------------------
+// Hebrew writes its prepositions, its article and its conjunction attached to
+// the front of the word. `OPEN` asks for a non-letter before the match, so it
+// refused every one of them — including "בחינם", which is not an inflection of
+// "חינם" but the ordinary way to say "for free". Arabic and Turkish were simply
+// absent.
+// ---------------------------------------------------------------------------
+
+test('the commonest way to say "free" in Hebrew is the one with a prefix on it', () => {
+  assert.deepEqual(keys('אפליקציה חינם לעריכת וידאו'), ['free']);
+  assert.deepEqual(keys('אפליקציה בחינם לעריכת וידאו'), ['free']);
+  assert.deepEqual(keys('לחפש אפליקציה בחינם לעריכת וידאו'), ['free']);
+  assert.deepEqual(keys('תוכנה שחינם לגמרי'), ['free']);
+
+  // And the prefix leaves with the word, rather than being left behind as a
+  // one-letter ranking term.
+  assert.equal(residual('לחפש אפליקציה בחינם לעריכת וידאו'), 'לחפש אפליקציה לעריכת וידאו');
+});
+
+test('"free" in Arabic, in the forms people write it in', () => {
+  assert.deepEqual(keys('برنامج مجاني لتقسيم المصاريف'), ['free']);
+  assert.deepEqual(keys('أريد تطبيقا مجانيا لتحرير الفيديو'), ['free']);
+  assert.deepEqual(keys('تطبيق مجانية للملاحظات'), ['free']);
+  assert.deepEqual(keys('هل يوجد تطبيق ملاحظات مجانا'), ['free']);
+  assert.equal(residual('برنامج مجاني لتقسيم المصاريف'), 'برنامج لتقسيم المصاريف');
+
+  // "مجانين" is the plural of "mad" and starts with the same four letters.
+  assert.deepEqual(keys('فيلم عن مجانين'), []);
+});
+
+test('"free" in Turkish', () => {
+  assert.deepEqual(keys('video düzenlemek için ücretsiz bir uygulama'), ['free']);
+  assert.deepEqual(keys('ücretsiz not uygulaması'), ['free']);
+  assert.equal(residual('ücretsiz not uygulaması'), 'not uygulaması');
 });

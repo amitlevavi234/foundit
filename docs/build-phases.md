@@ -177,12 +177,25 @@ statement is worse than none. Then a reranker over the top 50. Then bands (**Str
 Possible / Loose**) replaced by a calibrated percentage, once there are enough judged
 examples to calibrate against.
 
+Also a deliverable here: **a written definition of what counts as a good match, and the
+first code that writes `search_events.had_good_match`.** The column exists
+(`0001_init.sql`), `log_search_event` takes the argument (`0002_search.sql`), and the
+application deliberately does not pass it — `app/results/page.tsx` says why: the only
+value it could honestly supply is `result_count > 0`, which is a different question
+wearing this column's name. So the column currently holds a constant `false` for every
+row ever logged. This phase is the first one that can do better, because this phase is
+where a score starts meaning something; defining "good" is part of calibrating it, and
+neither the definition nor the threshold is invented here in advance.
+
 **Non-negotiables:** each of the three ships separately, each measured separately. A
 rescaled similarity score displayed as "92% fit" is a lie; bands until the calibration
-exists. Constraints shown as met or unmet on every result.
+exists. Constraints shown as met or unmet on every result. `had_good_match` is written
+from the stated definition or not written at all — a plausible stand-in in that column
+is worse than the honest `false`, because a dashboard reads it as measurement.
 
 **Gate:** each step's effect recorded in `eval/baselines.md`. Anything that does not
-move the number is reverted, not kept out of politeness.
+move the number is reverted, not kept out of politeness. The definition of "good" is
+written down somewhere a reader of the dashboard can find it.
 
 ---
 
@@ -237,9 +250,17 @@ nothing good**, the most frequent queries with counts, tools added and by whom, 
 nobody has ever matched, signups, reviews, reports, and today's model spend against the
 cap.
 
+**Depends on Phase 5.** "Searches that found nothing good" is `product-decisions.md`
+§10's most valuable panel and it reads `search_events.had_good_match`, which nothing
+writes: the column has held a constant `false` since it was created, so the panel would
+either be empty or report every search as a failure. Phase 5 defines "good" and starts
+writing the column; this panel is built on top of that and cannot be built before it. If
+Phase 5 has not landed, the panel says so on the page rather than drawing a chart of a
+constant.
+
 **Non-negotiables:** search text is shown in aggregate; people are shown through their
 public actions; **the two are never joined**. Admin status is checked by the database,
-not only by the page.
+not only by the page. No panel draws a number the schema is not yet recording.
 
 **Gate:** a non-admin account gets nothing from every admin route, proven by test.
 

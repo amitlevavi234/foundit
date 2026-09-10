@@ -66,6 +66,23 @@ function formatDate(value: string | null): string {
   return Number.isNaN(date.getTime()) ? '—' : DATE.format(date);
 }
 
+/**
+ * Where a report goes.
+ *
+ * `docs/product-decisions.md` §5: "Reports go to the team by email rather than
+ * into a queue." There is no queue, no report table and no moderation screen in
+ * this phase — those are the deliberately deferred half of §5 — so the link is
+ * a `mailto:`, which needs no account, no JavaScript and nothing built behind
+ * it, and which is exactly as much machinery as the decision asks for.
+ *
+ * §5 names the channel but not the address, and this file is not the place to
+ * invent one, so the address is an environment variable with the obvious
+ * default on the domain §13 records (foundit.tools). Set REPORT_EMAIL and the
+ * link follows it; the mailbox has to exist either way, which is an operations
+ * fact rather than a code one.
+ */
+const REPORT_EMAIL = process.env.REPORT_EMAIL ?? 'reports@foundit.tools';
+
 /** The five things the catalogue tracks about every tool (§8). */
 const TRACKED_FLAGS: ToolFlag[] = ['works_offline', 'no_account_needed', 'no_ads', 'exports_data'];
 
@@ -577,6 +594,28 @@ export default async function ToolPage({ params }: ToolProps) {
               {tool.claimable ? ' when we launched' : ''}
             </span>
             <span>{formatDate(tool.publishedAt ?? tool.createdAt)}</span>
+            {/* The listing footer from docs/product-spec.md §"Tool detail":
+                "Suggest an edit · Report this listing · View change history".
+                Only the report is here, because only the report is decided for
+                this phase — §5 sends it to the team by email, with no account
+                and no queue behind it. Same tab, because a mailto: does not
+                navigate: components/OutboundLink.tsx is the only thing in this
+                codebase allowed to open a new one. */}
+            <a
+              href={`mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(
+                `Report a listing: ${tool.name} (${tool.slug})`,
+              )}&body=${encodeURIComponent(
+                `What is wrong with this listing?\n\n` +
+                  `(Dead or broken link · Wrong information · Spam or not really software · ` +
+                  `A duplicate of another listing · Something else)\n\n` +
+                  `Listing: ${tool.name}\n`,
+              )}`}
+            >
+              Report this listing
+            </a>
+            <span className="faint">
+              Someone on the team reads every report. No account needed.
+            </span>
           </div>
         </div>
 

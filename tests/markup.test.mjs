@@ -158,3 +158,31 @@ test('the component sheet prints the palette’s real values', () => {
     );
   }
 });
+
+test('the reduced-motion block and the canvas it came from say the same five things', () => {
+  // styles/motion.css calls its last block "`RM` from design/canvas/build.mjs,
+  // verbatim". It was not verbatim: the app had added `animation-delay` and
+  // `transition-delay` and the canvas had not, so every artboard shipped the
+  // bug the app had already fixed, invisibly, because an artboard is a still.
+  // Neither file can drift again without this failing.
+  const motion = readFileSync(join(ROOT, 'styles', 'motion.css'), 'utf8');
+  const canvas = readFileSync(join(ROOT, 'design', 'canvas', 'build.mjs'), 'utf8');
+  const artboard = readFileSync(join(ROOT, 'design', 'canvas', 'Main.dc.html'), 'utf8');
+
+  const REQUIRED = [
+    /animation-duration:\s*\.?0?\.?01ms\s*!important/,
+    /animation-iteration-count:\s*1\s*!important/,
+    /animation-delay:\s*0s\s*!important/,
+    /transition-duration:\s*\.?0?\.?01ms\s*!important/,
+    /transition-delay:\s*0s\s*!important/,
+  ];
+
+  const reduced = /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\}\s*\}/.exec(motion);
+  assert.ok(reduced, 'styles/motion.css has a reduced-motion block');
+
+  for (const rule of REQUIRED) {
+    assert.match(reduced[0], rule, `styles/motion.css is missing ${rule}`);
+    assert.match(canvas, rule, `design/canvas/build.mjs RM is missing ${rule}`);
+    assert.match(artboard, rule, 'the artboards were not regenerated after RM changed');
+  }
+});

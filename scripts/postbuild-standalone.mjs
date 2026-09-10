@@ -108,7 +108,10 @@ async function main() {
   }
 
   process.stdout.write(
-    `\n${rel(STANDALONE)} is complete. Run it with: node ${rel(path.join(STANDALONE, 'server.js'))}\n`,
+    // `npm start`, not `node .next/standalone/server.js`: the generated server
+    // binds 0.0.0.0 unless HOSTNAME says otherwise, and scripts/start.mjs is
+    // where this repository says otherwise.
+    `\n${rel(STANDALONE)} is complete. Run it with: npm start\n`,
   );
   return 0;
 }
