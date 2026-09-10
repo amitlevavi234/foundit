@@ -137,3 +137,24 @@ neither of which is work today:
    it is non-commercial only. Budget $20/month from that day.
 2. The database gets a `plan` column on the profile from the first migration, so that
    adding tiers later is a change of behaviour rather than a migration of everyone.
+
+## 12. The link out to the tool (added 10 September 2026)
+
+Every result and every tool page carries a link to the address the maker entered, so a
+person can go straight to the thing. This is the whole point of a recommendation, and
+it is already in the design as **"Open Splitwise ↗"** on the tool page.
+
+How it behaves:
+
+- Opens in a new tab, so Foundit stays where it was.
+- Shows the domain next to the button, so people can see where they are going before
+  they go.
+- Accepts `https` addresses only. No other kind of link is stored or rendered.
+- Carries `rel="noopener noreferrer"`, so the opened page cannot reach back into ours.
+- The click is counted — this is the "opened from Foundit" number on the maker
+  dashboard — and the count is recorded without attaching it to a person.
+
+Note that **the browser opening a link is not the same as our server fetching one**
+(§5 of the plan). The visitor's own browser goes to the maker's site, exactly as it
+would from any other link on the web. That has none of the risk that made us defer the
+automatic filling-in of details, so the link ships in version one.
