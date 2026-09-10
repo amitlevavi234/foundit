@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foundit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Onest:wght@400;500;600&display=swap">
+<style>
+  :root { --bg:#FFFCF5; --ink:#1C1A24; --muted:#6B6780; --coral:#FF5A3C; --violet:#6E4BF6; --lime:#B8F04A; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink);
+         font-family:'Onest',system-ui,sans-serif; display:grid; place-items:center; padding:32px; }
+  .card { max-width:540px; text-align:center; }
+  h1 { font-family:'Bricolage Grotesque',sans-serif; font-weight:800; letter-spacing:-.03em;
+       font-size:clamp(40px,8vw,64px); margin:24px 0 12px; }
+  p { color:var(--muted); font-size:18px; line-height:1.55; margin:0 auto; max-width:38ch; }
+  .mark { display:inline-block; }
+  .soon { display:inline-block; margin-top:28px; padding:10px 18px; border:2px solid var(--ink);
+          border-radius:999px; background:var(--lime); font-weight:600; font-size:14.5px;
+          box-shadow:4px 4px 0 var(--ink); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <span class="mark">
+      <svg width="72" height="72" viewBox="0 0 40 40" fill="none" aria-label="Foundit">
+        <path d="M19 5a14 14 0 1 1-8.2 25.3L5 35l1.6-8.9A14 14 0 0 1 19 5z" transform="translate(2.4,2.4)" fill="#1C1A24"/>
+        <path d="M19 5a14 14 0 1 1-8.2 25.3L5 35l1.6-8.9A14 14 0 0 1 19 5z" fill="#FF5A3C" stroke="#1C1A24" stroke-width="2.2" stroke-linejoin="round"/>
+        <circle cx="19" cy="19" r="6.6" fill="#FFFCF5" stroke="#1C1A24" stroke-width="2.2"/>
+        <circle cx="19" cy="19" r="2.7" fill="#6E4BF6"/>
+        <path d="M31.5 9.5l3.2-4.2M35 15.5l4.8-1.2M28.5 5.5l.4-4.6" stroke="#1C1A24" stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+    </span>
+    <h1>Foundit</h1>
+    <p>Describe a problem in your own words, and get the tools that solve it. We're building it now.</p>
+    <span class="soon">Opening soon</span>
+  </div>
+</body>
+</html>

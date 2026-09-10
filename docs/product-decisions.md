@@ -124,6 +124,8 @@ answer "is this working, and what should I build next" — and to show the money
 | People | Signups per day, returning visitors, and each user's **public** activity: tools added, reviews written, likes given, last seen |
 | Words | Reviews posted, reports received |
 | Money | Embedding calls today, model calls today, estimated spend this month against the cap, database size and egress against the free-tier limits |
+| Backups | When the last backup ran and whether it succeeded; **when a restore was last tested and whether it passed**; the size of the backup store against R2’s 10 GB free allowance; R2 operations this month against the free million. A red row here outranks everything else on the page |
+| Server | Disk used against 40 GB, memory in use, swap in use, and whether unattended security updates are current. A full disk takes down the database, Docker and the monitoring at once |
 
 **The privacy line.** Search text is visible in aggregate — deduplicated, counted, not
 attached to a person. Individual users are visible through what they did in public.

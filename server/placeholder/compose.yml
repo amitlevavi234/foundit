@@ -1,0 +1,11 @@
+# A holding page, until the application replaces it on port 3000.
+# Bound to localhost: the tunnel reaches it, the internet cannot.
+services:
+  placeholder:
+    image: nginx:alpine
+    container_name: foundit-placeholder
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
