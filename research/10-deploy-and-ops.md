@@ -1013,3 +1013,489 @@ The authoritative machine-readable lists are <https://www.cloudflare.com/ips-v4>
 **Content-Security-Policy is deliberately absent above.** A CSP that is wrong breaks your site silently in some browsers. Set it in `next.config.js` with a per-request nonce where the app knows its own script inventory, not in the proxy where it does not.
 
 ---
+
+## 6. Resource limits and self-protection
+
+The failure modes that actually take down single-VPS deployments, in order of how often they happen:
+
+1. Docker logs fill the disk.
+2. One container leaks memory and the OOM killer picks the database.
+3. No swap, so a transient spike becomes a kill instead of a slowdown.
+4. Nobody notices the disk was at 97% for three weeks.
+
+All four are prevented by configuration written once.
+
+### 6.1 Memory limits per container
+
+Docker's limits are enforced by cgroups. Key semantics from <https://docs.docker.com/engine/containers/resource_constraints/>:
+
+- `-m` / `--memory` is a hard ceiling; minimum allowed value is `6m`.
+- `--memory-swap` set **equal to `--memory`** means "the container doesn't have access to swap".
+- `--memory-swap` **unset** means the container may use swap up to the memory limit amount again (i.e. `memory` RAM + `memory` swap).
+- `--memory-swap` = `-1` means unlimited swap up to what the host has.
+- `--memory-reservation` is a *soft* limit that only bites under host pressure. It does not guarantee containment.
+- When memory is exhausted, "the kernel throws an Out Of Memory Exception and starts killing processes". Docker adjusts the daemon's OOM priority so containers get killed before the daemon does — **but it does not know which of your containers matters most.**
+
+That last point is why per-container limits are not optional. Without them, every container competes for all 8 GB and the OOM killer's heuristic (roughly: kill the biggest) will frequently choose Postgres, because Postgres legitimately holds the most memory.
+
+The Compose equivalents (<https://docs.docker.com/reference/compose-file/services/>) are `deploy.resources.limits.memory` / `.cpus`, or the service-level shorthands `mem_limit` / `cpus`. Compose v2 honours `deploy.resources.limits` on a plain Docker Engine. Set **both** for clarity — the spec requires them to be consistent when both are present.
+
+**Set `mem_reservation` too**, lower than the limit. It tells the kernel which containers to squeeze first when the host is under pressure, which biases the OOM killer away from Postgres.
+
+### 6.2 Swap on a small box
+
+Hetzner Cloud images ship with **no swap** by default. That is the wrong default here.
+
+The argument for swap on a small box:
+- Without swap, memory pressure has exactly one outcome: something gets killed, instantly, with no warning.
+- With a modest swapfile, pressure first shows up as *slowness*, which your monitoring can catch and you can act on. A slow site is recoverable; a killed Postgres mid-write is a recovery procedure.
+- Cold, never-touched pages (a Node process's startup code, idle Postgres backends) can be paged out harmlessly, freeing real RAM for page cache — which is what Postgres actually wants.
+
+The argument against: swap on network-backed cloud storage is slow, and a database that starts swapping its buffer pool performs terribly.
+
+**Resolution: a small swapfile with a low swappiness.** Enough to absorb spikes, not enough to let the system live in swap.
+
+```bash
+# 2 GB swapfile on an 8 GB box (use 4 GB on a 4 GB box)
+fallocate -l 2G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+# prefer reclaiming page cache over swapping; only swap under real pressure
+sysctl -w vm.swappiness=10
+sysctl -w vm.vfs_cache_pressure=50
+printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\n' > /etc/sysctl.d/99-swap.conf
+```
+
+**Then deny swap to the containers that must never swap**, so the swapfile absorbs spikes from the app but never degrades the database:
+
+```yaml
+db:
+  mem_limit: 2g
+  memswap_limit: 2g        # equal to mem_limit => no swap for this container
+```
+
+And allow it for the app, where a brief page-out is preferable to a kill:
+
+```yaml
+app:
+  mem_limit: 1g
+  memswap_limit: 1500m     # 1g RAM + ~500m swap
+```
+
+This is the single most under-used pair of settings on small boxes: **swap available at the host level, denied to the database, allowed to the app.**
+
+### 6.3 Log rotation — the classic single-VPS outage
+
+Docker's default `json-file` driver has `max-size` defaulting to **-1 (unlimited)** and `max-file` to **1** (<https://docs.docker.com/engine/logging/drivers/json-file/>). A chatty container, or one crash-looping and printing a stack trace ten times a second, will write until the disk is full. When the disk fills, Postgres cannot write WAL and stops accepting writes; Docker cannot start containers; and — the cruel part — you cannot easily SSH in and fix it because half the tooling needs to write temp files.
+
+**Fix it globally on the daemon, so it applies to every container including ones you add later and ones you start by hand.**
+
+```json
+// /etc/docker/daemon.json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3",
+    "compress": "true"
+  },
+  "live-restore": true
+}
+```
+
+```bash
+systemctl restart docker    # existing containers keep their OLD settings until recreated
+```
+
+Caps each container at ~30 MB of logs (10 MB × 3 files, compressed). Eight containers → ~240 MB worst case. Predictable.
+
+**Two gotchas:**
+1. **`daemon.json` only applies to containers created after the restart.** Existing containers keep whatever they were created with. After changing it, recreate everything (`prod up -d --force-recreate`) or you have not actually fixed anything.
+2. **Setting it per-service in Compose as well is belt-and-braces**, and makes the intent visible in the file someone will actually read:
+   ```yaml
+   logging:
+     driver: json-file
+     options:
+       max-size: "10m"
+       max-file: "3"
+   ```
+
+Caddy's own access logs are separate from container logs and need their own rotation — handled in the Caddyfile above with `roll_size` / `roll_keep` / `roll_keep_for`.
+
+**Also cap image and build-cache growth.** Every deploy pulls a new image layer set. Without pruning, `/var/lib/docker` grows forever:
+
+```bash
+# weekly systemd timer
+docker image prune -af --filter "until=336h"   # images unused for 14 days
+docker builder prune -af --filter "until=168h"
+```
+
+Do **not** run `docker system prune -a --volumes`. The `--volumes` flag will happily delete a database volume that is not currently attached to a running container — for example, while you have the stack stopped for maintenance.
+
+### 6.4 Disk-space alerting
+
+Alert at **80%** (email/morning) and **90%** (push/night). 90% on a 40 GB disk is 4 GB of headroom, which is roughly one careless `pg_dump` away from zero.
+
+Simplest reliable version, no extra services:
+
+```bash
+#!/usr/bin/env bash
+# /usr/local/bin/check-disk   -- systemd timer every 15 min
+set -euo pipefail
+USED=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+INODES=$(df --output=ipcent / | tail -1 | tr -dc '0-9')
+if [ "$USED" -ge 90 ] || [ "$INODES" -ge 90 ]; then
+  curl -fsS -H "Priority: urgent" -H "Tags: rotating_light" \
+    -d "PROD DISK ${USED}% used, inodes ${INODES}%" "$NTFY_URL"
+elif [ "$USED" -ge 80 ]; then
+  curl -fsS -d "prod disk ${USED}% used" "$NTFY_URL"
+fi
+```
+
+`ntfy.sh` is free, needs no account, and delivers a phone push. Check **inodes as well as bytes** — millions of small files (a runaway cache, an unrotated log directory) exhaust inodes while `df -h` still looks fine, and the resulting "No space left on device" with 40% free is deeply confusing at 3 a.m.
+
+Beszel (§7) covers this too once installed; the standalone script is worth keeping as a second, dependency-free path, because the monitoring stack is exactly the thing that stops working when the disk is full.
+
+### 6.5 The complete production `docker-compose.yml`
+
+```yaml
+# /srv/prod/docker-compose.yml
+name: foundit-prod
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
+
+services:
+  # ---------------------------------------------------------------- database
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # keep initdb deterministic across host locales
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # NOT published to the host: reachable only from this project's network
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 60s        # let Postgres checkpoint cleanly
+    mem_limit: 2g
+    memswap_limit: 2g             # == mem_limit => this container never swaps
+    mem_reservation: 1g
+    cpus: 2.0
+    shm_size: 256mb               # default 64m is too small for parallel queries
+    logging: *default-logging
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - max_connections=60
+      - -c
+      - log_min_duration_statement=1000
+
+  # -------------------------------------------------------------- next.js app
+  app:
+    image: ghcr.io/OWNER/foundit:${IMAGE_TAG}
+    pull_policy: always
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      NODE_OPTIONS: "--max-old-space-size=768"
+      GIT_SHA: ${IMAGE_TAG}
+      SENTRY_RELEASE: ${IMAGE_TAG}
+      SENTRY_ENVIRONMENT: production
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+      start_interval: 3s
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+    mem_limit: 1g
+    memswap_limit: 1500m          # 1g RAM + ~500m swap: spike absorber
+    mem_reservation: 512m
+    cpus: 2.0
+    read_only: false              # Next.js writes its ISR cache to disk
+    tmpfs:
+      - /tmp:size=128m
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  # ---------------------------------------------------- one-shot migration job
+  migrate:
+    image: ghcr.io/OWNER/foundit:${IMAGE_TAG}
+    pull_policy: always
+    profiles: ["tools"]           # never started by a plain `up`
+    command: ["npx", "prisma", "migrate", "deploy"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: 512m
+    logging: *default-logging
+
+  # ------------------------------------------------------------ reverse proxy
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"             # HTTP/3
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL}
+      APP_DOMAIN: ${APP_DOMAIN}
+      DEV_BASIC_USER: ${DEV_BASIC_USER}
+      DEV_BASIC_HASH: ${DEV_BASIC_HASH}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data          # certificates + ACME account: MUST persist
+      - caddy-config:/config
+      - caddy-logs:/var/log/caddy
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - default
+      - foundit-dev_default       # so `dev.` can be routed to the dev stack
+    mem_limit: 256m
+    cpus: 1.0
+    logging: *default-logging
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:
+  caddy-logs:
+
+networks:
+  default:
+  foundit-dev_default:
+    external: true
+```
+
+Notes worth calling out:
+
+- **`pull_policy: always`** on image-based services so a re-deploy of the same tag still refetches if the registry copy changed. Compose documents `always | never | missing | build | daily | weekly | every_<duration>`.
+- **`expose` not `ports`** for `db` and `app`. Only Caddy is on the host's network. This alone removes an enormous amount of exposure.
+- **`shm_size: 256mb`** — Docker's 64 MB default `/dev/shm` causes Postgres parallel query failures under load, in a way that looks like a random application bug.
+- **`stop_grace_period: 60s`** on the database so a checkpoint is never interrupted by SIGKILL.
+- **`restart: unless-stopped`** rather than `always` — after a deliberate `stop`, the container stays stopped across a daemon restart. `always` would resurrect it, which is surprising during an incident.
+- **`security_opt: no-new-privileges:true`** blocks setuid escalation inside the container.
+- **Secrets are in `.env`, which is `chmod 600 root:root` and is NOT in git.** See §9.7 for why the compose file itself must never contain them.
+
+### 6.6 The Dockerfile
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ARG NEXT_PUBLIC_APP_URL
+ARG SENTRY_RELEASE
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+ENV SENTRY_RELEASE=$SENTRY_RELEASE
+ENV NEXT_TELEMETRY_DISABLED=1
+# BuildKit secret: never lands in image history
+RUN --mount=type=secret,id=sentry_auth_token \
+    SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token 2>/dev/null || true)" \
+    npm run build
+
+FROM node:22-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000 HOSTNAME=0.0.0.0
+# EXEC form: node is PID 1 and receives SIGTERM (see §3.1)
+CMD ["node", "server.js"]
+```
+
+`output: 'standalone'` in `next.config.js` is what produces `.next/standalone`; Next.js documents it as generating "a minimal, production-ready Docker image with only the required runtime files and dependencies" (<https://nextjs.org/docs/app/getting-started/deploying>).
+
+Two properties matter operationally: **non-root user** (`USER nextjs`) and **exec-form CMD** (signals reach Node). Both are one line each and both are commonly missing.
+
+---
+
+## 7. Monitoring and alerting for one person, free
+
+The design goal is not "observe everything". It is: **the owner learns about a real outage within minutes, and learns about nothing else until morning.** Every alert that fires and turns out to be nothing trains him to ignore the next one.
+
+### 7.1 The four-layer stack
+
+| Layer | Tool | Cost | Answers |
+|---|---|---|---|
+| Application errors | **Sentry** | Free Developer plan | "Something threw an exception." |
+| Availability | **External uptime check** (UptimeRobot / Better Stack / Hetzner) | Free tier | "The site is unreachable *from the internet*." |
+| Host & container metrics | **Beszel** | Free, self-hosted | "Disk is 92%, the app container restarted 6 times." |
+| Job liveness | **healthchecks.io** dead-man's switch | Free tier | "The nightly backup did not run." |
+
+Four tools, four distinct questions. The overlap is deliberate: **the external uptime check is the only one that keeps working when the box is dead**, which is precisely the case you most need to hear about.
+
+### 7.2 Sentry — errors, and what to send
+
+Setup for Next.js is a wizard: `npx @sentry/wizard@latest -i nextjs` (<https://docs.sentry.io/platforms/javascript/guides/nextjs/>). It creates `instrumentation-client.ts`, `sentry.server.config.ts`, `sentry.edge.config.ts`, and an `instrumentation.ts` with:
+
+```ts
+export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") await import("./sentry.server.config");
+  if (process.env.NEXT_RUNTIME === "edge")   await import("./sentry.edge.config");
+}
+export const onRequestError = Sentry.captureRequestError;
+```
+
+and wraps the config:
+
+```ts
+withSentryConfig(nextConfig, {
+  org: "<your-org-slug>",
+  project: "<your-project-slug>",
+  authToken: process.env.SENTRY_AUTH_TOKEN,
+  tunnelRoute: "/sentry-tunnel",
+  widenClientFileUpload: true,
+})
+```
+
+Operational specifics for this setup:
+
+- **`SENTRY_ENVIRONMENT`** must differ between prod and dev (set in the compose `environment:` block above). Otherwise dev noise buries production signal and every alert becomes untrustworthy.
+- **`SENTRY_RELEASE=${IMAGE_TAG}`** ties every error to the exact commit that shipped it. **This is what turns "the site is throwing errors" into "the site started throwing errors at deploy sha-1a2b3c4, roll it back."** It is the single highest-value line in the whole monitoring section.
+- **`SENTRY_AUTH_TOKEN` at build time** uploads source maps, so stack traces name your files instead of minified chunks. Pass it as a **BuildKit secret**, not a build arg (§6.6).
+- **`tunnelRoute`** routes events through your own server so ad-blockers do not silently drop them. Sentry's docs note it "increases server load" — acceptable at this scale.
+- **Sample aggressively.** `tracesSampleRate: 0.1` or lower in production. The free tier's error quota is small and performance spans are consumed fastest; blowing the quota on a Tuesday means no visibility on Wednesday.
+- **Turn on Spike Protection** in Sentry's settings. One crash-loop can emit tens of thousands of identical events in an hour.
+
+### 7.3 Uptime monitoring
+
+Point an external checker at `https://<domain>/api/health` — the endpoint that touches the database (§3.2), not the homepage. Homepage checks pass while the database is down, which is the exact scenario you need to catch.
+
+Requirements for the free tier you pick:
+- 1–5 minute interval
+- Checks from at least two locations (single-location checkers produce false alarms from their own network problems)
+- Alerts to **push notification or SMS**, not only email — email does not wake anyone
+- Confirms recovery, so you know it resolved without checking
+
+Configure: **alert after 2 consecutive failures**, not 1. A single failed probe is usually the probe's fault; two in a row at a 1-minute interval means a 2-minute outage, which is real.
+
+Also add a second check on `https://dev.<domain>/` with alerts **disabled** — you want the history for context ("was dev also down?") without being paged for it.
+
+### 7.4 Host metrics — recommendation by weight
+
+| Option | Footprint | Setup | Verdict |
+|---|---|---|---|
+| **Beszel** | Hub + agent, both very small | One compose block, hub on 8090 | **Recommended.** Monitors CPU, memory, disk, network, container status, S.M.A.R.T. data, and supports alerts to 20+ notification services including Telegram, Discord, ntfy and Gotify (<https://beszel.dev/guide/getting-started>). Built precisely for "a few small servers, one person". |
+| **Netdata** | Heaviest of the three; per-second collection of thousands of metrics, meaningful RAM and disk-write cost | One container, near-zero configuration | Superb dashboards and out-of-the-box alarms, but per-second granularity you will never use, on a box where RAM is the scarce resource. Choose it if you want deep real-time diagnosis and can spare the memory. |
+| **Prometheus + Grafana** | Heaviest to *operate*: Prometheus, Grafana, node-exporter, cadvisor, alertmanager — five services, ~1 GB, plus PromQL and alert rules to write | Hours | **Not recommended here.** It is the right answer at ten servers and the wrong answer at one. You would spend more time maintaining the monitoring than the app. |
+
+**Recommendation: Beszel.** It is the only one of the three whose weight is proportionate to a single box owned by one non-developer. Configure alerts for:
+
+- CPU > 85% sustained 10 min
+- Memory > 90% sustained 10 min
+- Disk > 80% (warn) / > 90% (urgent)
+- Container status: any prod container down or unhealthy
+- Agent unreachable (which itself signals the host is in trouble)
+
+Put the hub behind Caddy on a subdomain with basic auth, or bind it to localhost and reach it over an SSH tunnel. **Do not publish port 8090 to the internet unauthenticated.**
+
+If Beszel itself is running on the box it monitors, it dies with the box — which is why the external uptime check is non-negotiable.
+
+### 7.5 What should page at night vs. wait until morning
+
+The rule: **wake him only for things that are (a) user-visible right now and (b) fixable at 3 a.m. by following a runbook.** Everything else is a morning email.
+
+#### Page at night (push notification, urgent, bypasses Do Not Disturb)
+
+| Condition | Why it qualifies |
+|---|---|
+| **Site unreachable, 2+ consecutive external checks (≥2 min)** | Users cannot use the product. Runbook 8.3 (restart) or 8.2 (roll back) fixes it in minutes. |
+| **`/api/health` returns 503 for 5+ minutes** | App is up, database is not. Data-loss adjacent. Runbook 8.3. |
+| **Disk > 90%** | Ten minutes from now the database stops accepting writes. Fixable by pruning logs and images. **Genuinely urgent and genuinely fixable.** |
+| **Deploy failed AND rollback also failed** | The system is in an unknown state. The one case where automation gave up. |
+| **Postgres container in a restart loop** | Almost always disk, memory, or a corrupt WAL. Fast recovery only if caught early. |
+
+That is five conditions. Five is the right number; twenty is a number nobody responds to.
+
+#### Wait until morning (email / Slack, no sound)
+
+- Error rate elevated but the site is up
+- A single new Sentry issue, however scary its stack trace
+- CPU or memory sustained high but under limits
+- Disk 80–90%
+- A dev-environment failure of any kind, ever
+- SSL certificate expiring in under 14 days (Caddy renews automatically; this is a "check me" not a "fix me")
+- Slow query log entries
+- Backup succeeded but took longer than usual
+
+#### Never alert at all
+
+- Individual 4xx responses
+- A single 5xx (Sentry has it; one is not a pattern)
+- Bot traffic, scanner probes, failed logins from the internet at large
+- Deploy succeeded (a success notification for a routine event trains you to swipe notifications away)
+
+**Two rules that matter more than the lists:**
+
+1. **Every night-time alert must map to a runbook in §8.** If there is no runbook, it is not a page — because being woken with no procedure produces panicked improvisation, which is how a 5-minute outage becomes a data-loss incident.
+2. **Any alert that fires falsely twice gets its threshold changed or is demoted to morning, that week.** Alert fatigue is the actual failure mode of solo monitoring. A pager that cries wolf is worse than no pager, because it manufactures false confidence.
+
+### 7.6 One more thing: a deploy log the owner can read
+
+Keep a plain-text, append-only record of every deploy on the box. It is what makes "when did this start?" answerable at 3 a.m.
+
+```bash
+# add to the end of deploy-prod
+printf '%s  %s  %s -> %s\n' "$(date -u +%FT%TZ)" "$USER" "${PREV_TAG:-none}" "$NEW_TAG" \
+  >> /srv/state/prod/deploy.log
+```
+
+`tail /srv/state/prod/deploy.log` answers "what changed recently" without GitHub, without a browser, and without a working app.
+
+---
