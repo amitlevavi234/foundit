@@ -6,7 +6,7 @@
 -- later clever thing has to beat, so it is deliberately boring and entirely
 -- explainable.
 --
--- Three things about this file are load-bearing:
+-- Four things about this file are load-bearing:
 --
 --   1. public.search_tools() is NOT security definer. It runs as the caller,
 --      so row-level security still applies to every table it touches. The
@@ -18,7 +18,14 @@
 --      contribute exactly nothing to the score. If someone says free, a paid
 --      tool does not appear, however similar it looks.
 --
---   3. Signals are combined with Reciprocal Rank Fusion (ranks, not scores).
+--   3. Full-text retrieval is any-of, not all-of. Terms are OR'd and
+--      ts_rank_cd does the discriminating. Requiring every term is a filter
+--      wearing a ranker's clothes, and against short summaries it returns
+--      nothing at all — see "two readings of the same sentence" below, which
+--      is the mistake this file was born with. Containing every term is still
+--      worth something, so it is a weighted leg of the fusion, not a gate.
+--
+--   4. Signals are combined with Reciprocal Rank Fusion (ranks, not scores).
 --      ts_rank_cd values and trigram similarities live on different scales
 --      and adding them raw would mean tuning a weight against data we do not
 --      have. RRF needs only the ordering each signal produces.
@@ -109,10 +116,14 @@ declare
   -- range behaves the same at this corpus size.
   v_k        constant real := 50;
 
-  -- How many candidates each signal contributes before fusion. The corpus is
-  -- a few thousand published rows, so 100 is generous — twice the largest
-  -- limit a caller can ask for — while still keeping ts_rank_cd off most of
-  -- the table.
+  -- How many candidates each signal contributes before fusion. Retrieval is
+  -- OR (see "two readings of the same sentence" below), so the match sets are
+  -- far larger than they were when every term had to be present: ts_rank_cd
+  -- now runs over most documents that share any lexeme with the query. On a
+  -- corpus of a few thousand published rows that is cheap, and this window
+  -- decides only how many survive into the fusion — 100 is twice the largest
+  -- limit a caller can ask for, so the other legs still have room to reorder
+  -- the list without the answer being decided by where the cut fell.
   v_window   constant int  := 100;
 
   -- Signal weights.
@@ -122,6 +133,19 @@ declare
   -- what it does, and the product's whole thesis is that the problem
   -- statements are how people actually phrase a search. Neither should
   -- outrank the other by construction.
+  --
+  -- The all-terms leg is deliberately half a peer. A document containing
+  -- every term the person typed is real evidence and belongs near the top,
+  -- but it is evidence the two OR legs have already seen: the AND leg re-reads
+  -- the same documents through a stricter lens, it never brings new ones (all
+  -- of the terms implies any of them). At 0.5 the arithmetic says exactly what
+  -- "bonus, not gate" means. The most an all-terms match can add is
+  -- 0.5/(50+1) = 0.0098, less than the 1/(50+1) = 0.0196 a first-place OR leg
+  -- contributes, so it can never install a tool at the top by itself. But it
+  -- is enough to promote: a tool sitting 40th in the OR leg (1/(50+40) =
+  -- 0.0111) that also contains every term ends on 0.0209 and passes a tool
+  -- ranked first that contains only some of them. That promotion is the whole
+  -- reason the leg exists.
   --
   -- Fuzzy name matching is a rescue, not a relevance signal, and it is
   -- weighted so it can never overtake a real text match. The arithmetic:
@@ -133,11 +157,15 @@ declare
   -- the only leg, and "notin" finds Notion.
   v_w_tool    constant real := 1.0;
   v_w_problem constant real := 1.0;
+  v_w_all     constant real := 0.5;
   v_w_name    constant real := 0.25;
 
   v_limit     int;
   v_q         text;
-  v_tsq       tsquery;
+  -- Two tsqueries over the same sentence: any-of for retrieval, all-of as a
+  -- bonus. Built and justified below.
+  v_tsq_any   tsquery;
+  v_tsq_all   tsquery;
   v_pricing   pricing_model[];
   v_platforms platform[];
   v_flags     tool_flag[];
@@ -185,13 +213,59 @@ begin
     return;
   end if;
 
-  -- websearch_to_tsquery is the only parser safe to hand raw user input:
-  -- the docs promise it "never raises syntax errors". A query made entirely
-  -- of stop words produces an EMPTY tsquery, which matches nothing — so
-  -- "the of a" quietly returns whatever the trigram leg finds (usually
-  -- nothing) rather than erroring or falling back to browse. Someone who
-  -- typed something deserves an honest empty answer, not the front page.
-  v_tsq := websearch_to_tsquery('english', v_q);
+  -- ----- two readings of the same sentence --------------------------------
+  --
+  -- websearch_to_tsquery is the only parser safe to hand raw user input: the
+  -- docs promise it "never raises syntax errors". What it is not, is a
+  -- retrieval query. It joins bare terms with AND, so "split expenses with
+  -- friends while travelling" becomes
+  --
+  --     'split' & 'expens' & 'friend' & 'travel'
+  --
+  -- and a tool matches only if its document contains every one of those
+  -- lexemes. Summaries here are a few hundred characters, so that is almost
+  -- never true: measured against the real catalogue, that sentence returned
+  -- nothing at all, while Splitwise sat in the table with 'expens' in its
+  -- document and 'split' nowhere in it. An AND of everything a person typed
+  -- is a gate, and retrieval must not be a gate — a sentence is a description
+  -- of a problem, not a conjunction of requirements. Requirements are the
+  -- WHERE clauses, and they are the only thing allowed to eliminate a tool.
+  --
+  -- So the sentence is read twice.
+  --
+  -- v_tsq_any is retrieval: the same lexemes joined with OR. A document is a
+  -- candidate if it shares ANY term, and ts_rank_cd decides the order, which
+  -- is the job it was always meant to do here — cover more of the query, with
+  -- the matched terms closer together, and rank higher.
+  --
+  -- It is built from lexemes rather than by rewriting the printed form of the
+  -- tsquery. Replacing '&' with '|' in the rendered text looks equivalent and
+  -- is not: a lexeme can contain an ampersand of its own (a URL query string
+  -- tokenizes that way), and the replacement would split it down the middle
+  -- into two lexemes that were never in the query. Going through unnest()
+  -- takes the lexemes as data, drops stop words for free, and cannot be
+  -- injected — the strings come out of to_tsvector, and quote_literal escapes
+  -- each one before it is parsed back as a tsquery.
+  --
+  -- v_tsq_all keeps the AND reading, demoted from gate to evidence: a
+  -- document that really does contain every term is a strong signal, so it
+  -- gets a ranked leg of its own in the fusion below instead of a veto.
+  v_tsq_all := websearch_to_tsquery('english', v_q);
+
+  select string_agg(quote_literal(lexeme), ' | ')::tsquery
+    into v_tsq_any
+    from unnest(to_tsvector('english', v_q));
+
+  -- A sentence of nothing but stop words ("the of a") has no lexemes, so
+  -- string_agg aggregates zero rows and returns null. websearch_to_tsquery
+  -- has already produced the empty tsquery for the same input, so reuse it
+  -- rather than manufacture one: both readings of that sentence really are
+  -- the same empty query, and an empty tsquery matches nothing. "the of a"
+  -- therefore returns whatever the trigram leg finds — usually nothing — and
+  -- never the browse front page. Someone who typed something deserves an
+  -- honest empty answer, not the catalogue's editorial defaults handed back
+  -- as if they were results.
+  v_tsq_any := coalesce(v_tsq_any, v_tsq_all);
 
   return query
   with
@@ -230,10 +304,10 @@ begin
   lex_tool as (
     select e.id,
            row_number() over (
-             order by ts_rank_cd(e.search_doc, v_tsq, 1) desc, e.id
+             order by ts_rank_cd(e.search_doc, v_tsq_any, 1) desc, e.id
            ) as rank_ix
       from eligible e
-     where e.search_doc @@ v_tsq
+     where e.search_doc @@ v_tsq_any
      order by rank_ix
      limit v_window
   ),
@@ -254,17 +328,59 @@ begin
   lex_problem as (
     select tp.tool_id as id,
            row_number() over (
-             order by max(ts_rank_cd(tp.search_doc, v_tsq, 1)) desc, tp.tool_id
+             order by max(ts_rank_cd(tp.search_doc, v_tsq_any, 1)) desc, tp.tool_id
            ) as rank_ix
       from public.tool_problems tp
       join eligible e on e.id = tp.tool_id
-     where tp.search_doc @@ v_tsq
+     where tp.search_doc @@ v_tsq_any
      group by tp.tool_id
      order by rank_ix
      limit v_window
   ),
 
-  -- Signal 3: the half-remembered name. Whole-string trigram similarity
+  -- Signal 3: every term, in one place. The AND reading of the sentence, now
+  -- that it is not the thing deciding who is eligible.
+  --
+  -- This leg cannot widen the result set — a document containing all of the
+  -- terms contains at least one of them, so signals 1 and 2 have already seen
+  -- it — but it can, and should, pull such a document upward. It reads both
+  -- kinds of document for the same reason signals 1 and 2 exist separately,
+  -- and max() deduplicates across a tool's problem statements on exactly the
+  -- reasoning given there: one statement hitting every term is enough.
+  --
+  -- bool_or carries which document matched, so match_source below stays
+  -- honest. A tool CAN arrive here and nowhere else — the OR legs are cut off
+  -- at v_window and this one is not sorted the same way — and such a tool
+  -- matched text, so it must not be reported as a fuzzy-name rescue.
+  lex_all as (
+    select x.id,
+           bool_or(x.from_tool)    as via_tool,
+           bool_or(x.from_problem) as via_problem,
+           row_number() over (
+             order by max(x.strength) desc, x.id
+           ) as rank_ix
+      from (
+        select e.id,
+               ts_rank_cd(e.search_doc, v_tsq_all, 1) as strength,
+               true  as from_tool,
+               false as from_problem
+          from eligible e
+         where e.search_doc @@ v_tsq_all
+        union all
+        select tp.tool_id,
+               ts_rank_cd(tp.search_doc, v_tsq_all, 1),
+               false,
+               true
+          from public.tool_problems tp
+          join eligible e on e.id = tp.tool_id
+         where tp.search_doc @@ v_tsq_all
+      ) x
+     group by x.id
+     order by rank_ix
+     limit v_window
+  ),
+
+  -- Signal 4: the half-remembered name. Whole-string trigram similarity
   -- against the tool name, at pg_trgm's 0.3 threshold.
   --
   -- This self-limits in a useful way: a long sentence ("something that
@@ -289,6 +405,8 @@ begin
     union
     select id from lex_problem
     union
+    select id from lex_all
+    union
     select id from fuzzy_name
   ),
 
@@ -299,12 +417,17 @@ begin
     select c.id,
            ( coalesce(v_w_tool    / (v_k + lt.rank_ix), 0)
            + coalesce(v_w_problem / (v_k + lp.rank_ix), 0)
+           + coalesce(v_w_all     / (v_k + la.rank_ix), 0)
            + coalesce(v_w_name    / (v_k + fn.rank_ix), 0) )::real as score,
-           (lt.id is not null) as via_tool,
-           (lp.id is not null) as via_problem
+           -- The all-terms leg reports which document it matched, so a tool
+           -- that only that leg retrieved is still labelled by where its text
+           -- matched rather than falling through to 'name'.
+           (lt.id is not null or coalesce(la.via_tool,    false)) as via_tool,
+           (lp.id is not null or coalesce(la.via_problem, false)) as via_problem
       from candidates c
       left join lex_tool    lt on lt.id = c.id
       left join lex_problem lp on lp.id = c.id
+      left join lex_all     la on la.id = c.id
       left join fuzzy_name  fn on fn.id = c.id
   )
   select e.id,
@@ -333,8 +456,10 @@ $$;
 
 comment on function public.search_tools(text, pricing_model[], platform[], tool_flag[], text[], int) is
   'Lexical search over tools and their problem statements, fused with '
-  'Reciprocal Rank Fusion (k=50), with a lower-weighted trigram name signal '
-  'for half-remembered names. Constraints filter and never score. Runs as '
+  'Reciprocal Rank Fusion (k=50). Retrieval is any-of: query terms are OR-ed '
+  'and ts_rank_cd orders the result; containing every term is a separate, '
+  'half-weighted bonus leg, and a lower-weighted trigram leg rescues '
+  'half-remembered names. Constraints filter and never score. Runs as '
   'the caller: no SECURITY DEFINER, so row-level security still applies. '
   'score orders results and is not a calibrated relevance number — never '
   'render it as a percentage.';
@@ -453,15 +578,17 @@ comment on index public.tools_languages_gin is
   'Hard constraint: tools.languages && p_languages in search_tools.';
 
 comment on index public.tools_search_doc_gin is
-  'Signal 1: tools.search_doc @@ websearch_to_tsquery(...) in search_tools.';
+  'Signals 1 and 3: tools.search_doc @@ tsquery in search_tools — the OR '
+  'retrieval query, and again the all-terms bonus query.';
 
 comment on index public.tool_problems_doc_gin is
-  'Signal 2: tool_problems.search_doc @@ websearch_to_tsquery(...) in '
-  'search_tools. The join back to tools rides the (tool_id, statement) '
-  'unique constraint, which is why there is no separate tool_id index.';
+  'Signals 2 and 3: tool_problems.search_doc @@ tsquery in search_tools, for '
+  'the same two queries. The join back to tools rides the (tool_id, '
+  'statement) unique constraint, which is why there is no separate tool_id '
+  'index.';
 
 comment on index public.tools_name_trgm is
-  'Signal 3: tools.name % p_query — the half-remembered-name rescue in '
+  'Signal 4: tools.name % p_query — the half-remembered-name rescue in '
   'search_tools.';
 
 comment on index public.tools_platforms_gin is

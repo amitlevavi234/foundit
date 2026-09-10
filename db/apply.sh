@@ -21,15 +21,21 @@ if [[ "${1:-}" == "--fresh" ]]; then
   echo "Wiping the schema..."
   run -qc 'drop schema if exists public cascade;
            drop schema if exists auth cascade;
+           drop schema if exists infra cascade;
            create schema public;' >/dev/null
 fi
 
-run -qc 'create table if not exists public.schema_migrations (
+# Not in `public`: every table there must have row-level security enabled and
+# forced, and bookkeeping for the migration runner cannot satisfy that without
+# a permissive policy, which is the anti-pattern the tests exist to catch.
+run -qc 'create schema if not exists infra;
+         revoke all on schema infra from public;
+         create table if not exists infra.schema_migrations (
            filename text primary key,
            applied_at timestamptz not null default now()
          );' >/dev/null
 
-applied=$(run -tAc 'select filename from public.schema_migrations')
+applied=$(run -tAc 'select filename from infra.schema_migrations')
 
 for f in db/migrations/*.sql; do
   name=$(basename "$f")
@@ -39,8 +45,8 @@ for f in db/migrations/*.sql; do
   fi
   echo "→ $name"
   feed "$f" >/dev/null
-  run -qc "insert into public.schema_migrations (filename) values ('$name')" >/dev/null
+  run -qc "insert into infra.schema_migrations (filename) values ('$name')" >/dev/null
 done
 
 echo "Done. Applied so far:"
-run -tAc 'select filename from public.schema_migrations order by filename' | sed 's/^/  /'
+run -tAc 'select filename from infra.schema_migrations order by filename' | sed 's/^/  /'
