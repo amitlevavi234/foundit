@@ -172,3 +172,45 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * The homepage machine.
+ *
+ * `bob` and `drop` in design/canvas/build.mjs both rotate, and both are
+ * applied to groups that contain live text — the request going into the
+ * machine, and the three results coming out of it. Rotation on text is
+ * exactly what docs/product-decisions.md §9 rules out ("no blur effects and no
+ * sub-degree rotation on text — both made type render soft"), and a fractional
+ * rotate on an SVG <text> renders it against the pixel grid at an angle, which
+ * is the soft type that rule was written about.
+ *
+ * So the two motions are here without their rotation. The travel, the timing
+ * and the overshoot are the artboard's; only the angle is gone. The gear keeps
+ * `spin`, because a gear is a circle with teeth and there is not a word in it.
+ */
+@keyframes bob-y {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes drop-y {
+  0% {
+    transform: translateY(-46px);
+    opacity: 0;
+  }
+  22% {
+    opacity: 1;
+  }
+  60% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}

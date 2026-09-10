@@ -874,3 +874,480 @@ dl.facts dd {
   gap: var(--s-5);
   align-items: center;
 }
+
+/* ===========================================================================
+ * The screens.
+ *
+ * Everything above this line is a component the artboards draw more than once.
+ * Everything below belongs to one of the five screens — the conversation on
+ * Results, the ranked row on the homepage and /top, the problem card on
+ * /browse, and the tool page's own furniture — and is written here rather than
+ * inline so that a screen is markup and the look is one file.
+ * ======================================================================== */
+
+/* --- The conversation: Results, ResultsLoading, ResultsEmpty, ResultsClarifier */
+
+/* What the person asked, in their own words, at the top of the answer. */
+.bubble {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.bubble > div {
+  max-width: 720px;
+  background: var(--c-tint);
+  border: var(--border);
+  border-radius: var(--r-2xl) var(--r-2xl) var(--r-xs) var(--r-2xl);
+  padding: var(--s-7) var(--s-10);
+  font-size: var(--t-body-lg);
+  line-height: var(--lh-body);
+  box-shadow: 4px 4px 0 var(--c-violet);
+  /* A sentence someone typed can be one long unbroken string. */
+  overflow-wrap: anywhere;
+}
+
+.answer {
+  display: flex;
+  gap: var(--s-7);
+  align-items: flex-start;
+}
+
+.answer > .answer-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-10);
+  min-width: 0;
+}
+
+.understood {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+  align-items: center;
+  padding-top: var(--s-2);
+}
+
+.understood-label {
+  font-weight: var(--fw-semibold);
+  color: var(--c-muted);
+  margin-right: var(--s-2);
+}
+
+.results-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-13);
+  padding: var(--s-2);
+}
+
+/* The box at the foot of the results, and its fade over what scrolls past. */
+.chatdock {
+  position: sticky;
+  bottom: 0;
+  padding: var(--s-7) var(--page-gutter) var(--s-13);
+  background: linear-gradient(to top, var(--c-bg) 70%, transparent);
+  margin-top: auto;
+}
+
+.chatdock .searchbox {
+  max-width: 1168px;
+  margin: 0 auto;
+}
+
+.searchbox.sm {
+  padding: var(--s-8) 84px var(--s-8) var(--s-11);
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+}
+
+.searchbox.sm textarea {
+  font-size: var(--t-body-lg);
+}
+
+.searchbox.sm .searchbox-send {
+  position: absolute;
+  right: var(--s-5);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 52px;
+  height: 52px;
+  border-radius: var(--r-lg);
+}
+
+.searchbox.sm .searchbox-count {
+  right: 84px;
+  bottom: var(--s-1);
+}
+
+/* Where the fit meter goes until Phase 5 has a number worth printing: what
+ * matched, said in words. Legible without colour — the tone changes the fill,
+ * the wording says the same thing on its own. */
+.band {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  font-size: var(--t-micro);
+  color: var(--c-muted);
+  flex-wrap: wrap;
+}
+
+.band-label {
+  display: inline-flex;
+  align-items: center;
+  height: var(--h-pillstat);
+  padding: 0 var(--s-4);
+  border-radius: var(--r-pill);
+  font-size: var(--t-micro-sm);
+  font-weight: var(--fw-heading);
+  border: var(--border);
+  white-space: nowrap;
+}
+
+.band-strong .band-label {
+  background: var(--c-lime);
+  color: var(--c-ink);
+}
+
+.band-possible .band-label {
+  background: var(--c-tint);
+  color: var(--c-violet);
+}
+
+.band-loose .band-label {
+  background: var(--c-sunk);
+  color: var(--c-muted);
+  border-color: var(--c-rule);
+}
+
+/* The skeleton behind ResultsLoading and ResultsClarifier. No text in it, so
+ * nothing here can be read half-drawn. */
+.skel {
+  padding: var(--s-12);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-7);
+  box-shadow: 6px 6px 0 var(--c-rule);
+  border-color: var(--c-rule);
+}
+
+.skel-line {
+  height: 14px;
+  border-radius: var(--r-pill);
+  background: var(--c-track);
+  border: var(--border-soft);
+  overflow: hidden;
+  position: relative;
+}
+
+.skel-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 30%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.9), transparent);
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+.skel-block {
+  background: var(--c-sunk);
+  border-radius: var(--r-lg);
+}
+
+.skel-pill {
+  background: var(--c-sunk);
+  border-radius: var(--r-pill);
+  height: var(--h-chip);
+}
+
+/* --- The ranked row: the homepage strip and the whole of /top ------------- */
+.toprow {
+  display: grid;
+  grid-template-columns: 44px 56px minmax(0, 1fr) 120px 200px;
+  gap: var(--s-7);
+  align-items: center;
+  padding: var(--s-7) var(--s-12);
+  color: var(--c-ink);
+  text-decoration: none;
+  transition: background var(--d-instant);
+}
+
+.toprow + .toprow {
+  border-top: var(--border-soft);
+}
+
+.toprow:hover {
+  background: var(--c-tint);
+  text-decoration: none;
+}
+
+.toprow.compact {
+  grid-template-columns: 34px 44px minmax(0, 1fr) auto;
+  gap: var(--s-6);
+  padding: var(--s-6) var(--s-10);
+}
+
+.toprow-rank {
+  font-size: 28px;
+  font-weight: var(--fw-display);
+  color: var(--c-faint);
+}
+
+.toprow.compact .toprow-rank {
+  font-size: var(--t-h3);
+}
+
+.toprow-rank.lead {
+  color: var(--c-coral);
+}
+
+.toprow-name {
+  font-family: var(--font-display);
+  font-weight: var(--fw-heading);
+  font-size: var(--t-h3);
+  letter-spacing: var(--ls-h3);
+  display: block;
+}
+
+.toprow.compact .toprow-name {
+  font-size: 18px;
+}
+
+.toprow-summary {
+  font-size: var(--t-meta);
+  color: var(--c-muted);
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toprow-counts {
+  display: flex;
+  gap: var(--s-7);
+  font-size: var(--t-meta);
+  color: var(--c-muted);
+  white-space: nowrap;
+}
+
+.toprow-counts span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+/* --- The problem card: the homepage's three, and /browse's grid ----------- */
+.problem-card {
+  padding: var(--s-10) var(--s-11);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-6);
+  color: var(--c-ink);
+  text-decoration: none;
+}
+
+.problem-card:hover {
+  text-decoration: none;
+}
+
+.problem-card .statement {
+  font-family: var(--font-display);
+  font-weight: var(--fw-heading);
+  font-size: var(--t-h3);
+  line-height: 1.15;
+  letter-spacing: var(--ls-h3);
+}
+
+.problem-card.lead .statement {
+  font-size: var(--t-card-title);
+}
+
+.problem-card .meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-5);
+  font-size: var(--t-meta-sm);
+  color: var(--c-muted);
+  margin-top: auto;
+}
+
+.problem-card .solver {
+  display: flex;
+  align-items: center;
+  gap: var(--s-6);
+  margin-top: auto;
+}
+
+/* --- The tool page -------------------------------------------------------- */
+.crumbs {
+  display: flex;
+  gap: var(--s-3);
+  align-items: center;
+  font-size: var(--t-meta);
+  color: var(--c-muted);
+}
+
+.crumbs a {
+  color: var(--c-muted);
+}
+
+.toolpage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--s-17);
+  align-items: start;
+}
+
+.toolpage > .column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-16);
+  min-width: 0;
+}
+
+.toolpage aside {
+  position: sticky;
+  top: var(--s-11);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-6);
+}
+
+.toolpage section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-6);
+}
+
+.stars {
+  display: inline-flex;
+  gap: 2px;
+}
+
+/* One row of the rating histogram. */
+.barrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  font-size: var(--t-micro);
+}
+
+.barrow-track {
+  flex: 1;
+  height: 12px;
+  border-radius: var(--r-pill);
+  background: var(--c-track);
+  border: var(--border);
+  overflow: hidden;
+}
+
+.barrow-fill {
+  height: 100%;
+  background: var(--c-violet);
+}
+
+.review {
+  padding: var(--s-11) 0;
+  border-top: var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-5);
+}
+
+.avatar {
+  border-radius: 50%;
+  border: var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-weight: var(--fw-display);
+  flex: none;
+  background: var(--c-sunk);
+  color: var(--c-ink);
+}
+
+/* The problem statements a listing claims, each one a search of its own. */
+.problem-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-7);
+  padding: var(--s-6) var(--s-9);
+  color: var(--c-ink);
+  text-decoration: none;
+}
+
+.problem-row:hover {
+  background: var(--c-tint);
+  text-decoration: none;
+}
+
+.problem-row .statement {
+  font-family: var(--font-display);
+  font-weight: var(--fw-heading);
+  font-size: 20px;
+  letter-spacing: var(--ls-h3);
+  line-height: var(--lh-snug);
+}
+
+.facts-note {
+  font-size: var(--t-meta-sm);
+  color: var(--c-muted);
+  line-height: var(--lh-body);
+  padding: 0 var(--s-1);
+}
+
+/* --- Section headers shared by browse, top and the homepage --------------- */
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-11);
+  margin-bottom: var(--s-10);
+}
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: var(--s-11);
+}
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+}
+
+/* The one control the whole tool page exists for. Taller than a normal
+ * button, because it is not a normal button. */
+.btn-outbound {
+  height: 56px;
+  font-size: var(--t-body-lg);
+}
+
+/* A single-line input inside the bordered field, for the small search box in
+ * the browse header. The textarea rule above covers the big one. */
+.field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  color: var(--c-ink);
+}
+
+.field input::placeholder {
+  color: var(--c-muted);
+}

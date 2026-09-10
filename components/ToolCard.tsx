@@ -2,10 +2,10 @@ import Link from 'next/link';
 import type { CSSProperties } from 'react';
 
 import { Button } from './Button';
-import { SatisfactionChip } from './Chip';
+import { SatisfactionChip, Tag } from './Chip';
 import { FitMeter } from './FitMeter';
 import { Icon } from './Icon';
-import { OutboundButton } from './OutboundLink';
+import { OutboundButton, OutboundDomain } from './OutboundLink';
 import { ToolTile } from './ToolTile';
 
 /**
@@ -36,8 +36,20 @@ export interface ToolCardProps {
   url?: string | null;
   fit?: number;
   fitLabel?: string;
+  /**
+   * What matched, in words, for a card that has no calibrated number to show.
+   * Drawn where the meter goes. See lib/results.ts: the label is a band, the
+   * note is the fact underneath it, and neither is a rescaled score.
+   */
+  band?: { label: string; note: string; tone: 'strong' | 'possible' | 'loose' };
   why?: string;
   satisfactions?: Satisfaction[];
+  /**
+   * Neutral facts about the tool — how it is paid for, what it promises — for
+   * a search that stated no constraints. A fact is a tag, not a tick: there is
+   * nothing to meet when nothing was asked for.
+   */
+  facts?: string[];
   rating?: string;
   ratingCount?: string;
   likes?: string;
@@ -55,8 +67,10 @@ export function ToolCard({
   url,
   fit,
   fitLabel,
+  band,
   why,
   satisfactions,
+  facts,
   rating,
   ratingCount,
   likes,
@@ -72,6 +86,13 @@ export function ToolCard({
   return (
     <article className={big ? 'card hov rise toolcard big' : 'card hov rise toolcard'} style={style}>
       {typeof fit === 'number' ? <FitMeter fit={fit} label={fitLabel} /> : null}
+
+      {band ? (
+        <div className={`band band-${band.tone}`}>
+          <span className="band-label">{band.label}</span>
+          <span>{band.note}</span>
+        </div>
+      ) : null}
 
       <div className="toolcard-head">
         <ToolTile name={name} slug={slug} size={big ? 60 : 48} />
@@ -93,6 +114,12 @@ export function ToolCard({
         <div className="toolcard-chips">
           {satisfactions.map((s) => (
             <SatisfactionChip key={s.label} label={s.label} met={s.met} />
+          ))}
+        </div>
+      ) : facts && facts.length > 0 ? (
+        <div className="toolcard-chips">
+          {facts.map((fact) => (
+            <Tag key={fact}>{fact}</Tag>
           ))}
         </div>
       ) : null}
@@ -126,10 +153,17 @@ export function ToolCard({
           <span id={`save-later-${slug}`} className="sr-only">
             Saving needs an account and is not available yet.
           </span>
-          {big && url ? (
-            <OutboundButton url={url} size="sm">
-              Open {name}
-            </OutboundButton>
+          {/* docs/product-decisions.md §12: every result carries the link to
+              the address the maker entered, with the domain beside it so a
+              person can see where they are going before they go. Our server
+              never asks that address for anything. */}
+          {url ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+              <OutboundButton url={url} size="sm">
+                {big ? `Open ${name}` : 'Open'}
+              </OutboundButton>
+              <OutboundDomain url={url} />
+            </div>
           ) : null}
         </div>
       </div>

@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 
 import { Icon } from './Icon';
@@ -68,6 +69,63 @@ export function Chip({
         </>
       ) : null}
     </button>
+  );
+}
+
+/**
+ * A chip that navigates: the category filters on browse and top, and the
+ * constraint chips on results, whose cross removes the constraint by going to
+ * the same search without it.
+ *
+ * An anchor rather than a button on purpose. The whole of Phase 2's interface
+ * is server-rendered and every state it can be in is a URL, so filtering and
+ * un-filtering work with JavaScript switched off, can be opened in a new tab,
+ * and leave something to link to.
+ */
+export interface ChipLinkProps {
+  href: string;
+  label: ReactNode;
+  state?: ChipState;
+  small?: boolean;
+  /** Draws the cross. The link itself is what removes the constraint. */
+  removable?: boolean;
+  /** What the cross means, for a screen reader: "Search without Free". */
+  removeLabel?: string;
+  current?: boolean;
+  title?: string;
+  className?: string;
+}
+
+export function ChipLink({
+  href,
+  label,
+  state = 'plain',
+  small = true,
+  removable = false,
+  removeLabel,
+  current = false,
+  title,
+  className,
+}: ChipLinkProps) {
+  const cls = ['pill', small ? 'sm' : '', STATE_CLASS[state], className].filter(Boolean).join(' ');
+  const crossColour = state === 'explicit' ? 'var(--c-on-fill)' : 'currentColor';
+
+  return (
+    <Link
+      href={href}
+      className={cls}
+      title={title}
+      aria-current={current ? 'page' : undefined}
+      style={{ textDecoration: 'none' }}
+    >
+      {label}
+      {removable ? (
+        <>
+          <Icon name="x" size={14} color={crossColour} strokeWidth={2.25} />
+          <span className="sr-only">{removeLabel ?? 'Remove this constraint'}</span>
+        </>
+      ) : null}
+    </Link>
   );
 }
 

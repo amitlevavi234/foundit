@@ -27,10 +27,14 @@ export interface SearchFieldProps {
   defaultValue?: string;
   placeholder?: string;
   label?: string;
-  /** The homepage box; smaller variants come later with the results screen. */
-  size?: 'lg';
+  /** `lg` is the homepage box; `sm` is the dock at the foot of the results. */
+  size?: 'lg' | 'sm';
   autoFocus?: boolean;
   shadow?: 'violet' | 'lime' | 'coral' | 'ink';
+  /** Constraints and filters that should survive the next search, as a GET. */
+  hidden?: Record<string, string>;
+  /** One line in the dock, two on the homepage. */
+  rows?: number;
 }
 
 const SHADOW_CLASS = {
@@ -49,6 +53,8 @@ export function SearchField({
   size = 'lg',
   autoFocus = false,
   shadow = 'violet',
+  hidden,
+  rows = size === 'sm' ? 1 : 2,
 }: SearchFieldProps) {
   const id = useId();
   const [value, setValue] = useState(defaultValue);
@@ -72,10 +78,16 @@ export function SearchField({
       <label className="sr-only" htmlFor={id}>
         {label}
       </label>
+      {hidden
+        ? Object.entries(hidden).map(([key, value]) => (
+            <input key={key} type="hidden" name={key} value={value} />
+          ))
+        : null}
+
       <textarea
         id={id}
         name={name}
-        rows={2}
+        rows={rows}
         maxLength={MAX_QUERY_LENGTH}
         value={value}
         onChange={(e) => setValue(e.target.value)}

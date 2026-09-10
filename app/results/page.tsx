@@ -1,0 +1,438 @@
+import type { Metadata } from 'next';
+import Link from 'next/link';
+import { redirect } from 'next/navigation';
+import { after } from 'next/server';
+import { Suspense } from 'react';
+
+import { ChipLink } from '@/components/Chip';
+import { EmptyState } from '@/components/EmptyState';
+import { Mark } from '@/components/Logo';
+import { SearchField } from '@/components/SearchField';
+import { SiteHeader } from '@/components/SiteHeader';
+import { SkeletonGrid } from '@/components/SkeletonCard';
+import { ToolCard } from '@/components/ToolCard';
+import {
+  flagLabel,
+  pricingLabel,
+  readConstraints,
+  satisfactionsFor,
+  toSearchConstraints,
+  type ReadConstraint,
+} from '@/lib/constraints';
+import { logSearchEvent, searchToolsDetailed } from '@/lib/db';
+import { clarifier, matchBand, matchedProblemOf } from '@/lib/results';
+import { QueryTooLongError } from '@/lib/sql';
+import type { ToolResultDetail } from '@/lib/types';
+
+/* ===========================================================================
+ * The results screen — Results.dc.html, and its three companions.
+ *
+ * A conversation, not a search engine page: what was asked sits at the top in
+ * the person's own words, what we understood sits under it as chips they can
+ * switch off, and the box at the bottom is for changing their mind.
+ *
+ * The four states are the four artboards.
+ *
+ *   ResultsLoading    the Suspense fallback below. The shell — the question,
+ *                     the chips, the dock — is rendered from the URL alone and
+ *                     streams immediately; only the answer waits on Postgres.
+ *   Results           the grid.
+ *   ResultsEmpty      nothing matched: say so, and offer to loosen exactly one
+ *                     of the constraints that were understood.
+ *   ResultsClarifier  one question, when a short sentence came back scattered
+ *                     across the catalogue. See lib/results.ts.
+ *
+ * What is deliberately not here: a fit percentage. `score` is an ordering
+ * number, and Phase 5 owns turning it into something a person can be told.
+ * Each card says where it matched instead, which is a fact the database
+ * reports rather than a number we invented.
+ * ======================================================================== */
+
+export const metadata: Metadata = {
+  title: 'Results',
+  // A results URL carries what somebody typed. It is not for an index.
+  robots: { index: false, follow: false },
+};
+
+export const dynamic = 'force-dynamic';
+
+const RESULT_LIMIT = 12;
+
+interface ResultsProps {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+function one(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function many(value: string | string[] | undefined): string[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+/**
+ * Every state of this screen is a URL, so every control on it is a link: the
+ * chips that switch a constraint off, the clarifier's answers, and the empty
+ * state's offer to loosen one thing. Nothing here needs JavaScript to work,
+ * and every state can be shared, reloaded and gone back to.
+ */
+function href(params: {
+  q: string;
+  drop?: readonly string[];
+  category?: string | null;
+  skip?: boolean;
+}): string {
+  const search = new URLSearchParams();
+  search.set('q', params.q);
+  for (const key of params.drop ?? []) search.append('drop', key);
+  if (params.category) search.set('in', params.category);
+  if (params.skip) search.set('skip', '1');
+  return `/results?${search.toString()}`;
+}
+
+export default async function Results({ searchParams }: ResultsProps) {
+  const params = await searchParams;
+  const query = (one(params.q) ?? '').trim();
+
+  // Nothing to answer. The homepage is where a question gets asked.
+  if (!query) redirect('/');
+
+  const dropped = many(params.drop);
+  const category = one(params.in) ?? null;
+  const skipped = one(params.skip) === '1';
+
+  const constraints = readConstraints(query, dropped);
+  const droppedConstraints = readConstraints(query).filter((c) => dropped.includes(c.key));
+
+  return (
+    <div className="page">
+      <SiteHeader />
+
+      <main
+        id="main"
+        className="shell"
+        style={{
+          padding: '8px 56px 40px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 26,
+          flex: 1,
+        }}
+      >
+        <div className="bubble">
+          <div>{query}</div>
+        </div>
+
+        <div className="answer">
+          <Mark size={40} />
+          <div className="answer-body">
+            <div className="understood">
+              <span className="understood-label">
+                {constraints.length > 0 || droppedConstraints.length > 0
+                  ? 'Here’s what I understood'
+                  : 'No constraints read from this one'}
+              </span>
+
+              {constraints.map((c) => (
+                <ChipLink
+                  key={c.key}
+                  href={href({ q: query, drop: [...dropped, c.key], category, skip: skipped })}
+                  label={c.label}
+                  state="explicit"
+                  removable
+                  removeLabel={`Search again without ${c.label}`}
+                  title={`${c.label} — a filter, not a preference. Remove it to widen the search.`}
+                />
+              ))}
+
+              {droppedConstraints.map((c) => (
+                <ChipLink
+                  key={c.key}
+                  href={href({
+                    q: query,
+                    drop: dropped.filter((key) => key !== c.key),
+                    category,
+                    skip: skipped,
+                  })}
+                  label={c.label}
+                  state="removed"
+                  title={`${c.label} — you switched this off. Put it back.`}
+                />
+              ))}
+            </div>
+
+            <Suspense key={`${query}|${dropped.join(',')}|${category}`} fallback={<Loading />}>
+              <Answer
+                query={query}
+                constraints={constraints}
+                dropped={dropped}
+                category={category}
+                skipped={skipped}
+              />
+            </Suspense>
+          </div>
+        </div>
+      </main>
+
+      <div className="chatdock">
+        <SearchField
+          action="/results"
+          size="sm"
+          shadow="violet"
+          placeholder="Add more, or change something. e.g. “it also needs to work offline” or “forget Spanish, English is fine”"
+          label="Change what you asked for"
+        />
+      </div>
+    </div>
+  );
+}
+
+/** ResultsLoading.dc.html: the machine is thinking, and says what it is doing. */
+function Loading() {
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingTop: 8 }}>
+        <span className="spinner" aria-hidden="true" />
+        <span className="disp" style={{ fontSize: 22, fontWeight: 700 }} role="status">
+          Matching against the catalogue…
+        </span>
+        <span className="faint" style={{ fontSize: 'var(--t-meta)' }}>
+          Read your request · ranking what fits
+        </span>
+      </div>
+      <SkeletonGrid />
+    </>
+  );
+}
+
+interface AnswerProps {
+  query: string;
+  constraints: ReadConstraint[];
+  dropped: string[];
+  category: string | null;
+  skipped: boolean;
+}
+
+async function Answer({ query, constraints, dropped, category, skipped }: AnswerProps) {
+  let results: ToolResultDetail[] = [];
+  let tooLong = false;
+
+  const startedAt = performance.now();
+  try {
+    results = await searchToolsDetailed(
+      query,
+      toSearchConstraints(constraints),
+      RESULT_LIMIT,
+      category,
+    );
+  } catch (error) {
+    if (error instanceof QueryTooLongError) {
+      tooLong = true;
+    } else {
+      throw error;
+    }
+  }
+  const latencyMs = Math.round(performance.now() - startedAt);
+
+  if (!tooLong) {
+    const top = results[0];
+    // After the response has gone out, never before it. Nothing identifying is
+    // passed, because there is nothing to pass: the event has no user field
+    // and `public.search_events` has no user column.
+    after(() => {
+      logSearchEvent({
+        query,
+        resultCount: results.length,
+        topScore: top ? top.score : null,
+        hadGoodMatch: results.length > 0,
+        latencyMs,
+      });
+    });
+  }
+
+  if (tooLong) {
+    return (
+      <EmptyState title="That’s a long one.">
+        A search is capped at <strong>200 characters</strong>, which is about two sentences. Trim it
+        to the part that describes the problem and try again.
+      </EmptyState>
+    );
+  }
+
+  if (results.length === 0) {
+    return <Nothing query={query} constraints={constraints} dropped={dropped} />;
+  }
+
+  const question = clarifier({
+    query,
+    results,
+    answered: skipped || Boolean(category),
+    constraintCount: constraints.length,
+  });
+
+  return (
+    <>
+      {question ? (
+        <section
+          className="slab slab-coral rise"
+          style={{
+            padding: '28px 30px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 16,
+            maxWidth: 760,
+            animationDelay: '150ms',
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--c-coral)' }}>
+            One quick question
+          </div>
+          <h2 className="disp" style={{ fontSize: 30, fontWeight: 800, lineHeight: 1.1, margin: 0 }}>
+            {question.question}
+          </h2>
+          <p className="muted" style={{ margin: 0, fontSize: 'var(--t-body-sm)' }}>
+            Your sentence fits several corners of the catalogue at once. Picking one narrows what is
+            below; the results are already there either way. You’ll only get one question per
+            search.
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 4 }}>
+            {question.options.map((option) => (
+              <ChipLink
+                key={option.slug}
+                href={href({ q: query, drop: dropped, category: option.slug })}
+                label={`${option.name} · ${option.count}`}
+                small={false}
+              />
+            ))}
+            <Link
+              href={href({ q: query, drop: dropped, skip: true })}
+              className="ghost ghost-tall"
+              style={{ textDecoration: 'none' }}
+            >
+              Skip, show me everything
+            </Link>
+          </div>
+        </section>
+      ) : null}
+
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16 }}>
+        <div>
+          {/* The page asks for twelve. Saying "12 tools fit" when twelve is
+              also the ceiling would be a count of the page rather than of the
+              answer, so a full page says so instead. */}
+          <span className="disp" style={{ fontSize: 'var(--t-display-lg)', fontWeight: 800 }}>
+            {results.length >= RESULT_LIMIT
+              ? `The ${results.length} that fit best.`
+              : `${results.length} ${results.length === 1 ? 'tool fits' : 'tools fit'}.`}
+          </span>{' '}
+          {category ? (
+            <span className="muted" style={{ fontSize: 'var(--t-body-lg)' }}>
+              Narrowed to {results[0]?.categoryName ?? category}.{' '}
+              <Link href={href({ q: query, drop: dropped, skip: true })}>Show everything</Link>
+            </span>
+          ) : null}
+        </div>
+        <div className="muted" style={{ fontSize: 'var(--t-body-sm)' }}>
+          Sorted by{' '}
+          <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
+            best match
+          </strong>
+        </div>
+      </div>
+
+      <div className="results-grid">
+        {results.map((result, i) => {
+          const band = matchBand(result.matchSource);
+          const problem = matchedProblemOf(result);
+          const satisfactions = satisfactionsFor(result, constraints);
+
+          return (
+            <ToolCard
+              key={result.slug}
+              name={result.name}
+              slug={result.slug}
+              summary={result.summary}
+              url={result.url}
+              big={i === 0}
+              index={i}
+              {...(band ? { band } : {})}
+              {...(problem ? { why: `They list this problem: “${problem}”` } : {})}
+              {...(satisfactions.length > 0
+                ? { satisfactions }
+                : { facts: factsOf(result).slice(0, 3) })}
+              {...(result.ratingAvg !== null
+                ? { rating: result.ratingAvg.toFixed(1), ratingCount: String(result.ratingCount) }
+                : {})}
+              {...(result.likeCount > 0 ? { likes: String(result.likeCount) } : {})}
+            />
+          );
+        })}
+      </div>
+
+      <div className="muted" style={{ fontSize: 'var(--t-meta)' }}>
+        Not quite it? Tell me what to change below. Search stays free, and no account is needed.
+      </div>
+    </>
+  );
+}
+
+/**
+ * With no constraints stated there is nothing to tick off, so the chips fall
+ * back to what the tool actually is: how it is paid for, and the two or three
+ * facts the catalogue keeps about it.
+ */
+function factsOf(result: ToolResultDetail): string[] {
+  return [pricingLabel(result.pricing), ...result.flags.map(flagLabel)];
+}
+
+/** ResultsEmpty.dc.html. Not a shrug: what was asked, and what to give up. */
+function Nothing({
+  query,
+  constraints,
+  dropped,
+}: {
+  query: string;
+  constraints: ReadConstraint[];
+  dropped: string[];
+}) {
+  const stated = constraints.map((c) => c.label.toLowerCase());
+
+  return (
+    <EmptyState
+      loosen={constraints.map((c) => ({
+        label: `Drop ${c.label.toLowerCase()}`,
+        // A loosened search is its own URL. The artboard puts a count behind
+        // each of these ("· 3 tools"); counting them would mean one more
+        // search per constraint, which is the fan-out this codebase does not
+        // do, so the number is left out rather than guessed.
+        href: href({ q: query, drop: [...dropped, c.key] }),
+      }))}
+      loosenTitle="Closest we can get, if you loosen one constraint"
+      actions={
+        <>
+          <Link href="/browse" className="btn btn-coral" style={{ textDecoration: 'none' }}>
+            Browse what the catalogue does have
+          </Link>
+          <Link href="/" className="btn btn-sm" style={{ textDecoration: 'none' }}>
+            Start a new search
+          </Link>
+        </>
+      }
+    >
+      {stated.length > 0 ? (
+        <>
+          Foundit only recommends tools people can stand behind, and nothing in the catalogue meets
+          all of this at once: <strong>{stated.join(', ')}</strong>. A constraint here is a filter,
+          not a preference — if you say free, a paid tool does not appear however well it fits.
+        </>
+      ) : (
+        <>
+          Foundit only recommends tools people can stand behind, and nothing in the catalogue
+          answers this yet. Try describing the situation rather than the tool: what you are trying
+          to get done, and what would make an answer unusable.
+        </>
+      )}
+    </EmptyState>
+  );
+}

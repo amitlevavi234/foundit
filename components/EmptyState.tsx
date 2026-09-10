@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 
-import { Chip } from './Chip';
+import { Chip, ChipLink } from './Chip';
 
 /**
  * "We don't have a good answer for this yet." — ResultsEmpty.dc.html.
@@ -46,24 +46,28 @@ export function EmptyState({
         <div className="empty-loosen">
           <div className="empty-loosen-title">{loosenTitle}</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {loosen.map((option) => (
-              <Chip
-                key={option.label}
-                state="plain"
-                onClick={option.onSelect}
-                label={
-                  <>
-                    {option.label}
-                    {option.count ? (
-                      <span className="muted" style={{ fontWeight: 'var(--fw-medium)' }}>
-                        {' '}
-                        · {option.count}
-                      </span>
-                    ) : null}
-                  </>
-                }
-              />
-            ))}
+            {loosen.map((option) => {
+              const label = (
+                <>
+                  {option.label}
+                  {option.count ? (
+                    <span className="muted" style={{ fontWeight: 'var(--fw-medium)' }}>
+                      {' '}
+                      · {option.count}
+                    </span>
+                  ) : null}
+                </>
+              );
+
+              // A loosened search is a different URL, so where one is given the
+              // chip is a link: it survives a reload, a new tab and a browser
+              // with JavaScript switched off.
+              return option.href ? (
+                <ChipLink key={option.label} href={option.href} label={label} state="plain" />
+              ) : (
+                <Chip key={option.label} state="plain" onClick={option.onSelect} label={label} />
+              );
+            })}
           </div>
         </div>
       ) : null}

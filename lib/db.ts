@@ -2,8 +2,26 @@ import 'server-only';
 
 import pg from 'pg';
 
-import { runLogSearchEvent, runSearch } from './sql';
-import type { SearchConstraints, SearchEvent, ToolResult } from './types';
+import {
+  runBrowse,
+  runHome,
+  runLogSearchEvent,
+  runSearch,
+  runSearchDetailed,
+  runToolPage,
+  runTop,
+} from './sql';
+import type {
+  BrowseData,
+  HomeData,
+  SearchConstraints,
+  SearchEvent,
+  ToolPageData,
+  ToolResult,
+  ToolResultDetail,
+  TopData,
+  TopRanking,
+} from './types';
 
 /* ===========================================================================
  * The application's only door to PostgreSQL.
@@ -13,9 +31,13 @@ import type { SearchConstraints, SearchEvent, ToolResult } from './types';
  * silently switch every policy in the schema off. The owner's connection
  * string belongs to migrations and appears nowhere in this codebase.
  *
- * Two functions leave this module and no more. There is no `query()` escape
- * hatch on purpose: filtering and ranking live in SQL, and a general-purpose
- * query helper is how they stop living there.
+ * One function per screen leaves this module, and no more. There is no
+ * `query()` escape hatch on purpose: filtering and ranking live in SQL, and a
+ * general-purpose query helper is how they stop living there.
+ *
+ * Every one of them is a single round trip. A screen that needs a list and
+ * something about each item in the list asks PostgreSQL for both in one
+ * statement — see lib/sql.ts — rather than looping.
  * ======================================================================== */
 
 /**
@@ -108,6 +130,57 @@ export async function searchTools(
   limit = 20,
 ): Promise<ToolResult[]> {
   return runSearch(getPool(), query, constraints, limit);
+}
+
+/**
+ * The results screen's search: the same ranking, with the columns a result
+ * card draws — the maker's address, the platforms, the languages, the flags,
+ * the counters, the category and the tool's own problem statement that matched
+ * — joined on inside the same statement.
+ *
+ * `category` narrows an existing search to one category, which is what the
+ * clarifier's answers do. `search_tools` has no category argument, so that
+ * narrowing happens in SQL around it, over a wider window; nothing is filtered
+ * or reordered here.
+ */
+export async function searchToolsDetailed(
+  query: string,
+  constraints: SearchConstraints = {},
+  limit = 12,
+  category: string | null = null,
+): Promise<ToolResultDetail[]> {
+  return runSearchDetailed(getPool(), query, constraints, limit, category);
+}
+
+/** Everything the homepage draws. One round trip. */
+export async function getHome(topLimit = 6, foundLimit = 3): Promise<HomeData> {
+  return runHome(getPool(), topLimit, foundLimit);
+}
+
+/** Everything /browse draws, for all categories or one. One round trip. */
+export async function getBrowse(
+  category: string | null = null,
+  limit = 12,
+): Promise<BrowseData> {
+  return runBrowse(getPool(), category, limit);
+}
+
+/** Everything /top draws, ranked by a real counter. One round trip. */
+export async function getTop(
+  category: string | null = null,
+  ranking: TopRanking = 'likes',
+  limit = 25,
+): Promise<TopData> {
+  return runTop(getPool(), category, ranking, limit);
+}
+
+/**
+ * One tool page — the listing, its problems, its reviews and their bylines,
+ * the ratings and three alternatives — or `null` if no published tool has that
+ * slug. One round trip, however many sections the page has.
+ */
+export async function getToolPage(slug: string, reviewLimit = 10): Promise<ToolPageData | null> {
+  return runToolPage(getPool(), slug, reviewLimit);
 }
 
 /**
