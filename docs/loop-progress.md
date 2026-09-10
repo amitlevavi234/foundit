@@ -113,11 +113,11 @@ Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
 | Reduced motion zeroed duration but not delay — content invisible for 1.09 s | Fixed. Canvas `RM` block still has the omission — noted in `motion.css` |
 | `/components` drew a fit percentage | Fixed. Captioned as a specimen |
 | `/top` claimed every row links out | Fixed. Sentence made true |
-| Clarifier fired on 5 of 6 short queries | Fixed. 1 of 6; needs top category < 50% and options ≥ 2 |
+| Clarifier fired on 5 of 6 short queries | Fixed. **2 of 6** against the live catalogue ("share files", "make a list"); needs top category < 50% and options ≥ 2. An earlier note here said 1 of 6 — the second review measured it and that was wrong |
 
 ### Found along the way, unasked
 
-- **Hebrew and Russian "free" never matched** — `` is ASCII-only. Unicode boundaries now.
+- **Hebrew and Russian "free" never matched** — the regex boundary `\b` is ASCII-only. Unicode boundaries now. **Half-true as first recorded:** bare `חינם` matched after the fix but `בחינם` — the ordinary way to say "for free" — did not, because the new boundary rejected Hebrew's attached prefixes. Caught by the second review; fixed after it.
 - **The eval could not see the shipped path.** `--read-query` added: authored 0.4878, derived **0.4785**. The reader costs 0.009 nDCG in eight queries. That is Phase 4's number to beat.
 - The deploy pipeline in `research/10` does not exist yet — no Dockerfile, no Caddyfile, no deploy workflow. Phase 9.
 - `research/10` §6.6's Dockerfile would fail as written (`COPY public/` when there is no `public/`).
