@@ -1,0 +1,174 @@
+/* ===========================================================================
+ * Foundit — motion. CSS only, no JavaScript animation anywhere.
+ *
+ * Every keyframe here comes from design/canvas/build.mjs. The reduced-motion
+ * block at the bottom is the `RM` constant from that file, verbatim, and it is
+ * the last thing in this file so nothing can out-specify it.
+ *
+ * Two rules from the artboards that are easy to lose:
+ *   - no blur filters, anywhere;
+ *   - no rotation on anything containing text.
+ * Both made type render soft. `bob` and `drop` rotate, so they are reserved for
+ * the decorative SVG machinery, which carries no live text.
+ * ======================================================================== */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes sweep {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(320%);
+  }
+}
+
+@keyframes meter {
+  from {
+    width: 0;
+  }
+  to {
+    width: var(--w);
+  }
+}
+
+@keyframes meterbadge {
+  from {
+    left: 0;
+  }
+  to {
+    left: var(--w);
+  }
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.25);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* The count-up. `--n` is registered as an integer so it interpolates; the
+ * numeral is then rendered by a CSS counter. In a browser without @property
+ * the interpolation is discrete and the number jumps straight to its final
+ * value, which is the right way for this to fail. */
+@property --n {
+  syntax: '<integer>';
+  initial-value: 0;
+  inherits: false;
+}
+
+@keyframes countup {
+  from {
+    --n: 0;
+  }
+  to {
+    --n: var(--t);
+  }
+}
+
+.count {
+  counter-reset: n var(--n);
+  animation: countup var(--d-count) var(--ease-out) var(--delay-count) both;
+}
+
+.count::after {
+  content: counter(n);
+}
+
+/* Entrance. Cards and slabs rise once, staggered by an inline delay. */
+.rise {
+  animation: rise var(--d-rise) var(--ease-spring) both;
+}
+
+/* The coral highlight that sweeps in behind the homepage headline. Drawn as a
+ * background block, not a filter, so the type on top stays sharp. */
+.hl {
+  position: relative;
+  display: inline-block;
+}
+
+.hl::before {
+  content: '';
+  position: absolute;
+  inset: 12% -2% 6% -2%;
+  background: var(--c-coral);
+  z-index: -1;
+  transform-origin: left;
+  border-radius: var(--r-xs);
+  animation: sweep var(--d-sweep) var(--ease-out) var(--delay-sweep) both;
+}
+
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 22px;
+  background: var(--c-coral);
+  vertical-align: -4px;
+  margin-left: 2px;
+  animation: caret 1s steps(2) infinite;
+}
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 3px solid var(--c-rule);
+  border-top-color: var(--c-coral);
+  animation: spin 0.9s linear infinite;
+  flex: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * `RM` from design/canvas/build.mjs. Last in the file, and the only place in
+ * the codebase that is allowed to switch motion off wholesale.
+ *
+ * It reduces rather than removes: every animation still runs, for 0.01ms, with
+ * `both` fill, so anything whose final state is set by its keyframes — the fit
+ * meter's width, the badge's position, the counted numeral — lands on that
+ * final state instead of being stuck at zero.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

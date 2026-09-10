@@ -1,0 +1,199 @@
+/* ===========================================================================
+ * Foundit — design tokens.
+ *
+ * Every value here is read out of design/canvas/build.mjs, which generates the
+ * 36 artboards in design/canvas/. That file is the specification; this file is
+ * the same numbers in a form the browser can use. If a value disagrees with the
+ * canvas, the canvas is right and this file is wrong.
+ *
+ *   palette      -> the `A` object at the top of build.mjs
+ *   motion       -> the @keyframes block and the transitions on .btn/.pill/.card
+ *   shadows      -> the neo-brutalist offsets and their pressed-down hover state
+ *   type scale   -> the font-size literals used across the artboards
+ *
+ * Direction: neo-brutalist "Toybox". Cream ground, 2px ink borders, offset
+ * shadows that press down on hover, coral for actions, violet for structure,
+ * lime for reward. No blur filters and no rotation on anything containing text
+ * — both made type render soft (docs/product-decisions.md §9).
+ * ======================================================================== */
+
+:root {
+  /* --- Palette. Verbatim from `A` in build.mjs ---------------------------- */
+  --c-bg: #fffcf5; /* cream ground */
+  --c-surface: #ffffff;
+  --c-tint: #f1ecff; /* violet wash: "why it matches", met chips, hovers */
+  --c-sunk: #f6f2ea; /* recessed fill: table headers, disabled, skeletons */
+  --c-ink: #1c1a24; /* every border, every rule, most text */
+  --c-muted: #6b6780;
+  --c-faint: #9a96ad;
+  --c-coral: #ff5a3c; /* the action colour */
+  --c-violet: #6e4bf6; /* the structural colour */
+  --c-lime: #b8f04a; /* the reward colour */
+  --c-amber: #f2b84b; /* needs attention */
+  --c-amber-ink: #7a5216;
+  --c-rule: #e8e3d8; /* the quiet border */
+  --c-red: #d93b2b; /* destructive only */
+
+  /* Two greys that appear inline in the artboards rather than in `A`. */
+  --c-track: #efebe2; /* the meter's unfilled track */
+  --c-unmet: #f1efea; /* an unmet satisfaction chip */
+
+  /* Text on a filled coral or violet surface. */
+  --c-on-fill: #ffffff;
+
+  /* --- Type ------------------------------------------------------------- */
+  --font-display: var(--font-bricolage), 'Bricolage Grotesque', 'Segoe UI', system-ui, sans-serif;
+  --font-body: var(--font-onest), Onest, 'Segoe UI', system-ui, sans-serif;
+
+  /* The display scale, as used on the artboards. */
+  --t-hero: 78px; /* homepage h1 */
+  --t-title: 54px; /* browse / top tools h1 */
+  --t-tool: 52px; /* tool detail h1 */
+  --t-sheet: 46px; /* component sheet h1 */
+  --t-section: 38px; /* homepage section heading */
+  --t-display-lg: 34px; /* "3 tools fit.", big card tool name */
+  --t-h2: 32px; /* .h2 */
+  --t-display-md: 30px;
+  --t-display-sm: 26px; /* small card tool name */
+  --t-h3: 22px; /* .h3, card title on browse */
+  --t-card-title: 24px;
+
+  /* The interface scale. */
+  --t-lead: 19px;
+  --t-body-lg: 17px;
+  --t-body: 16px;
+  --t-body-sm: 15px;
+  --t-meta: 14px;
+  --t-meta-sm: 13.5px;
+  --t-micro: 13px;
+  --t-micro-sm: 12.5px;
+
+  --lh-display: 1;
+  --lh-tight: 1.1;
+  --lh-snug: 1.2;
+  --lh-body: 1.5;
+  --lh-prose: 1.6;
+
+  --ls-display: -0.02em;
+  --ls-h2: -0.015em;
+  --ls-h3: -0.01em;
+
+  --fw-display: 800;
+  --fw-heading: 700;
+  --fw-semibold: 600;
+  --fw-medium: 500;
+  --fw-regular: 400;
+
+  /* --- Spacing ---------------------------------------------------------- */
+  --s-1: 4px;
+  --s-2: 6px;
+  --s-3: 8px;
+  --s-4: 10px;
+  --s-5: 12px;
+  --s-6: 14px;
+  --s-7: 16px;
+  --s-8: 18px;
+  --s-9: 20px;
+  --s-10: 22px;
+  --s-11: 24px;
+  --s-12: 26px;
+  --s-13: 28px;
+  --s-14: 32px;
+  --s-15: 40px;
+  --s-16: 48px;
+  --s-17: 56px;
+  --s-18: 72px;
+
+  /* The page. Every screen is designed at 1440x900 and scrolls normally. */
+  --page-max: 1280px;
+  --page-gutter: 56px;
+  --header-h: 84px;
+
+  /* --- Radii ------------------------------------------------------------ */
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 12px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-2xl: 20px;
+  --r-pill: 999px;
+
+  /* --- Borders ---------------------------------------------------------- */
+  --border: 2px solid var(--c-ink); /* the ink border, always 2px */
+  --border-quiet: 1.5px solid var(--c-rule);
+  --border-soft: 2px solid var(--c-rule);
+
+  /* --- The neo-brutalist shadow, and its pressed-down state -------------- */
+  /* Buttons: 4px, hover moves 2px into the shadow, press lands flat. */
+  --sh-btn: 4px 4px 0 var(--c-ink);
+  --sh-btn-hover: 2px 2px 0 var(--c-ink);
+  --sh-btn-active: 0 0 0 var(--c-ink);
+  --press-btn-hover: translate(2px, 2px);
+  --press-btn-active: translate(4px, 4px);
+
+  /* Pills: 3px, a shallower press. */
+  --sh-pill: 3px 3px 0 var(--c-ink);
+  --sh-pill-hover: 2px 2px 0 var(--c-ink);
+  --sh-pill-active: 0 0 0 var(--c-ink);
+  --press-pill-hover: translate(1px, 1px);
+  --press-pill-active: translate(3px, 3px);
+
+  /* Cards: 6px, hover moves 3px in. */
+  --sh-card: 6px 6px 0 var(--c-ink);
+  --sh-card-hover: 3px 3px 0 var(--c-ink);
+  --press-card-hover: translate(3px, 3px);
+
+  /* Slabs are cards whose shadow carries a colour. */
+  --sh-slab: 6px 6px 0 var(--c-violet);
+  --sh-slab-lime: 6px 6px 0 var(--c-lime);
+  --sh-slab-coral: 6px 6px 0 var(--c-coral);
+  --sh-slab-ink: 6px 6px 0 var(--c-ink);
+  --sh-slab-lg: 8px 8px 0 var(--c-violet);
+
+  --sh-field-hover: 3px 3px 0 var(--c-violet);
+  --sh-badge: 3px 3px 0 var(--c-ink);
+
+  /* --- Control sizes ---------------------------------------------------- */
+  --h-btn: 52px;
+  --h-btn-sm: 42px;
+  --h-btn-xs: 36px;
+  --h-pill: 44px;
+  --h-pill-sm: 36px;
+  --h-chip: 30px;
+  --h-pillstat: 26px;
+  --h-field: 50px;
+  --h-ghost: 36px;
+  --h-tap-min: 44px; /* 44px minimum height for a primary control */
+
+  /* --- Motion ----------------------------------------------------------- */
+  /* The overshoot curve everything springy uses. */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* The decelerating curve the meter, the sweep and the count-up use. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --d-instant: 140ms; /* ghost button hover */
+  --d-fast: 160ms; /* pill, button, field */
+  --d-slab: 180ms;
+  --d-card: 200ms;
+  --d-pop: 320ms; /* heart pop */
+  --d-rise: 420ms; /* card entrance */
+  --d-sweep: 520ms; /* the coral highlight behind the headline */
+  --d-meter: 780ms; /* the fit meter filling */
+  --d-count: 900ms; /* the numeral counting up */
+  --d-shimmer: 1200ms;
+
+  --delay-meter: 250ms;
+  --delay-count: 300ms;
+  --delay-shimmer: 1050ms;
+  --delay-sweep: 600ms;
+
+  /* --- Focus ------------------------------------------------------------ */
+  /* Not in the artboards, and it has to be: keyboard focus must be visible on
+   * every interactive element. Violet on light ground, lime where the element
+   * is already violet or coral, so the ring never disappears into its own fill.
+   */
+  --focus-width: 3px;
+  --focus-offset: 2px;
+  --focus-ring: var(--c-violet);
+  --focus-ring-on-fill: var(--c-lime);
+}

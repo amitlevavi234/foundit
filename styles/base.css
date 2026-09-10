@@ -1,0 +1,186 @@
+/* ===========================================================================
+ * Foundit — base layer. Reset, page ground, typography, focus.
+ * Mirrors the `head` block in design/canvas/build.mjs.
+ * ======================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* The design is desktop web at 1440x900 and scrolls like an ordinary tab. */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--c-bg);
+  color: var(--c-ink);
+  font-family: var(--font-body);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--c-violet);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--c-ink);
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+img,
+svg {
+  vertical-align: middle;
+}
+
+/* --- Focus -----------------------------------------------------------------
+ * The artboards do not draw a focus state. They have to have one: keyboard
+ * focus must be visible on every interactive element, and the offset shadow
+ * is a hover affordance, not a focus one.
+ *
+ * `:focus-visible` only, so a mouse press does not leave a ring behind.
+ *
+ * The one place an inner control drops its own outline is inside a composite
+ * field — `.field` and `.searchbox` are a bordered box wrapped around a bare
+ * input, and they draw the ring themselves on `:focus-within` so the box is
+ * outlined rather than the text area inside it. Two rings, or a ring drawn
+ * inside a border, is the only thing that pattern is avoiding; focus is never
+ * removed, only moved outwards one element.
+ */
+:focus-visible {
+  outline: var(--focus-width) solid var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* On a coral or violet fill the violet ring vanishes; use lime there. */
+.btn-coral:focus-visible,
+.btn-violet:focus-visible,
+.pill.on:focus-visible,
+.fm-badge:focus-visible {
+  outline-color: var(--focus-ring-on-fill);
+}
+
+/* --- Typography ------------------------------------------------------------
+ * Bricolage Grotesque 800 for display, 700 for headings and card titles.
+ * Onest 400 to 600 for everything else.
+ */
+.disp {
+  font-family: var(--font-display);
+  font-weight: var(--fw-display);
+  letter-spacing: var(--ls-display);
+  line-height: var(--lh-display);
+  font-variation-settings: 'opsz' 96, 'wdth' 100;
+}
+
+.h1 {
+  font-family: var(--font-display);
+  font-weight: var(--fw-display);
+  font-size: var(--t-title);
+  letter-spacing: var(--ls-display);
+  line-height: var(--lh-display);
+  margin: 0;
+}
+
+.h2 {
+  font-family: var(--font-display);
+  font-weight: var(--fw-heading);
+  font-size: var(--t-h2);
+  letter-spacing: var(--ls-h2);
+  line-height: var(--lh-tight);
+  margin: 0;
+}
+
+.h3 {
+  font-family: var(--font-display);
+  font-weight: var(--fw-heading);
+  font-size: var(--t-h3);
+  letter-spacing: var(--ls-h3);
+  line-height: var(--lh-snug);
+  margin: 0;
+}
+
+/* Numerals that sit in a column, or animate, must not jitter. */
+.tab {
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--c-muted);
+}
+
+.faint {
+  color: var(--c-faint);
+}
+
+/* Visible to a screen reader, not to the eye. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip link — the header has four nav targets before the search field. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  background: var(--c-surface);
+  border: var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--sh-btn);
+  padding: 10px 16px;
+  font-weight: var(--fw-semibold);
+  color: var(--c-ink);
+}
+
+.skip-link:focus {
+  left: var(--page-gutter);
+  top: 12px;
+}
+
+/* --- Page furniture ------------------------------------------------------ */
+.page {
+  min-height: 100vh;
+  background: var(--c-bg);
+  display: flex;
+  flex-direction: column;
+}
+
+.shell {
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding-left: var(--page-gutter);
+  padding-right: var(--page-gutter);
+}
+
+.rule {
+  height: 2px;
+  background: var(--c-ink);
+  border: 0;
+}
+
+.rule-thin {
+  height: 1.5px;
+  background: var(--c-rule);
+  border: 0;
+}

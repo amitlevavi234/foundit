@@ -40,3 +40,7 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 db/.data/
+
+# typescript / next build metadata
+*.tsbuildinfo
+next-env.d.ts

@@ -43,7 +43,23 @@ Or stop after 30 turns, saying plainly what is blocking.
 ## Phase 2-UI — the interface shell
 
 ```text
-/goal Phase 2-UI of docs/build-phases.md is complete: the design tokens from design/canvas/build.mjs exist as real CSS, and the homepage, results, tool page, browse and top tools screens are built and render with seeded data. Prove it by pasting the dev server's startup output, a successful `npm run build`, and a screenshot or the rendered text of each screen alongside the artboard it copies. No Apple sign-in button anywhere. Every tool page links out to the maker's URL in a new tab with rel="noopener noreferrer" and the domain shown. No blur filters and no rotation on anything containing text. Do not change the database, the search function, or any file under db/. Or stop after 30 turns, saying what is blocking.
+/goal Phase 2-UI of docs/build-phases.md is complete AND its gate has passed. Read docs/build-phases.md, docs/product-decisions.md, docs/development.md, and design/canvas/build.mjs (the 36 artboards are the specification, not an inspiration). Every claim below is settled by pasting real command output or the rendered page, never by summarising.
+
+Done means all ten:
+1. `npm run build` succeeds and `npm run lint` is clean. Paste both.
+2. The design tokens in design/canvas/build.mjs exist as real CSS custom properties - the exact hex values, the type scale, the neo-brutalist shadow that presses down on hover. Paste the token file.
+3. The homepage, results, tool page, browse and top tools are built and render REAL rows from the seeded database, not fixtures. Paste the rendered text of each.
+4. Search runs through public.search_tools as `foundit_app` using DATABASE_URL, one round trip, and every search calls public.log_search_event. Paste a select from search_events showing rows arrived from actual page visits.
+5. Every tool page links out to the maker's URL: new tab, rel="noopener noreferrer", the domain shown beside it. Paste the rendered anchor.
+6. No Apple sign-in anywhere. No blur filter and no rotation on anything containing text. Paste a grep proving all three.
+7. Keyboard focus is visible on every interactive element, prefers-reduced-motion is honoured, and nothing shifts as the fonts load.
+8. Tests exist for the pieces that can break silently - at minimum the search route, the outbound link attributes, and the fit meter - and `npm test` runs them plus eval/scoring.test.mjs and exits 0. Paste it.
+9. Every earlier suite still passes: `bash db/test.sh` and `node eval/run.mjs --baseline`. Paste both.
+10. Review: a FRESH Opus 5 subagent that has not seen the work compares each screen against its artboard and hunts for non-negotiables quietly traded away. Paste its findings verbatim, then fix each or justify it explicitly.
+
+Constraints, none of which may be traded for a passing check: do not change anything under db/ except by adding a new migration, and do not touch eval/golden.jsonl or db/seed/. The app connects as foundit_app and never as the owner. No secret in any tracked file. Never disable row-level security or write a policy evaluating to true. The server must never fetch a URL a stranger supplied. Do not start Phase 3. Update docs/loop-progress.md before finishing.
+
+Or stop after 35 turns, saying plainly what is blocking.
 ```
 
 ## Phase 3 — vectors
