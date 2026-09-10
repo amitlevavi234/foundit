@@ -206,3 +206,109 @@ change a decision:
   ninety days in another. Assume ninety.
 - **None of the SQL in these reports has been executed.** It is a starting point to
   run and fix, not to trust.
+
+---
+
+# Revision 2 — self-hosted (10 September 2026)
+
+The owner chose to run his own machine from the start, and to drop Apple sign-in. Five
+further research passes (reports `07`–`11`) cover what that entails. Where this
+revision contradicts anything above, **this revision wins**: sections 1 (the stack),
+4 (safety rails) and 6 (build order) are amended as follows. Sections 2, 3 and 7 —
+the six rulings, what decides search quality, and the unknowns — stand unchanged,
+because the retrieval design is identical on any Postgres.
+
+## R2.1 The revised stack
+
+| Layer | Choice | Why |
+| --- | --- | --- |
+| Machine | One Hetzner Cloud VPS, **8 GB** (CX33), Ubuntu 24.04 LTS | 4 GB leaves no headroom once the app, database and proxy share the box |
+| Everything on it | Docker Compose: Next.js 16, PostgreSQL 17 + pgvector, Caddy | One machine, one file describing it, rebuildable from the repository |
+| Edge | Cloudflare free plan, **via Tunnel** | No inbound ports open at all — see R2.3 |
+| Sign-in | **Better Auth** in the Next.js process, against plain Postgres | An npm package, not thirteen containers. Six-digit codes are a first-class feature |
+| Authorization | PostgreSQL row-level security, named as Supabase names it | RLS is Postgres's, not Supabase's. Keeping the naming keeps the exit open |
+| Backups | pgBackRest → **Cloudflare R2**, plus a nightly encrypted dump | Off-site must mean off-provider |
+| Domain | **foundit.tools**, registered at Porkbun, DNS at Cloudflare | $29.35/year to renew |
+| Email | A sending provider (Resend or similar) for the 6-digit codes | Nothing receives mail; no MX record ever |
+
+**Apple sign-in is deferred** — $99/year against a project costing a fraction of that,
+and it returns with the iOS app. Launch is Google plus the emailed code.
+
+## R2.2 Four more rulings
+
+**7. Self-hosted Supabase, or plain Postgres?** → **Plain Postgres with Better Auth.**
+The full Supabase stack is thirteen services whose only unique gift was populating
+`auth.uid()` — about twenty lines of TypeScript. Every container is something that
+fails at 3am in front of an owner who is not a developer.
+
+**8. Firewalled public IP, or Cloudflare Tunnel?** → **Tunnel.** The origin makes an
+outbound connection; nothing inbound is open to be scanned. It also removes the entire
+class of Docker-bypasses-the-firewall failures, because there are no published ports.
+
+**9. One machine or two?** → **One**, with a written trigger to split: a second person
+getting access, or development work visibly slowing production. The honest cost is
+that host-level changes — a PostgreSQL major upgrade, a kernel bump — can never be
+rehearsed.
+
+**10. How much downtime at deploy?** → **2–10 seconds, accepted**, hidden by the proxy
+retrying. Blue-green on four cores costs more than it returns.
+
+## R2.3 The safety rails that replace the managed platform
+
+Everything the managed platform did silently is now ours. In severity order:
+
+1. **The Docker firewall bypass.** `ufw` filters one chain; Docker's published ports
+   traverse another, and Docker's own rules run first. A database can be open to the
+   internet while `ufw status` says it is blocking everything. Guarded four ways: no
+   published ports at all, binding to localhost, a daemon default that covers
+   Compose's own bridge networks, and rules in the `DOCKER-USER` chain. Verified by
+   scanning the machine from outside — **nothing is done until that scan passes.**
+2. **The origin must be unreachable except through Cloudflare.** With a Tunnel there
+   is no origin address to find, which is why it wins over a firewall that has to stay
+   correct forever.
+3. **Row-level security breaks silently in three ways** self-hosted: the app
+   connecting as the table's owner (policies exist, nothing enforces them, tests still
+   pass); a request-scoped setting leaking across a pooled connection so one user
+   inherits another's identity; and a table added later with security never switched
+   on — the only one that fails *open*. Two automatic checks catch all three.
+4. **Backups: five-minute recovery point, off-provider, and tested weekly** by actually
+   restoring and asserting row counts. The test pings a heartbeat only on success, so
+   silence is the alarm.
+5. **Money caps are unchanged and still matter**: the search endpoint is public and
+   calls a paid model. Cloudflare's free plan gives one rate-limiting rule with a
+   ten-second window — a burst brake, not a budget guard.
+
+## R2.4 The revised Phase 0 and Phase 1
+
+**Phase 0 — the domain.** Buy it, move DNS to Cloudflare **before the machine
+exists**, because DNS history is permanent and a single lookup resolving to the raw
+server address undoes the edge protection forever. *Done: foundit.tools, nameservers
+moved.*
+
+**Phase 0b — the machine, built once, correctly.** An SSH key made and backed up; the
+Hetzner firewall created *before* the server; Ubuntu 24.04 with the key attached at
+creation, because Hetzner cannot add one afterwards; upgrade and reboot; a non-root
+user verified in a second terminal before anything is locked down; root and password
+login disabled; the Docker daemon configured so containers cannot publish to the
+world; the Compose stack with no port on the database, a non-root read-only container,
+and an internal network; automatic security updates; fail2ban; the Tunnel; the backup
+job with failure alerts. Then the external scan that proves it.
+
+**Phase 1 onwards is unchanged** — schema with row-level security in the first
+migration, then search without AI, then vectors, then understanding, then ranking,
+then accounts, then adding tools, then hardening.
+
+## R2.5 Costs, revised
+
+| Item | Cost |
+| --- | --- |
+| Domain, `foundit.tools` | $29.35/year |
+| Hetzner CX33 + its backups | **To be confirmed** — Hetzner raised cloud prices 33–157% on 15 June 2026 and renders prices in JavaScript, so no figure here is trustworthy until read from the console |
+| Cloudflare, free plan | $0 |
+| Cloudflare R2 backup storage | $0 — roughly 2 GB against a 10 GB free tier |
+| Embeddings + query parsing | ~$1/month |
+| **Apple Developer** | **$0 — deferred** |
+
+The managed plan was about $20 for year one. This one adds the server, and buys
+control, no pausing, no egress cliff, and no non-commercial restriction when paid
+accounts arrive.
