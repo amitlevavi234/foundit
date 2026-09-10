@@ -22,7 +22,22 @@ The full detail of each phase — deliverables and non-negotiables — is in
 ## Phase 2 — search with no AI in it
 
 ```text
-/goal Phase 2 of docs/build-phases.md is complete and its gate passes. Specifically: a single SQL function returns ranked tools for a query plus constraints in ONE round trip; hard constraints filter rather than influence, proven by a query saying "free" returning no paid tool; eval/golden.jsonl holds 60 queries with known answers including non-English and constraint-carrying ones; `node eval/run.mjs` prints a table with recall@10 and nDCG@10 and exits 0; the baseline is recorded in eval/baselines.md; and searches are logged to search_events with no user column. Paste the output of every command into the conversation rather than summarising it. Do not weaken or delete a test, do not add embeddings or any model call, do not start Phase 2-UI, and do not touch db/migrations/0001_init.sql except by adding a new migration file. Update docs/loop-progress.md before finishing. Or stop after 25 turns, saying plainly what is blocking.
+/goal Phase 2 of docs/build-phases.md is complete AND its gate has passed. Read docs/build-phases.md, docs/product-decisions.md, docs/development.md and research/00-SUMMARY.md before starting. Every claim below is settled by pasting the command's real output into the conversation, never by summarising it.
+
+Done means all nine:
+1. `node db/apply.mjs` applies a new migration adding ONE SQL function that takes a query string plus parsed constraints and returns ranked published tools in a single round trip, with all filtering, ranking and limiting inside PostgreSQL.
+2. Hard constraints filter rather than influence: paste a call showing a "free" query returning no tool priced 'paid'.
+3. db/seed/dev_seed.sql seeds at least 150 published tools, so recall@10 is not trivially 1.0; paste the row count.
+4. eval/golden.jsonl holds exactly 60 queries with known-correct tool slugs, at least 8 non-English and at least 10 carrying constraints, every slug present in the seed.
+5. `node eval/run.mjs` prints its table with recall@10 and nDCG@10 and exits 0. Paste the whole table and the exit code.
+6. That number is recorded in eval/baselines.md with the date and the commit.
+7. Searches log to search_events with no user column: paste the table definition showing none, and a count showing rows arrived.
+8. Tests: eval/scoring.test.mjs passes, and db/test/rls_test.sql passes UNCHANGED against the same database. Paste both.
+9. Review: a FRESH Opus 5 subagent that has not seen the work reviews it adversarially for non-negotiables quietly traded away. Paste its findings verbatim, then fix each one or justify it explicitly in the conversation.
+
+Constraints, none of which may be traded for a passing check: no embeddings, no model call, no vector index, no network fetch of any tool URL. Do not weaken, skip, delete or rewrite a test to make it pass. Do not edit db/migrations/0001_init.sql - add a new migration. Do not edit eval/golden.jsonl after seeing any score. Do not start Phase 2-UI. Do not put a real password in any file git tracks. Never disable row-level security, connect as superuser or table owner, or write a policy evaluating to true; if one of those looks like the fix, stop and say you are blocked. Update docs/loop-progress.md before finishing.
+
+Or stop after 30 turns, saying plainly what is blocking.
 ```
 
 ## Phase 2-UI — the interface shell
