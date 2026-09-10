@@ -25,8 +25,15 @@ appears only at the moment someone tries to **save, like, review, or add a tool*
 A skippable prompt may appear from the second search onward, never before the first
 set of results.
 
-Sign-in options: **Google, Apple, and a 6-digit code sent by email.** No passwords,
+Sign-in options at launch: **Google, and a 6-digit code sent by email.** No passwords,
 no magic links, no GitHub.
+
+**Apple sign-in is deferred** (decided 10 September 2026). It requires an Apple Developer
+Program membership at 99 USD a year — five times the rest of the year’s running costs —
+plus a client secret that expires every six months. It comes back when there is an iOS
+app to put in the App Store, which is the point at which Apple sign-in stops being
+optional anyway. *The designed sign-in screens still show an Apple button; remove it
+when those screens are built.*
 
 ## 3. Who owns a listing
 
@@ -158,3 +165,30 @@ Note that **the browser opening a link is not the same as our server fetching on
 (§5 of the plan). The visitor's own browser goes to the maker's site, exactly as it
 would from any other link on the web. That has none of the risk that made us defer the
 automatic filling-in of details, so the link ships in version one.
+
+## 13. Hosting: our own machine (decided 10 September 2026)
+
+Foundit is self-hosted from the start, on a single Hetzner Cloud VPS running the app,
+PostgreSQL with pgvector, and a reverse proxy in Docker Compose, with Cloudflare in
+front. Domain: **foundit.tools**.
+
+**Why**, in the owner's words: he is willing to run the machine, and wants no vendor
+limits. What it buys: a fixed monthly cost with no free-tier pausing, no 5 GB egress
+cliff, no non-commercial restriction blocking paid accounts later, and the database
+sitting on the same machine as the app — a sub-millisecond hop instead of the
+160–360 ms cross-region penalty the managed plan had to design around.
+
+**What it costs**: roughly €8–12/month all in — server, its automatic backups, and
+off-site backup storage — against about $20/year on the managed free tiers. The
+difference buys control, and is paid for in operator time.
+
+**What it obliges us to do.** Everything the managed platform did silently is now ours:
+security patching, TLS, firewalling, monitoring, disk space, Postgres upgrades, and
+backups. In exchange, nothing about the data layer changes — the schema, the vectors
+and the search are plain PostgreSQL either way.
+
+The one open question is the authentication stack, since Supabase was providing
+sign-in *and* the row-level security that makes an application bug not become a data
+breach. Two candidates are under research: running the Supabase stack ourselves, or
+plain Postgres with Auth.js and hand-wired row-level security. **Whichever wins, the
+authorization boundary stays inside the database.** That is not negotiable.
