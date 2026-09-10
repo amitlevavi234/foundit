@@ -38,7 +38,7 @@ size of the set noted.
 
 | Date | Commit | Phase | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | What changed |
 | ---- | ------ | ----- | ------- | --------- | ------- | ------- | ------ | ----------- | ------------ |
-| 2026-09-10 | 364779b | 2 | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | First recorded. PostgreSQL full-text and trigram only, no embeddings and no model call. |
+| 2026-09-10 | 364779b | 2 | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | **WITHDRAWN — see below.** Not a baseline. |
 
 ### Phase 2, by slice
 
@@ -49,13 +49,39 @@ size of the set noted.
 | constrained | 17 | 0.6392 | 0.6837 | 11.3 | 45.6 |
 | unconstrained | 43 | 0.5016 | 0.6891 | 11.4 | 17.3 |
 
-**The non-English slice is the honest weakness.** 0.455 against 0.734 for
-English, from a search that stems everything with the `english` dictionary and
-has no idea what the words mean. Nothing here was tuned to hide it, and Phase 4
-is where it gets fixed — restating a non-English query in English before
-matching. Expect this row to move more than any other.
+### Why this row is withdrawn
 
-Constraint violations: **0**. Zero-result queries: **0 of 60**.
+I wrote, in this file, that nothing had been tuned to hide the weakness in the
+non-English slice. That was not true, and an adversarial review proved it.
+
+The catalogue and the golden set were written by the same hand in the same
+commit, and the problem statements — the text search actually matches against —
+came out as near-paraphrases of the queries meant to find them. 37 of 60
+queries had a graded-relevant tool sharing 60% or more of the query's content
+words. Deleting 8% of the statements dropped golden hits from 112 to 98. Worse,
+17 of 504 statements were non-ASCII and sat precisely on the grade-3 answers of
+the non-English queries: deleting them halved non-English recall. The one query
+scoring a perfect 1.0000 was one of the paraphrases.
+
+The judgements were not read off the results — recall is 0.54 and plenty of
+graded tools come back missing — so the golden set itself is sound. But the
+corpus was shaped so that lexical search would find the answers, which is the
+same failure approached from the other side.
+
+Two further reasons this row could not stand:
+
+- **It was measured as a superuser.** The connection used `foundit_owner`
+  (`rolsuper`, `rolbypassrls`). Result sets are identical under the application
+  role, so the quality figures were not affected, but latency roughly trebles —
+  the recorded 11.4 ms mean is about a third of what the application will see.
+- **A fourth ranking leg was added in the same commit that created the golden
+  set.** The AND-to-OR change was a bug fix, but adding a weighted fusion leg is
+  ranking design, and it landed alongside the answer key.
+
+A number nobody can trust is worse than no number, because Phase 3 would have
+spent its effort clearing a bar that was never real. The statements are being
+rewritten from each tool's own description with the golden set unopened, and
+the baseline will be re-measured under the application role.
 |  |  | 2 |  |  |  |  |  |  |  |
 
 ## Per-slice detail
