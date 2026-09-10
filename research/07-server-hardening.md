@@ -1600,3 +1600,924 @@ sudo systemctl daemon-reload && sudo systemctl enable --now foundit-digest.timer
 
 ---
 
+
+## 6. Secrets on the host, and containing a compromised container
+
+### 6.1 Where the files live and what they are set to
+
+```bash
+sudo mkdir -p /srv/foundit/secrets
+sudo chown -R founditops:founditops /srv/foundit
+sudo chmod 750 /srv/foundit
+sudo chmod 700 /srv/foundit/secrets
+```
+
+| Path | Owner | Mode | Contents |
+|---|---|---|---|
+| `/srv/foundit/` | `founditops:founditops` | `750` | `docker-compose.yml`, `Caddyfile`, everything version-controllable |
+| `/srv/foundit/.env` | `founditops:founditops` | **`600`** | Non-secret configuration only â€” ports, hostnames, feature flags, log level |
+| `/srv/foundit/secrets/` | `founditops:founditops` | **`700`** | One file per secret, each `600`. Never in git. |
+| `/srv/foundit/secrets/db_password` | `founditops:founditops` | **`600`** | Postgres password, no trailing newline |
+| `/srv/foundit/data/` | per-container UID | `700` | Postgres data volume, backups staging |
+
+Verify â€” and put this in the weekly digest:
+
+```bash
+find /srv/foundit -name '*.env' -o -name '.env' -o -path '*/secrets/*' \
+  | xargs -r stat -c '%a %U:%G %n'
+# every line must start with 600 or 700, owned by founditops
+```
+
+Generate secrets rather than inventing them:
+
+```bash
+umask 077
+openssl rand -base64 32 | tr -d '\n' > /srv/foundit/secrets/db_password
+openssl rand -hex 32   | tr -d '\n' > /srv/foundit/secrets/nextauth_secret
+chmod 600 /srv/foundit/secrets/*
+```
+
+Add to `.gitignore` **before the first commit**, not after:
+
+```gitignore
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+```
+
+### 6.2 Why `docker inspect` and the process list leak environment variables
+
+Docker's own documentation is blunt about the problem:
+
+> "If you're injecting passwords and API keys as environment variables, you risk unintentional information exposure. Environment variables are often available to all processes, and it can be difficult to track access. They can also be printed in logs when debugging errors without your knowledge."
+> â€” [Docker Compose: Use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)
+
+Concretely, here is your database password, four different ways:
+
+```bash
+# 1. docker inspect â€” plain text, no root needed if you are in the docker group
+docker inspect foundit-db | grep -A20 '"Env"'
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' foundit-db
+
+# 2. The process environment on the host
+sudo cat /proc/$(pgrep -f postgres | head -1)/environ | tr '\0' '\n'
+
+# 3. The process list with the environment flag
+ps auxe | grep -i postgres
+
+# 4. Compose's own rendered configuration â€” often pasted into a chat when debugging
+docker compose config
+```
+
+Each of these is a routine debugging command. Every one of them prints secrets. The realistic leak paths are not "an attacker ran `docker inspect`" â€” they are:
+
+- **You paste `docker compose config` output into an AI assistant, a forum, or a support ticket.** This is the most likely way your production database password ends up somewhere it should not be. It has happened to a great many people.
+- **A crash reporter (Sentry, Rollbar, Bugsnag) captures the process environment** with the stack trace and ships it to a third party.
+- **A child process inherits the environment** and logs it, or a dependency prints `process.env` on startup in debug mode.
+- **`docker inspect` output goes into a monitoring agent** that indexes container metadata.
+- **Anyone in the `docker` group can read every container's environment.** The `docker` group is root-equivalent (Â§6.6).
+
+### 6.3 Docker secrets versus env files â€” the honest comparison
+
+Compose secrets are "mounted as files at a standardized path within containers: `/run/secrets/<secret_name>`", defined in the top-level `secrets` element and granted "on a per-service basis" ([Docker Compose: Use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)).
+
+| | `.env` / `environment:` | Compose file secrets |
+|---|---|---|
+| Visible in `docker inspect` | **Yes, plain text** | No â€” only the mount path |
+| Visible in `/proc/PID/environ` | **Yes** | No |
+| Visible in `docker compose config` | **Yes** | No â€” shows the file path |
+| Captured by crash reporters | **Usually** | No |
+| Inherited by child processes | **Yes, automatically** | No |
+| Readable inside the container | Yes | Yes â€” at `/run/secrets/<name>` |
+| Rotation | Restart container | Rewrite file, restart container |
+| Works with unmodified upstream images | Yes | **Only if the image supports it** |
+| On disk on the host | Yes, in `.env` | Yes, in the secret file |
+| Encrypted at rest | **No** | **No** â€” this is not encryption |
+
+**The honest caveats, because Compose secrets are often oversold:**
+
+1. **They are not encrypted.** In Compose (as opposed to Swarm), a "secret" is a file on the host bind-mounted into the container. The protection is *scope* â€” it does not enter the environment, so it does not leak through the four channels in Â§6.2. That is a real and worthwhile improvement, but the file on disk is exactly as protected as its permissions make it.
+2. **The image must support file-based secrets.** Postgres does: `POSTGRES_PASSWORD_FILE`. Many images do not, and for those you are back to environment variables or an entrypoint wrapper that reads the file and exports it â€” which puts it back in the environment inside the container, though not in `docker inspect`.
+3. **They are only as good as the host.** Anyone who gets root on the host, or joins the `docker` group, reads the file.
+
+**Recommendation: use file-based secrets for everything that supports them, starting with Postgres, and keep a `600` `.env` for genuinely non-secret configuration.** Do not spend effort on a secrets manager (Vault, Infisical, SOPS-age) at launch â€” the operational complexity is real and the threat it addresses (host compromise) is better answered by Â§7's rebuild plan.
+
+### 6.4 The compose file, written correctly
+
+```yaml
+# /srv/foundit/docker-compose.yml
+name: foundit
+
+# --- Secrets: files on the host, mounted into /run/secrets/<name> ---
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  nextauth_secret:
+    file: ./secrets/nextauth_secret
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+
+  db:
+    <<: *hardening
+    image: pgvector/pgvector:pg17
+    user: "999:999"                    # the postgres UID inside this image
+    # NO ports: â€” reachable only from the backend network
+    environment:
+      POSTGRES_USER: foundit
+      POSTGRES_DB: foundit
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password   # NOT POSTGRES_PASSWORD
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    secrets:
+      - db_password
+    volumes:
+      - ./data/pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    # Postgres writes to more than its data dir, so read_only needs tmpfs help:
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/postgresql:mode=0700,uid=999,gid=999
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foundit -d foundit"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    <<: *hardening
+    image: ghcr.io/amitlevavi234/foundit-app:${APP_TAG:-latest}
+    user: "10001:10001"                # non-root, set by USER in the Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /app/.next/cache:mode=0700,uid=10001,gid=10001
+    environment:
+      NODE_ENV: production
+      DATABASE_URL_FILE: /run/secrets/db_password    # app reads the file itself
+      PGHOST: db
+      PGUSER: foundit
+      PGDATABASE: foundit
+    secrets:
+      - db_password
+      - nextauth_secret
+    depends_on:
+      db: { condition: service_healthy }
+    networks: [backend, frontend]
+
+  caddy:
+    <<: *hardening
+    image: caddy:2-alpine
+    # The ONE service that is deliberately public.
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    cap_drop: [ALL]
+    cap_add:
+      - NET_BIND_SERVICE            # required to bind 80/443 as non-root
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [frontend]
+
+networks:
+  frontend:
+  backend:
+    internal: true                   # no route to the internet at all
+
+volumes:
+  caddy_data:
+  caddy_config:
+```
+
+Every hardening attribute above is documented in the Compose specification ([Compose file: Services](https://docs.docker.com/reference/compose-file/services/)):
+
+- `user` â€” "overrides the user used to run the container process. The default is set by the image, for example Dockerfile `USER`."
+- `read_only` â€” "configures the service container to be created with a read-only filesystem."
+- `cap_drop` â€” "specifies container capabilities to drop as strings."
+- `cap_add` â€” "specifies additional container capabilities as strings."
+- `security_opt` â€” "overrides the default labeling scheme for each container."
+- `tmpfs` â€” "mounts a temporary file system inside the container."
+- `privileged` â€” "configures the service container to run with elevated privileges." **Never set this.**
+- `secrets` â€” "grants access to sensitive data defined by the secrets top-level element on a per-service basis."
+
+Note that `secrets:` also takes `uid`, `gid` and `mode`, so a secret can be made readable only by the container's non-root user ([Compose file: Services](https://docs.docker.com/reference/compose-file/services/)):
+
+```yaml
+    secrets:
+      - source: db_password
+        uid: "10001"
+        gid: "10001"
+        mode: 0o400
+```
+
+### 6.5 How each hardening flag contains a compromised container
+
+Assume an attacker achieves remote code execution inside the `app` container â€” a dependency vulnerability, a deserialisation bug, whatever. Here is what each flag takes away from them:
+
+| Control | What the attacker loses |
+|---|---|
+| **`user: "10001:10001"`** (non-root) | Cannot write to `/etc`, `/usr`, or any root-owned path in the image. Cannot install packages. Cannot bind ports below 1024. Docker's docs: containers are "quite secure; especially if you run your processes as non-privileged users inside the container" ([Docker Engine security](https://docs.docker.com/engine/security/)). |
+| **`read_only: true`** | Cannot drop a webshell, a cryptominer, or a persistence binary anywhere on disk. Everything they fetch dies with the container. This is the single most effective anti-persistence control available to you and it costs one line. |
+| **`tmpfs` for writable paths** | The only writable locations are in RAM, wiped on restart, and `noexec` can be added (`mode=1777,noexec`). |
+| **`cap_drop: [ALL]`** | No `CAP_NET_RAW` (no raw-socket scanning of your network), no `CAP_SYS_ADMIN`, no `CAP_DAC_OVERRIDE` (cannot bypass file permissions), no mounting. Docker already restricts capabilities â€” "By default Docker drops all capabilities except those needed", using an allowlist ([Docker Engine security](https://docs.docker.com/engine/security/)) â€” but that default set is still generous. `cap_drop: ALL` plus explicit `cap_add` is strictly tighter. |
+| **`security_opt: no-new-privileges:true`** | Cannot gain privileges through a setuid binary. Kills a whole family of container escapes that depend on `su`/`sudo`/setuid helpers inside the image. |
+| **`networks: backend.internal: true`** | For the `db` container: cannot exfiltrate data, cannot download a second stage, cannot join a botnet. It has no route off the box. |
+| **No published port on `db`** | Cannot be reached from outside at all. The attacker must already be inside another container. |
+| **No `docker.sock` mount** | Cannot become root on the host. See Â§6.6 â€” this is the big one. |
+| **`restart: unless-stopped` + read-only** | Any foothold that is not in the image itself evaporates on the next restart, and containers restart on every deploy and reboot. |
+
+Two things this does **not** protect against, stated plainly:
+
+- **Data the app is supposed to have access to.** The attacker in `app` can read your database, because `app` can read your database. Container hardening limits lateral movement and persistence; it does not limit the application's own authority. That is an application-authorization problem (see `03-security-and-authorization.md`).
+- **A kernel exploit.** Containers share the host kernel. `cap_drop` and non-root raise the bar considerably, but a kernel vulnerability escapes anyway â€” which is why Â§4's patching is not optional.
+
+Enforce non-root in the image too, so a compose mistake cannot undo it:
+
+```dockerfile
+# Dockerfile (final stage)
+RUN addgroup --system --gid 10001 nodejs \
+ && adduser  --system --uid 10001 --ingroup nodejs nextjs
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+USER 10001
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+Verify what is actually running:
+
+```bash
+docker compose ps -q | while read -r id; do
+  printf '%-20s user=%-12s readonly=%-6s caps=%s\n' \
+    "$(docker inspect -f '{{.Name}}' "$id")" \
+    "$(docker inspect -f '{{.Config.User}}' "$id")" \
+    "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$id")" \
+    "$(docker inspect -f '{{.HostConfig.CapDrop}}' "$id")"
+done
+# Any line showing user= (empty) is running as root inside the container. Fix it.
+```
+
+### 6.6 Never mount `docker.sock`
+
+**Mounting `/var/run/docker.sock` into a container gives that container root on the host. There is no partial version of this and no safe read-only version of it.**
+
+Docker's security documentation grounds why: *"only trusted users should be allowed to control your Docker daemon"*, and Docker allows sharing directories between host and container "without limiting the access rights of the container", so a container "could theoretically mount the entire host filesystem and modify it without restrictions" ([Docker Engine security](https://docs.docker.com/engine/security/)).
+
+The attack is three commands. A container with the socket can ask the daemon to start a *new* container with `--privileged` and the host root filesystem bind-mounted at `/host`, then write to `/host/root/.ssh/authorized_keys` or `/host/etc/cron.d/`. Nothing about the first container's own `read_only`, `cap_drop` or non-root user matters â€” it is not doing the escaping, the daemon is, and the daemon runs as root.
+
+The same reasoning means **adding a user to the `docker` group is equivalent to giving them passwordless root.** That is fine for `founditops`, who already has sudo. It is not fine for any service account, and it is not a way to "avoid using sudo".
+
+Things that will ask you to mount the socket, and what to do instead:
+
+| Wants the socket | Do this instead |
+|---|---|
+| **Watchtower / auto-updating containers** | Do not run it. Update deliberately (Â§4.6). Automatic image updates on a single production host is a self-inflicted outage waiting for a bad upstream tag. |
+| **Traefik** (reads container labels for routing) | Use Caddy or nginx with a static config file. You have three services; service discovery is solving a problem you do not have. If you must use Traefik, put a socket proxy (`tecnativa/docker-socket-proxy`) in front, exposing only the read-only endpoints it needs. |
+| **Portainer** | Access the host over SSH and use `docker` commands. If you want a UI badly enough, accept that Portainer is root-on-host and treat its credentials as root credentials. |
+| **cAdvisor / monitoring** | Use the read-only socket-proxy pattern, or scrape metrics the app exports itself. |
+| **CI/CD deploying via docker-in-docker** | Deploy over SSH: `ssh foundit 'cd /srv/foundit && docker compose pull && docker compose up -d'` with a dedicated, restricted key. |
+| **Trivy scanning local images** (Â§4.6) | Scan the image in the registry instead: `trivy image ghcr.io/you/app:tag`. No socket needed. |
+
+Audit for it:
+
+```bash
+grep -rn 'docker.sock' /srv/foundit/           # must return nothing
+docker ps -q | xargs -r docker inspect --format \
+  '{{.Name}}{{range .Mounts}} {{.Source}}{{end}}' | grep -i docker.sock
+```
+
+Add that grep to your weekly digest. It is a one-line check for a total-compromise condition.
+
+### 6.7 Secrets that must never be on this server at all
+
+| Secret | Where it belongs |
+|---|---|
+| Your Hetzner API token | Your laptop / password manager. If it must be on the server (for `hcloud firewall` automation), scope it to **read-only** or a single project, and treat its presence as a reason to rebuild if the server is compromised. |
+| Cloudflare **Global API Key** | Nowhere, ever. Use a scoped **API Token** with only the permissions needed (e.g. `Zone:DNS:Edit` for a single zone), which can be revoked without affecting anything else. |
+| Your GitHub personal access token | Use a **deploy key** (read-only, single repository) or a short-lived token from GitHub Actions OIDC. |
+| Payment processor live keys | Only in the process that needs them, via file-based secrets, and rotate on any suspicion. |
+| Your SSH **private** key | Your laptop only. Never on the server. If you need server-to-server access, generate a separate key on the server and authorise it narrowly. |
+
+Rotation drill â€” run it once now, so you know how, before you need to do it at 3am:
+
+```bash
+# 1. New password
+openssl rand -base64 32 | tr -d '\n' > /srv/foundit/secrets/db_password.new
+# 2. Change it in Postgres
+docker compose exec -T db psql -U foundit -c \
+  "ALTER USER foundit PASSWORD '$(cat /srv/foundit/secrets/db_password.new)';"
+# 3. Swap the file and restart the consumers
+mv /srv/foundit/secrets/db_password{.new,}
+chmod 600 /srv/foundit/secrets/db_password
+docker compose up -d --force-recreate app
+```
+
+---
+
+
+## 7. When it goes wrong
+
+### 7.1 Signs of compromise on a small VPS
+
+You are not going to spot a sophisticated attacker. You are going to spot the ordinary ones, and the ordinary ones are 95% of what actually happens to a box like this. Ordinary attackers monetise immediately, and monetisation is noisy.
+
+**Loud signs â€” you will notice these without looking:**
+
+| Sign | Check | What it usually means |
+|---|---|---|
+| CPU pinned at 100% with no traffic | `htop`, `docker stats` | Cryptominer. The single most common outcome of a compromised container. |
+| Hetzner emails you about abuse / outbound attack traffic | your inbox | Your box is scanning or DDoSing others. Hetzner will suspend it. |
+| Bandwidth bill or graph spikes | Hetzner Console â†’ Graphs | Exfiltration, a miner's pool traffic, or your box being used as a proxy. |
+| Site suddenly slow or 502ing | uptime monitor | Could be anything; combined with high CPU it is a miner. |
+| Disk full | `df -h` | Logs, or a staging area for stolen data, or dumped payloads. |
+| Cannot log in with your key | â€” | Someone changed `authorized_keys`. Go straight to Â§7.3. |
+| A ransom note in your database | â€” | Exposed Postgres/Redis. See Â§8.8 â€” this is *the* self-hosting disaster. |
+
+**Quiet signs â€” these need looking, which is what the weekly checklist in Â§5.4 is for:**
+
+```bash
+# Unexpected listening sockets â€” the highest-value single check
+sudo ss -tlnp
+
+# Outbound connections you did not initiate
+sudo ss -tnp state established '( dport != :443 and dport != :80 )'
+
+# Processes with no package behind them, running from odd paths
+ps aux --sort=-%cpu | head -20
+ls -la /tmp /dev/shm /var/tmp        # classic drop locations; should be near-empty
+
+# Users who should not exist, or accounts that gained a shell/UID 0
+awk -F: '$3 < 1000 && $7 !~ /(nologin|false)/ {print}' /etc/passwd
+awk -F: '$3 == 0 {print $1}' /etc/passwd     # must print only "root"
+getent group sudo docker
+
+# SSH keys you did not add
+sudo cat /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys
+
+# Persistence: cron, systemd timers, shell profiles
+sudo crontab -l; sudo ls -la /etc/cron.*/ /var/spool/cron/crontabs/
+systemctl list-timers --all
+sudo grep -rn 'curl\|wget\|base64\|/dev/tcp' /etc/profile.d/ /root/.bashrc /home/*/.bashrc
+
+# Modified package files
+sudo debsums -c                     # expect no output
+
+# Logins
+last -20; sudo lastb -20
+sudo journalctl -u ssh --since "30 days ago" | grep 'Accepted'
+
+# Container-level
+docker ps -a                        # containers you did not start
+docker images                       # images you did not pull
+docker inspect $(docker ps -q) --format '{{.Name}} {{.Config.Image}} {{.Config.Cmd}}'
+```
+
+**Two signs specific to your architecture:**
+
+1. **Traffic arriving from a non-Cloudflare IP on 80/443.** With Â§3 in place this should be impossible; if it happens, your allowlist broke. Log it:
+   ```bash
+   sudo iptables -I FOUNDIT-CF 1 -p tcp -m conntrack --ctorigdstport 443 \
+     -m limit --limit 5/min -j LOG --log-prefix "CF-BYPASS: "
+   sudo journalctl -k | grep CF-BYPASS
+   ```
+2. **Any connection to Postgres from outside the `backend` network.**
+   ```bash
+   docker compose exec -T db psql -U foundit -c \
+     "SELECT client_addr, usename, state, backend_start FROM pg_stat_activity WHERE client_addr IS NOT NULL;"
+   # every client_addr must be in your backend network's subnet (172.x)
+   ```
+
+### 7.2 Rebuild, do not clean
+
+**Principle: if the host is compromised, you cannot trust anything on it, including the tools you would use to check whether you cleaned it. Destroy the server and build a new one.**
+
+The reasoning, in a form worth internalising:
+
+- Root-level malware modifies the very binaries you would use to look for it. `ps`, `ls`, `netstat` and `find` are the classic targets. A rootkit's entire job is to make your inspection tools lie.
+- You cannot prove absence. You can find three backdoors and be confident about none of them being the last one. "I cleaned it" always means "I stopped finding things", which is a statement about your search, not about the server.
+- Attackers plant multiple persistence mechanisms *precisely because* defenders find one and stop. A cron job, an SSH key, a systemd timer, a modified `.bashrc`, a container image, a kernel module â€” you must find all of them; they need one to survive.
+- **Rebuilding is faster.** Cleaning is open-ended, stressful, and produces a server you never fully trust again. Rebuilding is a known, bounded procedure you have rehearsed. On a Hetzner Cloud VPS with your configuration in git, it is under an hour.
+
+The one exception: if this is a genuinely serious incident (customer data, legal exposure), **snapshot the compromised disk before destroying it** so a professional can examine it later, and do not power it off until you have â€” some evidence lives only in memory.
+
+```bash
+# Preserve evidence: Hetzner Console â†’ your server â†’ Snapshots â†’ Take Snapshot
+# Label it "COMPROMISED-2026-09-10-do-not-boot"
+```
+
+### 7.3 The rebuild procedure, target: under one hour
+
+**Phase 0 â€” contain (2 minutes).** Do this before anything else.
+
+```
+Hetzner Console â†’ your server â†’ Firewalls
+  â†’ remove ALL inbound rules except SSH from your own IP
+```
+This severs the attacker's access without destroying evidence or state, and without touching the machine (which the attacker may be watching). Then, in Cloudflare, enable "Under Attack" mode or pause the zone so users see a maintenance page rather than a compromised app.
+
+**Phase 1 â€” capture what you need (10 minutes).**
+
+```bash
+# Take a Hetzner snapshot first (Console), then, if you can still trust a shell:
+ssh foundit
+cd /srv/foundit
+docker compose exec -T db pg_dump -U foundit -Fc foundit > /tmp/final-dump.pgdump
+# Copy it OFF the box, to your laptop:
+exit
+scp foundit:/tmp/final-dump.pgdump ./final-dump.pgdump
+```
+âš ï¸ **Treat this dump as potentially tainted.** Prefer your last known-good scheduled backup (Â§7.4) and accept the data loss. Use the final dump only to reconcile what changed in between, and inspect it before restoring â€” an attacker with database write access may have modified rows.
+
+**Phase 2 â€” build the new server (15 minutes).**
+
+1. Create a new Hetzner server, **new IP**, following Â§1.1â€“1.8 (use the cloud-init from Â§1.11 to compress this to minutes).
+2. Attach the firewall from Â§2.2.
+3. Install Docker, apply `/etc/docker/daemon.json` from Â§2.4.3.
+4. Apply the `DOCKER-USER` script from Â§3.4 and enable its unit and timer.
+5. Configure `unattended-upgrades` (Â§4) and `fail2ban` (Â§5.2).
+
+**Phase 3 â€” restore (15 minutes).**
+
+```bash
+git clone git@github.com:amitlevavi234/foundit-infra.git /srv/foundit
+cd /srv/foundit
+
+# Recreate ALL secrets from scratch. Every credential the old box held is burned.
+mkdir -p secrets && chmod 700 secrets
+umask 077
+openssl rand -base64 32 | tr -d '\n' > secrets/db_password
+openssl rand -hex 32   | tr -d '\n' > secrets/nextauth_secret
+# ...plus: new Cloudflare API token, new GitHub deploy key, new third-party API keys.
+
+docker compose up -d db
+docker compose exec -T db pg_restore -U foundit -d foundit --clean --if-exists \
+  < /path/to/last-known-good.pgdump
+docker compose up -d
+```
+
+**Phase 4 â€” cut over (10 minutes).**
+
+1. Update the Cloudflare A record to the new IP. Cloudflare propagation is near-instant since it is proxied.
+2. Verify with Â§8's external checks.
+3. Turn off "Under Attack" mode.
+4. **Destroy the old server.** Not "stop" â€” destroy. Keep only the labelled forensic snapshot.
+
+**Phase 5 â€” rotate everything the old server ever saw (do not skip).**
+
+- Database passwords âœ… (done in Phase 3)
+- Every third-party API key the server held
+- Cloudflare API token â†’ revoke and reissue
+- Hetzner API token â†’ revoke and reissue
+- GitHub deploy key â†’ delete and regenerate
+- **Your own SSH key**, if there is any chance the private key was on the server (it should never have been)
+- Any user session tokens / JWT signing secrets â€” invalidating all sessions is correct here
+- If user passwords were in a database the attacker read: force a reset, and notify users. This may be a legal obligation depending on jurisdiction.
+
+### 7.4 What must exist beforehand for that hour to be possible
+
+**This is the section to act on today.** Every item is cheap now and impossible to retrofit during an incident.
+
+| # | Must exist | How | Verify |
+|---|---|---|---|
+| 1 | **Infrastructure in git** â€” `docker-compose.yml`, `Caddyfile`, Dockerfiles, systemd units, the `foundit-cf-firewall.sh` script | A **private** repo, `foundit-infra`. Secrets never in it (Â§6.1 `.gitignore`). | `git clone` it to a scratch directory and confirm nothing is missing. |
+| 2 | **Automated, off-server database backups** | `pg_dump -Fc` nightly, pushed to object storage in a **different provider** (Hetzner Storage Box, Backblaze B2, Cloudflare R2). Not on the same VPS; not on the same account if you can help it. | Â§7.5 |
+| 3 | **A tested restore** | Actually restore last night's dump into a scratch container, monthly. | `docker run --rm -d --name restoretest postgres:17 && pg_restore ...` then count rows. |
+| 4 | **Hetzner automatic backups enabled** | +20% of server cost. "copies of a server's disk that are created automatically on a daily basis", up to 7 slots, oldest deleted when full ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). | Console shows 7 dated backups. |
+| 5 | **A pre-incident snapshot before every risky change** | Console â†’ Snapshots â†’ Take Snapshot. Snapshots are "created manually" and persist until deleted ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). | Delete old ones; the default cap is 30 across all projects. |
+| 6 | **A second SSH key, on a second device** | Added at server creation (Â§1.2 â€” you cannot add one via the Console afterwards). | Log in from the second device once, then leave it alone. |
+| 7 | **Your secrets in a password manager**, structured | One entry per secret with the rotation procedure in the notes. | Open it and read it; can you rebuild from what is written there? |
+| 8 | **DNS you control, with a short TTL** | Cloudflare, proxied. Changing the origin IP is one field. | â€” |
+| 9 | **The rebuild runbook, printed or in the password manager** | Â§7.3, saved somewhere not on the server. | â€” |
+| 10 | **An uptime monitor with phone alerts** | UptimeRobot / Better Stack free tier. | Stop the app deliberately; confirm your phone buzzes. |
+
+âš ï¸ **Two Hetzner limitations that matter for backups:** neither backups nor snapshots include attached **Volumes** ([Hetzner: Backups and snapshots](https://docs.hetzner.com/cloud/servers/backups-snapshots/overview/)). If you ever move `pgdata` to a Volume for space, it stops being covered â€” you would need Volume snapshots separately. And a disk-image backup of a *compromised* server is a backup of the compromise; that is why item 2 (application-level database dumps, versioned, off-site) is the one that actually saves you, and items 4â€“5 are conveniences.
+
+### 7.5 The backup script
+
+```bash
+sudo tee /usr/local/sbin/foundit-backup.sh > /dev/null <<'BACKUP'
+#!/bin/bash
+set -euo pipefail
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="/srv/foundit/backups/foundit-${TS}.pgdump"
+mkdir -p /srv/foundit/backups
+
+docker compose -f /srv/foundit/docker-compose.yml exec -T db \
+  pg_dump -U foundit -Fc foundit > "$OUT"
+
+# Encrypt before it leaves the machine. Public key only lives here;
+# the private key lives in your password manager.
+age -r "$(cat /srv/foundit/backup-recipient.age.pub)" -o "${OUT}.age" "$OUT"
+rm -f "$OUT"
+
+# Push off-site. rclone remote configured for Backblaze B2 / R2 / Storage Box.
+rclone copy "${OUT}.age" "offsite:foundit-backups/" --checksum
+
+# Keep 14 days locally, everything remotely (lifecycle rules handle remote retention)
+find /srv/foundit/backups -name '*.age' -mtime +14 -delete
+
+logger -t foundit-backup "backup ${TS} complete ($(stat -c%s "${OUT}.age") bytes)"
+BACKUP
+sudo chmod 700 /usr/local/sbin/foundit-backup.sh
+```
+
+Schedule it at 03:00 with a systemd timer (same pattern as Â§3.5), and â€” critically â€” **alert on failure**, because a backup job that has silently failed for six weeks is the actual disaster:
+
+```ini
+# /etc/systemd/system/foundit-backup.service
+[Unit]
+Description=Nightly Foundit database backup
+OnFailure=foundit-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/foundit-backup.sh
+```
+
+```ini
+# /etc/systemd/system/foundit-alert@.service
+[Unit]
+Description=Alert on failure of %i
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/usr/bin/systemctl status %i | mail -s "FOUNDIT FAILED: %i" you@example.com'
+```
+
+Also add a **dead-man's switch**: have the backup script ping a healthchecks.io (free tier) URL on success. If the ping stops arriving, you get an email. That catches "the server is off" and "cron is broken", which failure alerts cannot.
+
+---
+
+## 8. Verification â€” proving from outside that only 80/443 are open
+
+Everything in sections 2 and 3 is a claim about intent. This section is the proof. **Run it after initial setup, after every firewall change, and quarterly.**
+
+### 8.1 The single most important test
+
+From a machine that is **not** your server and **not** on your home network â€” a friend's laptop, a phone hotspot, a $5 throwaway VPS elsewhere, or a free cloud shell:
+
+```bash
+# Full TCP scan of every port. Takes a few minutes. This is the test.
+nmap -Pn -sS -p- --min-rate 1000 YOUR.SERVER.IP
+
+# UDP, top ports (slower)
+sudo nmap -Pn -sU --top-ports 50 YOUR.SERVER.IP
+
+# IPv6, if the server has a public IPv6 address â€” DO NOT SKIP THIS
+nmap -6 -Pn -sS -p- YOUR.SERVER.IPV6
+```
+
+**Expected result if Â§2 and Â§3 are correct:**
+
+```
+PORT      STATE    SERVICE
+52242/tcp filtered ssh          <- filtered, because Hetzner allows only your IP
+80/tcp    filtered http         <- filtered, because only Cloudflare IPs are allowed
+443/tcp   filtered https        <- filtered
+All other ports: filtered
+```
+
+`filtered` means the packet was dropped with no response â€” the correct outcome. `closed` means something answered with a RST, which means the packet reached your machine; acceptable but less good. **`open` on anything other than 80/443 from a Cloudflare IP is a finding.**
+
+**The specific ports that must NOT be open, with what it would mean:**
+
+| Port | Service | If open |
+|---|---|---|
+| **5432** | PostgreSQL | **Stop everything.** Your database is public. Go to Â§2.4.3 Fix 1 now, then assume it has been read and rebuild (Â§7). |
+| **6379** | Redis | Same. Redis with no auth is trivially exploited into RCE. |
+| **27017** | MongoDB | Same. |
+| **3000** | Next.js dev/direct | Your app is reachable bypassing Cloudflare â€” no WAF, no rate limiting. |
+| **8080 / 8000** | app / admin panel | Same. |
+| **2375 / 2376** | Docker API | Total compromise. Anyone can start a privileged container. |
+| **9000** | Portainer / php-fpm | Admin interface exposed. |
+| **25 / 587** | SMTP | You are an open relay or about to be. |
+
+### 8.2 Prove the Cloudflare-only restriction works
+
+```bash
+# From a non-Cloudflare machine, hit the ORIGIN IP directly.
+curl -v --max-time 10 --resolve foundit.app:443:YOUR.SERVER.IP https://foundit.app/
+# Expected: "Connection timed out" or "No route to host" â€” NOT a page.
+
+curl -v --max-time 10 http://YOUR.SERVER.IP/
+# Expected: timeout.
+
+# Through Cloudflare it must still work:
+curl -sI https://foundit.app/ | head -3
+# Expected: HTTP/2 200, with a "cf-ray" header proving it went via Cloudflare.
+```
+
+If the first two return your site, the origin lock is not working. In order, check: the Hetzner firewall rules; then `sudo iptables -L FOUNDIT-CF -n --line-numbers` (is the chain populated? is it jumped to from `DOCKER-USER`?); then whether the request is arriving via a route you did not consider (IPv6!).
+
+### 8.3 Prove Authenticated Origin Pulls is enforcing
+
+```bash
+# From anywhere, if you can reach the origin at all (e.g. from a Cloudflare IP
+# range, or temporarily from your own allowlisted address):
+curl -vk --resolve foundit.app:443:YOUR.SERVER.IP https://foundit.app/ 2>&1 | tail -20
+# Expected: a TLS alert about a missing client certificate, or HTTP 400
+# "No required SSL certificate was sent". NOT your homepage.
+```
+
+### 8.4 Prove SSH is key-only
+
+```bash
+ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password \
+    -p 52242 founditops@YOUR.SERVER.IP
+# Expected: "Permission denied (publickey)." â€” the server never even prompts.
+
+ssh -p 52242 root@YOUR.SERVER.IP
+# Expected: "Permission denied (publickey)." â€” root login refused.
+```
+
+And from the server, confirm the *effective* configuration rather than what you think you wrote:
+
+```bash
+sudo sshd -T | grep -Ei 'permitrootlogin|passwordauthentication|kbdinteractive|allowusers|maxauthtries|allowtcpforwarding|^port'
+```
+
+Expected: `permitrootlogin no`, `passwordauthentication no`, `kbdinteractiveauthentication no`, `allowusers founditops`, `maxauthtries 3`, `allowtcpforwarding no`, `port 52242`.
+
+### 8.5 On-server confirmation (necessary, not sufficient)
+
+```bash
+# Nothing on a public address except the proxy
+sudo ss -tlnp | grep -vE '127\.0\.0\.1|\[::1\]'
+
+# No container publishing to 0.0.0.0 except caddy
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep -E '0\.0\.0\.0|:::' 
+
+# The Cloudflare chain is live and jumped to
+sudo iptables -L DOCKER-USER -n --line-numbers | head
+sudo iptables -L FOUNDIT-CF  -n | wc -l         # should be ~35 lines
+
+# ufw is on
+sudo ufw status verbose
+
+# No docker.sock mounts
+docker ps -q | xargs -r docker inspect --format '{{.Name}}{{range .Mounts}} {{.Source}}{{end}}' | grep -i docker.sock
+
+# Every container non-root and read-only
+docker compose ps -q | xargs -r -I{} docker inspect -f \
+  '{{.Name}} user={{.Config.User}} ro={{.HostConfig.ReadonlyRootfs}}' {}
+```
+
+### 8.6 Third-party views of your server
+
+| Tool | URL | What it tells you |
+|---|---|---|
+| **Shodan** | `https://www.shodan.io/host/YOUR.SERVER.IP` | What internet-wide scanners have already indexed about you. **Check this. It is what an attacker checks.** |
+| **Censys** | `https://search.censys.io/hosts/YOUR.SERVER.IP` | Same, with certificate detail. |
+| **crt.sh** | `https://crt.sh/?q=foundit.app` | Every certificate ever issued for your domain â€” i.e. every subdomain you may have forgotten, one of which may be grey-clouded and leaking your origin IP. |
+| **SSL Labs** | `https://www.ssllabs.com/ssltest/analyze.html?d=foundit.app` | TLS configuration grade. Aim for A. |
+| **Mozilla Observatory** | `https://developer.mozilla.org/en-US/observatory/analyze?host=foundit.app` | HTTP security headers (CSP, HSTS, X-Frame-Options, Referrer-Policy). Free, actionable, and directly relevant to the app rather than the host. |
+| **DNS history** | SecurityTrails / ViewDNS | Whether your pre-Cloudflare origin IP is in the historical record. If your *current* IP is there, that is a reason to change it. |
+
+### 8.7 A repeatable verification script for your laptop
+
+```bash
+#!/bin/bash
+# save as verify-foundit.sh on your LAPTOP, run from a non-allowlisted network
+IP="YOUR.SERVER.IP"; DOMAIN="foundit.app"; SSH_PORT="52242"
+FAIL=0
+say(){ printf '%-52s %s\n' "$1" "$2"; }
+
+echo "=== Foundit external verification â€” $(date -u) ==="
+
+for p in 5432 6379 27017 3000 8080 8000 2375 2376 9000 25; do
+  if nc -z -w3 "$IP" "$p" 2>/dev/null; then say "port $p" "OPEN  <-- FAIL"; FAIL=1
+  else say "port $p" "closed/filtered  OK"; fi
+done
+
+if curl -s --max-time 8 --resolve "$DOMAIN:443:$IP" "https://$DOMAIN/" -o /dev/null; then
+  say "direct-to-origin HTTPS" "REACHABLE  <-- FAIL"; FAIL=1
+else say "direct-to-origin HTTPS" "blocked  OK"; fi
+
+if curl -sI --max-time 8 "https://$DOMAIN/" | grep -qi '^cf-ray'; then
+  say "site via Cloudflare" "OK"
+else say "site via Cloudflare" "NOT SERVING  <-- FAIL"; FAIL=1; fi
+
+if ssh -o BatchMode=yes -o ConnectTimeout=5 -o PubkeyAuthentication=no \
+       -o PreferredAuthentications=password -p "$SSH_PORT" \
+       nosuchuser@"$IP" 2>&1 | grep -q 'Permission denied (publickey)'; then
+  say "SSH password auth" "refused  OK"
+else say "SSH password auth" "CHECK MANUALLY"; fi
+
+echo; [ "$FAIL" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "FAILURES PRESENT â€” see above"
+exit "$FAIL"
+```
+
+---
+
+
+## 9. The mistakes people make self-hosting for the first time
+
+Ranked by how likely each is to end the project. Each entry gives the mistake, why it happens, how to detect it in one command, and the fix.
+
+### 9.1 Postgres bound to `0.0.0.0` â€” the one that ends companies
+
+**The mistake.** `ports: - "5432:5432"` in `docker-compose.yml`. It reads like "let my app reach the database"; it means "publish PostgreSQL on every address of this machine, including the public IPv4."
+
+**Why it happens.** Every quickstart tutorial has it, because tutorials are written for laptops where `0.0.0.0` is behind a home router. On a VPS, `0.0.0.0` is the internet. Docker's own docs describe this default as *"insecure by default"* ([Docker: Port publishing](https://docs.docker.com/engine/network/port-publishing/)).
+
+**Detect.**
+```bash
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep -E '0\.0\.0\.0:(5432|6379|27017|3306)'
+```
+Any output is an emergency.
+
+**Fix.** Delete the `ports:` block entirely (Â§2.4.3 Fix 1). If you truly need it, `"127.0.0.1:5432:5432"`, plus the daemon default in Fix 3 so the next person's mistake is harmless.
+
+**If it was exposed:** assume the data was read. Postgres with a weak password is cracked in seconds; even with a strong one, an unpatched Postgres has had remotely exploitable bugs. Rotate everything and rebuild (Â§7).
+
+### 9.2 Believing ufw protects Docker ports
+
+**The mistake.** `sudo ufw default deny incoming` + `sudo ufw status` showing `active`, and concluding the box is closed. It is not, for anything Docker published â€” Docker "routes container traffic in the `nat` table, which means that packets are diverted before it reaches the `INPUT` and `OUTPUT` chains that ufw uses" ([Docker: Docker and ufw](https://docs.docker.com/engine/network/packet-filtering-firewalls/)).
+
+**Why it happens.** ufw's output is confident and unambiguous, and it is telling the truth about the chains it controls. Nothing warns you that a whole category of traffic never reaches those chains. It is a false-confidence bug, which is the most dangerous kind.
+
+**Detect.** Only an external scan settles it (Â§8.1). On-box, compare `sudo ufw status` against `docker ps --format '{{.Ports}}'` â€” where they disagree, Docker wins.
+
+**Fix.** Â§2.4.3, Fixes 1â€“4. And re-read: **ufw is still worth running** â€” it protects the host's own services, sshd included. It is just not the thing protecting your containers.
+
+### 9.3 Root SSH with a password
+
+**The mistake.** Creating the server with a root password (or resetting to one and leaving it), and never touching `sshd_config`. OpenSSH's defaults are `PermitRootLogin prohibit-password` and â€” the killer â€” `PasswordAuthentication yes` ([sshd_config(5)](https://man.openbsd.org/sshd_config)).
+
+**Why it happens.** It works immediately, and the failure is invisible. Nothing tells you that thousands of automated attempts per day are hitting the box.
+
+**Detect.**
+```bash
+sudo sshd -T | grep -E 'permitrootlogin|passwordauthentication|kbdinteractive'
+sudo journalctl -u ssh --since "24 hours ago" | grep -c 'Failed password'
+```
+
+**Fix.** Â§1.7. And note that `PasswordAuthentication no` alone is a half-fix â€” `KbdInteractiveAuthentication yes` (also the default) can allow password prompts through PAM on some configurations. Turn both off.
+
+### 9.4 No fail2ban â€” and, worse, fail2ban installed but silently doing nothing
+
+**The mistake with a twist.** The classic mistake is not installing it. The *more common* modern mistake is installing it, seeing `active (running)`, and never checking that it can see any logs. Recent Debian/Ubuntu images often ship without `rsyslog`, so `/var/log/auth.log` never exists, and a jail with `backend = auto` watches nothing forever.
+
+**Detect.**
+```bash
+sudo fail2ban-client status sshd
+# "Total failed: 0" after weeks of a public SSH port means it is BLIND, not safe.
+```
+
+**Fix.** `backend = systemd` (Â§5.2), then deliberately fail four logins from a phone hotspot and confirm you get banned.
+
+### 9.5 Secrets in the compose file, committed to a public repo
+
+**The mistake.** `POSTGRES_PASSWORD: hunter2` inline in `docker-compose.yml`, `git add .`, public repo. Or a `.env` committed before `.gitignore` existed.
+
+**Why it is worse than it sounds.** GitHub is scanned continuously by automated credential harvesters. Exposure is measured in **minutes**, not days. And `git rm` does not help: **the secret remains in the repository history forever** and in every fork, clone and cached view.
+
+**Detect.**
+```bash
+git log --all --full-history -p -- '*.env' 'docker-compose.yml' | grep -iE 'password|secret|api[-_]?key|token'
+git log --all --oneline -- .env secrets/
+```
+
+**Fix.** In this order, and the order matters:
+1. **Rotate the secret first.** Immediately. It is compromised the moment it was pushed, and rewriting history does not un-compromise it.
+2. Then clean the repo (`git filter-repo`, or make it private and rotate everything regardless).
+3. Then add `.gitignore` (Â§6.1) and use file-based secrets (Â§6.3â€“6.4).
+4. Enable GitHub secret scanning and push protection on the repo.
+
+**Prevent it structurally:** install a pre-commit hook so it cannot happen again.
+```bash
+pip install --user detect-secrets   # or: brew install gitleaks
+detect-secrets scan > .secrets.baseline
+# add to .pre-commit-config.yaml and run: pre-commit install
+```
+
+### 9.6 Running everything as root inside containers
+
+**The mistake.** No `USER` in the Dockerfile, no `user:` in compose. Most images default to root, and root inside a container is a much shorter distance from root on the host than people assume.
+
+**Why it happens.** Everything just works as root. Permission errors are a real friction that non-root introduces, and "add `user: root`" makes them disappear.
+
+**Detect.**
+```bash
+docker compose ps -q | xargs -r -I{} docker inspect -f '{{.Name}} user=[{{.Config.User}}]' {}
+# user=[] means root
+docker compose exec app id     # uid=0(root) is the finding
+```
+
+**Fix.** Â§6.4/Â§6.5. Docker's own conclusion: containers are "quite secure; especially if you run your processes as non-privileged users inside the container" ([Docker Engine security](https://docs.docker.com/engine/security/)). Pair `user:` with `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges:true`.
+
+**Related and worse:** `privileged: true`, and mounting `/var/run/docker.sock` (Â§6.6). Both are root-on-host.
+
+### 9.7 No monitoring, so a breach is invisible
+
+**The mistake.** Nothing watches the server. You find out it was compromised when Hetzner emails you about abuse traffic, or when a user says the site is down, or â€” most commonly â€” never.
+
+**Why it happens.** Monitoring feels like a nice-to-have next to shipping features, and the free tiers require an afternoon of setup.
+
+**Detect.** Ask yourself: *if my server were mining cryptocurrency right now, how would I find out?* If you cannot name the mechanism, you do not have one.
+
+**Fix â€” the 30-minute version that covers most of it:**
+1. **Uptime monitor** hitting `/healthz` every 5 minutes with phone alerts. Free. Do this one first.
+2. **The weekly digest email** from Â§5.4.
+3. **`OnFailure=` alerts** on your backup and firewall systemd units (Â§7.5).
+4. **Healthchecks.io dead-man's switch** on the backup job.
+5. **Cloudflare's analytics dashboard** for traffic anomalies â€” it is already there and it has real client IPs.
+
+Point 1 alone catches most real incidents, because attackers who monetise tend to break things.
+
+### 9.8 Underestimating what a public IPv4 attracts
+
+**The reality.** A new Hetzner IPv4 address begins receiving unsolicited traffic within **minutes** of being assigned. Not because anyone is targeting you â€” because the entire IPv4 space is scanned continuously. Shodan alone added "1,000+ ports" to its scanning list in 2025 and offers monitoring that reports "what you have connected to the Internet within your network range within 5 minutes" ([Shodan Book: 2025 release notes](https://book.shodan.io/release-notes/2025/), [Shodan Monitor](https://monitor.shodan.io/)). Shodan and Censys are the *polite*, publicly documented scanners; the impolite ones are far more numerous and do not publish release notes.
+
+**What this means concretely:**
+
+- An exposed Redis with no password is typically found and exploited within **hours**, often much less. Redis is the archetypal case: no authentication by default in older versions, and a documented path from "can write keys" to "can write a crontab or an SSH key" â€” i.e. remote code execution as whoever runs redis.
+- An exposed Postgres or MongoDB draws credential-stuffing and, if reachable, the well-known "your data has been backed up, pay X BTC" ransom-wipe. Automated ransom campaigns against exposed databases have run continuously for years.
+- SSH on port 22 with passwords enabled receives thousands of credential attempts per day from day one.
+- None of this requires your domain to exist, your site to launch, or anyone to know who you are. **You do not have to be a target to be compromised.** You just have to be reachable.
+
+**The lesson for how you work:** there is no "I'll harden it after launch" window. The window between `CREATE & BUY NOW` and the first hostile packet is measured in minutes. That is why Â§1.2 attaches the firewall *at creation*, and why Â§1.11's cloud-init exists.
+
+### 9.9 Six more that show up constantly
+
+| Mistake | Why it bites | Fix |
+|---|---|---|
+| **Cloudflare SSL mode set to `Flexible`** | Cloudflareâ†’origin traffic is plain HTTP across the public internet. The padlock is a lie. | `Full (strict)` + Cloudflare Origin CA cert (Â§3.7). |
+| **A grey-clouded DNS record** (`staging.`, `mail.`, `direct.`) | Publishes the origin IP in DNS, defeating the whole of Â§3 in one record. | `dig +short <each subdomain>`; proxy everything or move it. |
+| **`chmod 777` to fix a permissions error** | Usually applied to a data volume or a secret file, and never undone. | `chown` to the container's UID instead; Â§6.4 uses explicit `user:`. |
+| **Postgres data in a container layer, not a volume** | `docker compose down` deletes the database. Not a breach; still fatal. | Named volume or bind mount, plus Â§7.5 backups. |
+| **No log rotation** | Docker JSON logs grow without limit until the disk fills and Postgres stops. | `log-opts max-size/max-file` in `daemon.json` (Â§2.4.3). |
+| **Testing the firewall from an existing SSH session** | Hetzner: "Existing connections established before the Firewall was updated will remain active" ([Hetzner: Firewall FAQ](https://docs.hetzner.com/cloud/firewalls/faq/)). You "verify" with a connection the new rules never touched. | Always test from a **new** connection on a **different** network. |
+
+---
+
+## 10. Maintenance checklist
+
+Print this. Put it in your password manager. The whole point of sections 1â€“9 is that this list is short.
+
+### Every week â€” 10 minutes, mostly reading one email
+
+- [ ] **Read the weekly digest email** (Â§5.4). If it did not arrive, that is itself the finding â€” investigate.
+- [ ] In the digest, specifically look at:
+  - [ ] **`ss -tlnp`** â€” anything on `0.0.0.0` other than 80/443? *(the Â§2.4 regression check)*
+  - [ ] **Published container ports** â€” any new `0.0.0.0:` entry?
+  - [ ] **SSH logins** â€” any `Accepted publickey` you do not recognise?
+  - [ ] **Disk usage** â€” under 80%?
+  - [ ] **`Reboot required?`** â€” if yes and it has been yes for days, automatic reboots are broken.
+- [ ] **Uptime monitor** shows no unexplained gaps.
+- [ ] `sudo fail2ban-client status sshd` â€” running and counting.
+
+### Every month â€” 45 minutes
+
+- [ ] **Rebuild and redeploy containers** (Â§4.6) â€” `docker compose pull && docker compose build --pull && docker compose up -d`. *The most-skipped, most-important task.*
+- [ ] **Scan images for CVEs** â€” `docker scout cves` or `trivy image <registry-image>`.
+- [ ] **Restore a backup into a scratch container and count rows** (Â§7.4 item 3). An untested backup is a hope.
+- [ ] `sudo debsums -c` â€” expect no output.
+- [ ] `sudo apt update && apt list --upgradable` â€” apply the `-updates` packages you deliberately excluded from unattended upgrades (Â§4.3).
+- [ ] `sudo aide.wrapper --check` â€” review changes; re-baseline after legitimate ones.
+- [ ] Review Cloudflare analytics for traffic anomalies.
+- [ ] `docker system prune -af --volumes` â€” **read what it will delete first**; the `--volumes` flag can remove data.
+- [ ] Confirm the off-site backup bucket actually contains the last 30 nightly files.
+
+### Every quarter â€” 90 minutes
+
+- [ ] **Run the full external verification** (Â§8) from a network you have never used for this server.
+- [ ] Check `https://www.shodan.io/host/YOUR.SERVER.IP` â€” what does the internet know about you?
+- [ ] Check `https://crt.sh/?q=foundit.app` for subdomains you forgot, then `dig +short` each one for grey-clouded records.
+- [ ] Compare `https://www.cloudflare.com/ips/` against `/var/lib/foundit/cloudflare-ips-v4.txt`.
+- [ ] **Do a full rebuild drill**: build a new server from the runbook and your backups into a scratch Hetzner project, confirm the site comes up, then destroy it. Time it. If it takes more than 90 minutes, something in Â§7.4 is missing.
+- [ ] Rotate the database password (Â§6.7 drill).
+- [ ] Review who has access: SSH keys in `authorized_keys`, Hetzner project members, Cloudflare account members, GitHub collaborators.
+- [ ] Confirm the Hetzner backups list shows 7 recent dated entries.
+- [ ] `sudo sshd -T | grep -E 'permitrootlogin|passwordauthentication'` â€” confirm a package upgrade has not reset anything.
+
+### Every year â€” half a day
+
+- [ ] Plan the **OS upgrade** (Ubuntu 24.04 â†’ 26.04 LTS, or Debian point release). Do it on a *new* server from your runbook, not in place. This is the rebuild drill with a real payoff.
+- [ ] Rotate every credential: API tokens, deploy keys, SSH keys.
+- [ ] Re-read this document. Some of it will be out of date.
+- [ ] Consider migrating to Cloudflare Tunnel (Â§3.8) if you have not already.
+
+### After every change to firewall, SSH or Docker networking â€” always
+
+- [ ] Second SSH session still works (opened *after* the change).
+- [ ] `curl -sI https://foundit.app/ | head -1` returns 200.
+- [ ] `docker ps --format '{{.Names}}\t{{.Ports}}'` â€” no new `0.0.0.0` publishing.
+- [ ] External check of ports 5432/6379/3000 (Â§8.7 script).
+- [ ] Snapshot taken **before** the change, deleted after it is proven good.
+
+---
+
