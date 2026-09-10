@@ -1,0 +1,239 @@
+# Every test this project has, run on every change, whether or not anyone
+# remembers to run them.
+#
+# Two jobs, in parallel:
+#
+#   "No credentials committed"   scripts/scan-secrets.sh over every file in
+#                                the commit. Needs no database, so it answers
+#                                in well under a minute.
+#   "Database, tests and search  stands up PostgreSQL, applies the migrations,
+#    quality"                    and runs everything that needs a database.
+#
+# A red X in the GitHub interface names the step that broke. The step names
+# below are written to be read by someone who is not going to open the log.
+#
+# Nothing here is allowed to fail quietly. No step is marked to keep going
+# after an error, and no command has its exit code swallowed. A step that
+# cannot fail the build is not a check, it is a comment.
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Read the code, nothing else. This workflow never needs to write anything
+# back to the repository.
+permissions:
+  contents: read
+
+# A second push to the same branch cancels the first. Nobody is waiting on the
+# result of a commit that has already been replaced.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: No credentials committed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Check no password, key or token reached a tracked file
+        run: bash scripts/scan-secrets.sh
+
+  test:
+    name: Database, tests and search quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        # `bash -e -o pipefail`, so any command that fails stops the step,
+        # including one on the left of a pipe.
+        shell: bash
+
+    services:
+      # The same family of image as db/docker-compose.dev.yml, so what CI
+      # tests is what development runs. `vector` comes from this image;
+      # `pg_trgm` and `citext` are contrib modules in the PostgreSQL base
+      # underneath it. db/migrations/0001_init.sql needs all three.
+      postgres:
+        image: pgvector/pgvector:pg17-trixie
+        env:
+          # Throwaway values for a container that exists for ninety seconds,
+          # matching db/docker-compose.dev.yml exactly rather than inventing a
+          # second set. There is nothing here worth protecting: the database
+          # holds the invented development catalogue, it is reachable only
+          # from this runner, and it is destroyed when the job ends.
+          POSTGRES_USER: foundit_owner
+          POSTGRES_PASSWORD: local_development_only
+          POSTGRES_DB: foundit
+        ports:
+          # 5433 on the runner, the same port .env.local uses, so every
+          # connection string below reads exactly like the local one.
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U foundit_owner -d foundit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Two roles, and the difference between them is a security boundary.
+      # DATABASE_URL_OWNER runs migrations and the SQL suites; DATABASE_URL is
+      # the application role that owns nothing and has no BYPASSRLS, which is
+      # the only honest thing to measure search quality against. There is no
+      # fallback between them, here or anywhere else.
+      DATABASE_URL_OWNER: postgresql://foundit_owner:local_development_only@127.0.0.1:5433/foundit
+      DATABASE_URL: postgresql://foundit_app:local_development_only_app@127.0.0.1:5433/foundit
+      # db/test.sh reaches the database over the network rather than through
+      # `docker exec`, because in CI the database is a service container, not
+      # a container this job can name.
+      DB_TEST_RUNNER: psql
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          # package.json says "node": ">=26.0.0".
+          node-version: '26'
+          # Reuses the download between runs, keyed on package-lock.json.
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check PostgreSQL has vector, pg_trgm and citext
+        run: |
+          psql "$DATABASE_URL_OWNER" -qXAt -c "select version()"
+          missing=$(psql "$DATABASE_URL_OWNER" -qXAt -c "
+            select string_agg(want, ', ')
+            from unnest(array['vector','pg_trgm','citext']) as want
+            where want not in (select name from pg_available_extensions)")
+          if [ -n "$missing" ]; then
+            echo "This PostgreSQL image cannot provide: $missing"
+            echo "db/migrations/0001_init.sql needs all three. The image is wrong."
+            exit 1
+          fi
+          echo "vector, pg_trgm and citext are all available."
+
+      - name: Create the application role
+        # Exactly what db/docker-compose.dev.yml creates on a fresh data
+        # directory, and for the same reason: 0001_init.sql creates
+        # foundit_app with no password if it does not already exist, and a
+        # role that cannot log in means everything gets measured as the owner,
+        # which bypasses every row-level security policy in the schema. So the
+        # role is created first, with a password, and 0001 leaves it alone.
+        #
+        # No grants here. What foundit_app may do is decided by the
+        # migrations, which are the same files that run on the server.
+        run: |
+          psql "$DATABASE_URL_OWNER" -v ON_ERROR_STOP=1 -qX <<'SQL'
+          do $$
+          begin
+            if exists (select 1 from pg_roles where rolname = 'foundit_app') then
+              alter role foundit_app login noinherit password 'local_development_only_app';
+            else
+              create role foundit_app login noinherit password 'local_development_only_app';
+            end if;
+          end
+          $$;
+          SQL
+          psql "$DATABASE_URL" -qXAt -c "select 'foundit_app can log in: ' || current_user"
+
+      - name: Apply every migration and load the development catalogue
+        run: node db/apply.mjs --seed
+
+      - name: Check applying the migrations twice changes nothing
+        # A migration that is not recorded, or that is recorded under a name
+        # that does not match the file, runs again on the next deploy. This is
+        # the cheapest possible way to find that out: run the applier a second
+        # time and insist it did nothing at all.
+        run: |
+          node db/apply.mjs | tee second-apply.log
+
+          if grep -q '^> ' second-apply.log; then
+            echo
+            echo "The second apply RAN a migration instead of skipping it."
+            echo "Every migration should already be recorded in infra.schema_migrations."
+            exit 1
+          fi
+
+          # awk rather than `grep -c`, which exits 1 when the count is zero
+          # and would end the step with "process exited with code 1" instead
+          # of the sentence below.
+          expected=$(find db/migrations -maxdepth 1 -name '*.sql' | wc -l)
+          skipped=$(awk '/already applied/ {n++} END {print n+0}' second-apply.log)
+          if [ "$skipped" -ne "$expected" ]; then
+            echo
+            echo "There are $expected migration files but the second apply skipped $skipped."
+            echo "A migration file is not being recorded under its own name."
+            exit 1
+          fi
+          echo
+          echo "All $expected migrations were already applied. A second apply is a no-op."
+
+      - name: Check the scoring arithmetic
+        # Pure arithmetic, no database. It runs after the migrations only
+        # because the migrations are the thing most likely to break, and a red
+        # X on the first failing step is the one people read.
+        run: node eval/scoring.test.mjs
+
+      - name: Check the database refuses what it should
+        # bash db/test.sh globs db/test/*.sql and then proves every file in
+        # that folder was actually executed. Naming files here instead is how
+        # a whole suite came to be written and run nowhere.
+        run: bash db/test.sh
+
+      - name: Check search quality has not regressed
+        # As foundit_app, never as the owner: the owner bypasses row-level
+        # security and measures about three times faster than the application
+        # ever will. Exit code 4 means nDCG@10 fell below the recorded
+        # baseline in eval/baselines.md by more than the tolerance.
+        run: node eval/run.mjs --baseline
+
+      - name: Run the application's unit tests
+        # Whatever package.json's "test:unit" script points at, as soon as
+        # there is a tests/ folder for it to point at. Written this way so a
+        # suite cannot be added and left running nowhere, which is exactly
+        # what happened to db/test/search_events_test.sql.
+        run: |
+          if [ -d tests ] && node -e "process.exit((require('./package.json').scripts || {})['test:unit'] ? 0 : 1)"; then
+            npm run test:unit
+          else
+            echo "No tests/ folder and no test:unit script. This step starts"
+            echo "running by itself the day there is one of each."
+          fi
+
+      - name: Build the web app
+        # `npm run build` if package.json has a build script, and a printed
+        # sentence if it does not. Written this way so that nobody has to
+        # remember to come back and wire the build in on the day the web app
+        # lands — remembering is the failure this whole workflow exists to stop.
+        run: |
+          if node -e "process.exit((require('./package.json').scripts || {}).build ? 0 : 1)"; then
+            npm run build
+          else
+            echo "No build script in package.json yet. Nothing to build."
+          fi
+
+      - name: Keep the evaluation report
+        # Always, including when the run above failed — a failed run is
+        # exactly when someone wants to see which queries got worse.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-evaluation
+          path: eval/results/
+          if-no-files-found: ignore
+          retention-days: 14
