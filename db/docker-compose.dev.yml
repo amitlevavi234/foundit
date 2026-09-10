@@ -1,0 +1,28 @@
+# A throwaway PostgreSQL for working on your own machine.
+#
+# Start it:   docker compose -f db/docker-compose.dev.yml up -d
+# Stop it:    docker compose -f db/docker-compose.dev.yml down
+#
+# The data lives in ./db/.data, a plain folder on disk rather than a Docker
+# named volume. That is deliberate: `docker compose down -v` deletes named
+# volumes permanently, and it is a command people run casually.
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: foundit-dev-db
+    environment:
+      POSTGRES_USER: foundit_owner
+      POSTGRES_PASSWORD: local_development_only
+      POSTGRES_DB: foundit
+    ports:
+      # Bound to localhost, never 0.0.0.0. On this laptop it hardly matters;
+      # the habit is what matters, because on the server it decides whether
+      # the database is on the public internet.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - ./.data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foundit_owner -d foundit"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
