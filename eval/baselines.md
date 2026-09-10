@@ -38,6 +38,24 @@ size of the set noted.
 
 | Date | Commit | Phase | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | What changed |
 | ---- | ------ | ----- | ------- | --------- | ------- | ------- | ------ | ----------- | ------------ |
+| 2026-09-10 | 364779b | 2 | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | First recorded. PostgreSQL full-text and trigram only, no embeddings and no model call. |
+
+### Phase 2, by slice
+
+| Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms |
+| ----- | - | --------- | ------- | ------- | ------ |
+| english | 50 | 0.5937 | 0.7341 | 12.0 | 18.2 |
+| non-english | 10 | 0.2750 | 0.4550 | 8.1 | 10.2 |
+| constrained | 17 | 0.6392 | 0.6837 | 11.3 | 45.6 |
+| unconstrained | 43 | 0.5016 | 0.6891 | 11.4 | 17.3 |
+
+**The non-English slice is the honest weakness.** 0.455 against 0.734 for
+English, from a search that stems everything with the `english` dictionary and
+has no idea what the words mean. Nothing here was tuned to hide it, and Phase 4
+is where it gets fixed — restating a non-English query in English before
+matching. Expect this row to move more than any other.
+
+Constraint violations: **0**. Zero-result queries: **0 of 60**.
 |  |  | 2 |  |  |  |  |  |  |  |
 
 ## Per-slice detail

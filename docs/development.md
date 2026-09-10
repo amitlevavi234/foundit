@@ -1,13 +1,35 @@
 # Working on Foundit locally
 
-## The database is not on your machine
+## Start the database
 
-Docker Desktop on the laptop is broken (an orphaned socket Windows will not
-delete; a reboot fixes it). So PostgreSQL runs as a permanent service on the
-Hetzner server instead, and you reach it through an SSH tunnel.
+```bash
+docker compose -f db/docker-compose.dev.yml up -d
+node db/apply.mjs --fresh --seed
+```
 
-That is not a workaround for the broken laptop — it is where the database was
-always going to live. What the laptop keeps is the code.
+That is a throwaway PostgreSQL on your own machine, on port 5433, holding
+invented data. Its password is in the compose file on purpose.
+
+### When Docker will not start
+
+Run this and go and make a coffee:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scriptsix-docker-sockets.ps1
+```
+
+Docker leaves socket files behind when it is killed rather than shut down, and
+Windows then cannot delete them, so Docker cannot start — it needs to remove
+the old socket before binding a new one. **Rebooting does not help**: the files
+survive a reboot. The script renames the folders containing them aside, which
+works because renaming a folder does not require opening what is inside it.
+
+**Do not press "Reset to factory defaults"** in Docker's error dialog. It does
+not fix this, and it deletes every image and container you have.
+
+## The server also runs PostgreSQL
+
+Production lives there, not on the laptop.
 
 ### Two databases, one instance
 
