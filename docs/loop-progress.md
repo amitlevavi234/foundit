@@ -250,6 +250,10 @@ Two honest statements about that:
   none is close", and there cannot honestly be one until Phase 5 calibrates a
   score. **This is the biggest thing Phase 3 traded away and it is not a bug
   that can be fixed by tuning.**
+  **Fixed after the owner's review — see "After Phase 3" below.** Two claims
+  here turned out to be wrong. A floor did not need a calibrated score, only
+  something to choose it against, which is what the negatives are; and tuning
+  is exactly what fixed it, once there was a second set to tune against.
 - **The reader now costs twice what it did.** The `--read-query` divergence
   went from -0.0093 to -0.0183 — not because the reader got worse, but because
   the ranker got better, so a constraint it fails to read costs more. Six

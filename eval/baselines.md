@@ -16,6 +16,15 @@ produce different numbers from the same code, so the gate picks the newest row
 recorded in the same mode. A run with no key and no fixture is a text-only run
 and is measured against the text-only baseline, which is the honest comparison.
 
+**`Zero-result` and `Negatives empty` are gates too, since the relevance
+floor.** A run may not leave more golden queries empty than the row records,
+and may not answer a smaller share of `eval/negatives.jsonl` with an empty
+page than the row records — a rate, so a longer negatives file does not trip
+it by arithmetic. A row that leaves either column blank gates nothing on it,
+which is every row recorded before the floor. If a row records negatives and
+the negatives were not run at all, that fails: a gate that switches itself off
+when its input file goes missing is not a gate.
+
 **A row marked WITHDRAWN is skipped**, whatever numbers are in it. The one
 below is kept because deleting it would hide what happened, not because it is a
 baseline.
@@ -56,12 +65,13 @@ size of the set noted.
 
 ## Recorded baselines
 
-| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | What changed |
-| ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | ------------ |
-| 2026-09-10 | 364779b | 2 | no | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | **WITHDRAWN — see below.** Not a baseline. |
-| 2026-09-10 | 39569ba | 2 | no | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
-| 2026-09-11 | bc9abfe | 3 | yes | 60 | 0.6747 | 0.7019 | 72.6 | 115.3 | 0 of 60 | Hybrid retrieval: a fifth RRF leg at weight 3.0, cosine distance over `tool_problems.embedding` (`text-embedding-3-small`, 512 dimensions, `halfvec`), ranking only the constraint-filtered candidate set. |
-| 2026-09-11 | 654f29d | 3 | yes | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 of 60 | The adversarial review's fixes. The search is unchanged; the -0.0001 is float16 rounding, now frozen by `db/seed/embeddings.fixture.json`. **This is the reproducible one** — every run, laptop or CI, key or no key, warms from the same recorded vectors. |
+| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | Negatives empty | What changed |
+| ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | --------------- | ------------ |
+| 2026-09-10 | 364779b | 2 | no | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | | **WITHDRAWN — see below.** Not a baseline. |
+| 2026-09-10 | 39569ba | 2 | no | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
+| 2026-09-11 | bc9abfe | 3 | yes | 60 | 0.6747 | 0.7019 | 72.6 | 115.3 | 0 of 60 | | Hybrid retrieval: a fifth RRF leg at weight 3.0, cosine distance over `tool_problems.embedding` (`text-embedding-3-small`, 512 dimensions, `halfvec`), ranking only the constraint-filtered candidate set. |
+| 2026-09-11 | 654f29d | 3 | yes | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 of 60 | | The adversarial review's fixes. The search is unchanged; the -0.0001 is float16 rounding, now frozen by `db/seed/embeddings.fixture.json`. **This is the reproducible one** — every run, laptop or CI, key or no key, warms from the same recorded vectors. |
+| 2026-09-11 | 9634cd6 | 3 | yes | 60 | 0.6719 | 0.7035 | 82.5 | 122.5 | 0 of 60 | 26 of 30 | **The relevance floor** (`0006_relevance_floor.sql`), after the owner's review. A result is returned only with evidence — close enough in meaning, every term of the sentence, or a close name. The golden set barely moves; the 30 sentences in `eval/negatives.jsonl` go from 0 of 30 answered with an empty page to 26 of 30, and from 20.0 to 2.2 rows leaked each. See "Phase 3 amended" below. |
 
 ### Phase 2, by slice
 
@@ -273,6 +283,10 @@ Three things that curve says:
   notice; a person would. There is no relevance floor to say "these are the
   nearest, and none of them is close", and there cannot honestly be one until
   Phase 5 calibrates a score.
+  **Answered in 9634cd6, and the last sentence was wrong.** A floor did not
+  need a calibrated score, only a measurement it could be chosen against —
+  which is what `eval/negatives.jsonl` is. See "Phase 3 amended: the relevance
+  floor" below.
 - **The catalogue is 223 tools and 504 statements.** A sequential scan of 504
   half-precision vectors is the right implementation at that size and the
   measurement says nothing about the right implementation at fifty thousand.
@@ -299,6 +313,32 @@ always a nearest neighbour and never an empty page.
 the instrument grew a second half — `eval/negatives.jsonl`, 30 sentences whose
 right answer is nothing at all (`eval/README.md`, "The negatives") — and the
 floor was chosen by measuring against both sets at once.
+
+### The recorded run — 9634cd6
+
+| Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero |
+| ----- | - | --------- | ------- | ------- | ------ | ---- |
+| all | 60 | 0.6719 | 0.7035 | 82.5 | 122.5 | 0 |
+| english | 50 | 0.6913 | 0.7237 | 85.6 | 130.5 | 0 |
+| non-english | 10 | 0.5750 | 0.6025 | 66.7 | 89.6 | 0 |
+| constrained | 17 | 0.7020 | 0.6834 | 70.2 | 232.2 | 0 |
+| unconstrained | 43 | 0.6601 | 0.7115 | 87.3 | 122.5 | 0 |
+
+Constraint violations: **0**. Permission suites: **3 of 3 passing**. Warmed
+from the recorded fixture, so this run called nothing.
+
+| | Phase 3 (654f29d) | With the floor (9634cd6) |
+| --- | --- | --- |
+| nDCG@10, as written | 0.7018 | **0.7035** |
+| nDCG@10, as read (`--read-query`) | 0.6834 | **0.6885** |
+| divergence | -0.0183 | **-0.0151** |
+| recall@10 | 0.6747 | 0.6719 |
+| golden queries empty | 0 of 60 | 0 of 60 (both slices) |
+| negatives answered with nothing | 0 of 30 | **26 of 30** as written, **27 of 30** as read |
+| rows leaked per negative | 20.0 | **2.2** as written, 1.6 as read |
+
+The negatives are new, so their Phase 3 column is what the same 30 sentences
+did against `654f29d`: every one of them returned the full twenty rows.
 
 ### Every threshold tried
 
