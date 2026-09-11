@@ -322,9 +322,14 @@ test('each key is read from a named variable, and never written anywhere', () =>
     ['KEY_VARIABLES'],
     'the only thing `name` is ever bound from is KEY_VARIABLES',
   );
+  // A bare `name = …` / `const name = …` would be a second source for the key
+  // variable; `this.name = 'ReaderError'` on the error class is not, so the
+  // member access is excluded. (An earlier version of this regex had its `\b`
+  // corrupted into a backspace byte by a shell heredoc, which made the
+  // assertion match nothing and pass on every input.)
   assert.doesNotMatch(
     reader,
-    /name\s*=\s*(?!=)/,
+    /(?<![.\w$])name\s*=\s*(?!=)/,
     'nothing else may assign `name` in the reader',
   );
 });

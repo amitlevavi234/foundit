@@ -86,7 +86,23 @@ Or stop after 30 turns, saying plainly what is blocking.
 ## Phase 4 — understanding the sentence
 
 ```text
-/goal Phase 4 of docs/build-phases.md is complete: a rules pass extracts constraints with no model call, gpt-5-nano with a validated output schema handles what the rules miss, both run concurrently with the embedding call, and the search route enforces a per-visitor rate limit and a 200-character cap. Proven by `node eval/run.mjs` beating the Phase 3 baseline — paste both — with the non-English slice improving specifically, and by the measured cost per thousand searches printed and recorded. The model must never invent a tool that is not in the database; show the schema validation rejecting a bad response. Or stop after 25 turns.
+/goal Phase 4 of docs/build-phases.md is complete AND its gate has passed. Read docs/build-phases.md, docs/product-decisions.md, docs/development.md, eval/baselines.md, lib/constraints.ts and db/migrations/0004–0006 first. Every claim below is settled by pasting real command output, never by summarising.
+
+Done means all ten:
+1. The rules pass (lib/constraints.ts) still runs first with no model call, and gpt-5-nano with a strict, validated JSON schema reads what the rules miss: constraints, an English restatement of a non-English sentence, and whether the sentence asks for software at all. The model's output is validated before use and it can name no tool; paste a bad response being rejected by the schema.
+2. The model call and the embedding call run concurrently, never one after the other, except that a restated English sentence may be embedded afterwards when measurement shows it helps. Paste the timing of one search showing both in flight.
+3. Readings are cached in Postgres keyed on the normalised query exactly like query embeddings (no user column, owner-defined functions only, capped), and the fixture covers them so CI runs the model path with no key. Paste a keyless `--baseline` run.
+4. The search route enforces a per-visitor rate limit and global daily caps on paid calls, from environment variables with defaults; nothing about a visitor is persisted or logged. Over the per-visitor limit the page says so; over a daily cap search degrades to rules + text-only and never errors. Paste both behaviours.
+5. `node eval/run.mjs` on the shipped path BEATS the Phase 3-amended baseline in eval/baselines.md on nDCG@10 (paste both), the non-English slice improves specifically (paste both), the perturbation gate stays at zero, and the negatives — especially the held-out set's near-misses — improve because "not asking for software" is now read. eval/golden.jsonl is not edited.
+6. Cost per thousand searches is measured from real token counts and printed by the eval and recorded; it stays under a fifth of a cent per search.
+7. The only outbound HTTP calls in the application are lib/embeddings.ts and one new reader file, each to one hardcoded OpenAI URL; tests/markup.test.mjs is tightened to say exactly that; the key is read from one variable and never logged. When the key is absent or the call fails or times out, search runs rules + text + vector and the page renders.
+8. Nothing new is joinable to a person: readings cache, rate-limit state, search_events. The 200-character cap is enforced before any model or embedding call.
+9. `npm test`, `npm run lint`, `npx tsc --noEmit`, `npm run build` and `bash db/test.sh` all pass. Paste each tail.
+10. Review: a FRESH Opus 5 subagent that has not seen the work writes 25 unanswerable sentences of its own before reading any negatives file, then attacks the schema validation, the rate limiter, the caches, the concurrency claim, the cost figure and the number. Paste its findings verbatim, then fix each or justify it explicitly.
+
+Constraints that cannot be traded for a passing check: never disable row-level security or write a policy evaluating to true; the app never connects as the owner; no secret in any tracked file or in chat; the server never fetches a URL a stranger supplied; the model never invents a tool; the golden set is never edited to move a score. Update docs/loop-progress.md before finishing. Do not start Phase 5.
+
+Or stop after 30 turns, saying plainly what is blocking.
 ```
 
 ## Phase 5 — ranking and the fit score
