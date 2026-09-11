@@ -8,6 +8,7 @@ import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
 import { EmptyState } from '@/components/EmptyState';
 import { Mark } from '@/components/Logo';
+import { LoadingLine } from '@/components/RouteLoading';
 import { SearchField } from '@/components/SearchField';
 import { SiteHeader } from '@/components/SiteHeader';
 import { SkeletonGrid } from '@/components/SkeletonCard';
@@ -52,8 +53,15 @@ import type { ToolResultDetail } from '@/lib/types';
  *
  * What is deliberately not here: a fit percentage. `score` is an ordering
  * number, and Phase 5 owns turning it into something a person can be told.
- * Each card says where it matched instead, which is a fact the database
- * reports rather than a number we invented.
+ * Where each card matched is a fact the database reports rather than a number
+ * we invented, and it sits one "Why this?" away rather than on the face of the
+ * card (docs/product-decisions.md §6, amended 11 September 2026).
+ *
+ * What is also not here, since db/migrations/0006_relevance_floor.sql: tools
+ * with no evidence. When the sentence has a vector, search_tools drops every
+ * row that is not close in meaning, does not carry every word, and is not
+ * named what was typed. So a page may hold three results, or none, and the
+ * copy below says which rather than implying a full page.
  * ======================================================================== */
 
 export const metadata: Metadata = {
@@ -211,15 +219,10 @@ export default async function Results({ searchParams }: ResultsProps) {
 function Loading() {
   return (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingTop: 8 }}>
-        <span className="spinner" aria-hidden="true" />
-        <span className="disp" style={{ fontSize: 22, fontWeight: 700 }} role="status">
-          Matching against the catalogue…
-        </span>
-        <span className="faint" style={{ fontSize: 'var(--t-meta)' }}>
-          Read your request · ordering by words and meaning
-        </span>
-      </div>
+      <LoadingLine
+        label="Matching against the catalogue…"
+        detail="Read your request · ordering by words and meaning"
+      />
       <SkeletonGrid />
     </>
   );
@@ -382,6 +385,12 @@ async function Answer({
   // cards already draw no band; the heading must not claim one either.
   const browse = searchText === '';
 
+  // The relevance floor ran: the sentence had a vector, so every row below
+  // cleared it (db/migrations/0006_relevance_floor.sql, point D). With no
+  // vector the search is Phase 2's, unfloored, and the heading must not claim
+  // a closeness nothing judged.
+  const floored = usedVector && !browse;
+
   // Judged on the text the results actually came from. With nothing left to
   // search on the rows are the catalogue in editorial order, and a spread
   // across categories is that order's shape rather than an ambiguity worth
@@ -466,14 +475,30 @@ async function Answer({
                   // tools and "free" matches a great many more than twelve.
                   `The first ${results.length} that meet this.`
                 : `${results.length} ${results.length === 1 ? 'tool meets' : 'tools meet'} this.`
-              : results.length >= RESULT_LIMIT
-                ? `The first ${results.length} matches.`
-                : `${results.length} ${results.length === 1 ? 'match' : 'matches'}.`}
+              : floored
+                ? // Since the relevance floor a searched page is exactly as
+                  // long as the evidence, so the heading counts what cleared
+                  // it rather than implying a page of twelve. "Come close" is
+                  // the claim the floor supports — close in meaning, carrying
+                  // every word, or named what was typed — not a claim of fit.
+                  results.length >= RESULT_LIMIT
+                  ? `The first ${results.length} that come close.`
+                  : `${results.length} ${results.length === 1 ? 'tool comes' : 'tools come'} close.`
+                : results.length >= RESULT_LIMIT
+                  ? `The first ${results.length} matches.`
+                  : `${results.length} ${results.length === 1 ? 'match' : 'matches'}.`}
           </span>{' '}
           {category ? (
             <span className="muted" style={{ fontSize: 'var(--t-body-lg)' }}>
               Narrowed to {results[0]?.categoryName ?? category}.{' '}
               <Link href={href({ q: query, drop: dropped, skip: true })}>Show everything</Link>
+            </span>
+          ) : floored && results.length < RESULT_LIMIT ? (
+            // A short page is the floor working, and it says so, so that
+            // three results read as "that is all there is" rather than as a
+            // page that failed to load the rest.
+            <span className="muted" style={{ fontSize: 'var(--t-body-lg)' }}>
+              Nothing else in the catalogue was close enough to show.
             </span>
           ) : null}
         </div>
@@ -581,7 +606,26 @@ function factsOf(result: ToolResultDetail): string[] {
   return [pricingLabel(result.pricing), ...result.flags.map(flagLabel)];
 }
 
-/** ResultsEmpty.dc.html. Not a shrug: what was asked, and what to give up. */
+/**
+ * ResultsEmpty.dc.html. Not a shrug: say plainly that there is no tool for
+ * this, then offer the ways forward that exist.
+ *
+ * Since the relevance floor this is the page a sentence the catalogue cannot
+ * answer lands on — a car that grinds when it brakes, a divorce lawyer — where
+ * before it was twelve nearest neighbours under a confident heading. The owner
+ * asked for exactly this: a note saying there is nothing like that right now,
+ * and somewhere to go from here.
+ *
+ * Two things it deliberately does not say. It does not apologise, because
+ * nothing went wrong: an empty page is the right answer to a question nothing
+ * here answers. And it does not promise the tool will be added, because nobody
+ * has decided to add it and a promise on this page would be read as one.
+ *
+ * It also cannot say WHY the page is empty — whether nothing is close to the
+ * sentence, or something close was removed by a constraint — without a second
+ * search per constraint, which is the fan-out this codebase does not do. So
+ * with constraints it says both are possible and offers to drop one.
+ */
 function Nothing({
   query,
   constraints,
@@ -595,6 +639,7 @@ function Nothing({
 
   return (
     <EmptyState
+      title="Foundit doesn’t have a tool for that yet."
       loosen={constraints.map((c) => ({
         label: `Drop ${c.label.toLowerCase()}`,
         // A loosened search is its own URL. The artboard puts a count behind
@@ -603,11 +648,11 @@ function Nothing({
         // do, so the number is left out rather than guessed.
         href: href({ q: query, drop: [...dropped, c.key] }),
       }))}
-      loosenTitle="Closest we can get, if you loosen one constraint"
+      loosenTitle="Or search again without one of your constraints"
       actions={
         <>
           <Link href="/browse" className="btn btn-coral" style={{ textDecoration: 'none' }}>
-            Browse what the catalogue does have
+            Browse problems people solved here
           </Link>
           <Link href="/" className="btn btn-sm" style={{ textDecoration: 'none' }}>
             Start a new search
@@ -617,15 +662,28 @@ function Nothing({
     >
       {stated.length > 0 ? (
         <>
-          Foundit only recommends tools people can stand behind, and nothing in the catalogue meets
-          all of this at once: <strong>{stated.join(', ')}</strong>. A constraint here is a filter,
-          not a preference — if you say free, a paid tool does not appear however well it fits.
+          <p style={{ margin: 0 }}>
+            Nothing in the catalogue comes close to this with every constraint applied:{' '}
+            <strong>{stated.join(', ')}</strong>. A constraint here is a filter, not a preference —
+            if you say free, a paid tool does not appear however well it fits — so dropping one
+            may turn something up.
+          </p>
+          <p style={{ margin: '12px 0 0' }}>
+            You can also browse the problems people have already solved here, or describe it
+            differently in the box below.
+          </p>
         </>
       ) : (
         <>
-          Foundit only recommends tools people can stand behind, and nothing in the catalogue
-          answers this yet. Try describing the situation rather than the tool: what you are trying
-          to get done, and what would make an answer unusable.
+          <p style={{ margin: 0 }}>
+            Nothing in the catalogue comes close to what you described, so there is nothing here
+            to show you — rather than a page of tools that don’t fit.
+          </p>
+          <p style={{ margin: '12px 0 0' }}>
+            Two ways forward: browse the problems people have already solved here, or describe it
+            differently in the box below — the situation rather than the tool: what you are trying
+            to get done, and what would make an answer no use to you.
+          </p>
         </>
       )}
     </EmptyState>

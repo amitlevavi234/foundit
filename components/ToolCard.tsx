@@ -11,17 +11,26 @@ import { ToolTile } from './ToolTile';
 /**
  * The result card, from `resultCard()` in design/canvas/build.mjs.
  *
- * Reading order down the card is the order the design puts the argument in:
- * how it matched, what it is, what matched, which constraints it meets and
- * which it misses, then what other people made of it and what you can do next.
- * The match comes first because that is the claim the product is making — and
- * until Phase 5 calibrates a fit, that claim is a location rather than a
- * score, so the band goes where the meter will one day sit.
+ * What the card shows by default is what a person deciding needs: the name,
+ * what the tool is, which of their constraints it meets and which it misses,
+ * what other people made of it, and what they can do next.
  *
- * Everything below the name is optional. Phase 2's search returns a name, a
- * summary and an ordering score and nothing else, so the card has to be
- * legible with only those — and grow the meter, the reasons and the chips as
- * later phases produce them, without becoming a different component.
+ * How it matched is NOT on the face of the card any more. The owner looked at
+ * a page of twelve cards each carrying "Matched: problem + description", a
+ * sentence explaining that, and a quoted problem statement, and said that how
+ * the match goes does not need to show on every card (docs/product-decisions.md
+ * §6, amended 11 September 2026). It is one small "Why this?" away instead —
+ * a native <details>, so it needs no JavaScript, is reachable and operable
+ * from the keyboard, and announces its own expanded state.
+ *
+ * The designed fit meter still has its slot (`fit`), and stays empty until
+ * Phase 5 calibrates a number worth putting in it: a rescaled similarity shown
+ * as a percentage is forbidden by docs/build-phases.md. When the meter
+ * arrives, the explanation behind "Why this?" is where the reasons will live.
+ *
+ * Constraint chips stay on the face of the card, met and unmet alike. That is
+ * a Phase 5 non-negotiable and the one part of the match a person must never
+ * have to open something to see.
  */
 export interface Satisfaction {
   label: string;
@@ -39,12 +48,11 @@ export interface ToolCardProps {
   fit?: number;
   fitLabel?: string;
   /**
-   * Where it matched, in words, for a card that has no calibrated number to
-   * show. Drawn where the meter goes. See lib/results.ts: the label names the
-   * place, the note says what turned up there, and neither is a rescaled score
-   * or a claim about how well the tool fits.
+   * Where it matched, in words — a location, never a rescaled score or a claim
+   * about fit. See lib/results.ts. Drawn inside "Why this?", not on the card.
    */
   band?: { label: string; note: string; tone: 'both' | 'one' | 'name' };
+  /** A fact about the match, drawn inside "Why this?" under `whyLabel`. */
   why?: string;
   /**
    * The bold lead-in above `why`. It defaults to a claim — "Why it matches" —
@@ -93,17 +101,11 @@ export function ToolCard({
   // inline style: inline wins over every rule in the sheet, and the one-column
   // layout has to be able to take the span back.
   const style: CSSProperties = { animationDelay: `${index * 90 + 100}ms` };
+  const explained = Boolean(band || why);
 
   return (
     <article className={big ? 'card hov rise toolcard big' : 'card hov rise toolcard'} style={style}>
       {typeof fit === 'number' ? <FitMeter fit={fit} label={fitLabel} /> : null}
-
-      {band ? (
-        <div className={`band band-${band.tone}`}>
-          <span className="band-label">{band.label}</span>
-          <span>{band.note}</span>
-        </div>
-      ) : null}
 
       <div className="toolcard-head">
         <ToolTile name={name} slug={slug} size={big ? 60 : 48} />
@@ -114,12 +116,6 @@ export function ToolCard({
           {summary ? <div className="toolcard-summary">{summary}</div> : null}
         </div>
       </div>
-
-      {why ? (
-        <div className="why" style={{ fontSize: big ? 'var(--t-body-lg)' : 'var(--t-body-sm)' }}>
-          <b>{whyLabel}</b> {why}
-        </div>
-      ) : null}
 
       {satisfactions && satisfactions.length > 0 ? (
         <div className="toolcard-chips">
@@ -133,6 +129,33 @@ export function ToolCard({
             <Tag key={fact}>{fact}</Tag>
           ))}
         </div>
+      ) : null}
+
+      {/* "Why this?" — everything about HOW it matched, and nothing else, lives
+          in here. tests/card.test.mjs renders this component and fails if the
+          match label, its note or the matched statement appear anywhere on
+          the card outside this element. */}
+      {explained ? (
+        <details className="whythis">
+          <summary className="whythis-toggle">
+            <Icon name="chevronR" size={14} strokeWidth={2.25} className="whythis-chevron" />
+            Why this?
+            <span className="sr-only"> ({name})</span>
+          </summary>
+          <div className="whythis-body">
+            {band ? (
+              <div className={`band band-${band.tone}`}>
+                <span className="band-label">{band.label}</span>
+                <span>{band.note}</span>
+              </div>
+            ) : null}
+            {why ? (
+              <p className="why">
+                <b>{whyLabel}</b> {why}
+              </p>
+            ) : null}
+          </div>
+        </details>
       ) : null}
 
       <div className="toolcard-foot">

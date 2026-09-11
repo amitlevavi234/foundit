@@ -45,7 +45,7 @@
 // embedding provider, 3 the database, 4 the fixture.
 // ===========================================================================
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -67,6 +67,7 @@ const EXIT = { OK: 0, CONFIG: 1, PROVIDER: 2, DATABASE: 3, FIXTURE: 4 };
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURE_PATH = join(ROOT, 'db', 'seed', 'embeddings.fixture.json');
 const GOLDEN_PATH = join(ROOT, 'eval', 'golden.jsonl');
+const NEGATIVES_PATH = join(ROOT, 'eval', 'negatives.jsonl');
 
 /** The role this job runs as, and the only one it will accept. */
 const ROLE = 'foundit_embed';
@@ -164,12 +165,19 @@ const digest = (text) => createHash('sha256').update(String(text), 'utf8').diges
  * written without the derived texts and says so.
  */
 async function evalQueries() {
+  // The golden set and the negatives (eval/negatives.jsonl): sentences with a
+  // known right answer, and sentences with a known right answer of "nothing".
+  // Both are searched by eval/run.mjs, so both need their vectors recorded
+  // here, or a keyless run measures the relevance floor on half its evidence.
   const authored = [];
-  for (const line of readFileSync(GOLDEN_PATH, 'utf8').split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed === '' || trimmed.startsWith('#')) continue;
-    const obj = JSON.parse(trimmed);
-    if (typeof obj.query === 'string' && obj.query.trim() !== '') authored.push(obj.query);
+  for (const file of [GOLDEN_PATH, NEGATIVES_PATH]) {
+    if (!existsSync(file)) continue;
+    for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed === '' || trimmed.startsWith('#')) continue;
+      const obj = JSON.parse(trimmed);
+      if (typeof obj.query === 'string' && obj.query.trim() !== '') authored.push(obj.query);
+    }
   }
 
   let derived = [];
@@ -245,83 +253,123 @@ try {
     // the exception. The fixture is embedded fresh from the same text the
     // database holds, which is the same vector by construction.
     //
-    // The queue is the only thing this role can read, and it lists what is
-    // OUTSTANDING — so a fixture is written from a freshly seeded database,
-    // where everything is outstanding, and never from a filled one. Identical
-    // statements on two different tools collapse to one entry, because the key
-    // is the hash of the text.
-    const statements = new Map();
-    for (const row of work) statements.set(row.statement, null);
-    if (statements.size === 0) {
+    // TWO MODES, decided by whether a fixture already exists.
+    //
+    //   Recording  (no fixture yet) — every outstanding statement and every
+    //              eval sentence. The queue is the only thing this role can
+    //              read, and it lists what is OUTSTANDING, so a first
+    //              recording is made from a freshly seeded database, where
+    //              everything is outstanding, and never from a filled one.
+    //
+    //   Extending  (a fixture exists) — only what it does not hold yet: an
+    //              eval sentence that was added (the negatives were), or an
+    //              outstanding statement whose hash it has never seen. What is
+    //              already recorded is NEVER re-fetched. Re-fetching the same
+    //              text returns a float32 vector that rounds into float16
+    //              differently, two tools swap on a tie, and the baseline moves
+    //              in the fourth decimal for a reason nobody changed — which is
+    //              the one thing this file exists to stop.
+    //
+    // Identical statements on two different tools collapse to one entry,
+    // because the key is the hash of the text.
+    const existing = existsSync(FIXTURE_PATH) ? readFixture() : null;
+    if (existing && existing.model !== model) {
       process.stderr.write(
-        '\nThere is no outstanding work, so there are no statements to record.\n'
-          + 'A fixture is written from a database whose embeddings are NOT yet filled:\n'
-          + '  node db/apply.mjs --fresh --seed && node --env-file=.env.local \\\n'
-          + '    scripts/embed.mjs --write-fixture\n',
+        `\nthe fixture was recorded from ${existing.model} and this database uses ${model}.\n`
+          + 'Vectors from two models cannot share a file. Move the old fixture aside and\n'
+          + 're-record from a freshly seeded database.\n',
       );
       exitCode = EXIT.FIXTURE;
     } else {
-      const { authored, derived } = await evalQueries();
-      const queries = [...authored, ...derived];
-      process.stdout.write(`golden queries   ${authored.length} as written, ${derived.length} as read\n`);
-
-      const fixture = {
-        schema: 'foundit-embeddings/1',
-        model,
-        dimensions: 512,
-        recorded: new Date().toISOString().slice(0, 10),
-        // Keyed by the sha256 of the statement: a statement that is later
-        // rewritten no longer hashes to its entry, so --from-fixture skips it
-        // and says how many it skipped rather than loading a vector of text
-        // that no longer exists.
-        statements: {},
-        // Keyed by the normalised query, which is exactly the query cache's
-        // own key.
-        queries: {},
-      };
-
-      let requests = 0;
-      let tokens = 0;
-
-      const texts = [...statements.keys()];
-      for (let i = 0; i < texts.length; i += EMBEDDINGS_BATCH_SIZE) {
-        const batch = texts.slice(i, i + EMBEDDINGS_BATCH_SIZE);
-        const result = await embedTexts(batch, { cap: MAX_DOCUMENT_INPUT });
-        requests += 1;
-        tokens += result.tokens;
-        batch.forEach((text, n) => {
-          fixture.statements[digest(text)] = result.vectors[n];
-        });
-      }
-
-      const keys = [...new Set(queries.map((q) => normalizeQuery(q)).filter((q) => q !== ''))];
-      for (let i = 0; i < keys.length; i += EMBEDDINGS_BATCH_SIZE) {
-        const batch = keys.slice(i, i + EMBEDDINGS_BATCH_SIZE);
-        const result = await embedTexts(batch);
-        requests += 1;
-        tokens += result.tokens;
-        batch.forEach((text, n) => {
-          fixture.queries[text] = result.vectors[n];
-        });
-      }
-
-      // The vectors come back as halfvec literals; the fixture stores float16
-      // bytes, which is what a halfvec column actually holds, and is a third
-      // of the size as text.
-      for (const map of [fixture.statements, fixture.queries]) {
-        for (const [key, literal] of Object.entries(map)) {
-          map[key] = toFloat16Base64(literal.slice(1, -1).split(',').map(Number));
+      const statements = new Map();
+      for (const row of work) {
+        if (!existing || existing.statements?.[digest(row.statement)] === undefined) {
+          statements.set(row.statement, null);
         }
       }
 
-      writeFileSync(FIXTURE_PATH, `${JSON.stringify(fixture)}\n`, 'utf8');
-      const bytes = readFileSync(FIXTURE_PATH).byteLength;
-      process.stdout.write(`\nwrote            db/seed/embeddings.fixture.json\n`);
-      process.stdout.write(`  statements     ${Object.keys(fixture.statements).length}\n`);
-      process.stdout.write(`  queries        ${Object.keys(fixture.queries).length}\n`);
-      process.stdout.write(`  size           ${(bytes / 1024).toFixed(0)} kB\n`);
-      process.stdout.write(`  api requests   ${requests}\n`);
-      process.stdout.write(`  prompt tokens  ${tokens}\n`);
+      if (!existing && statements.size === 0) {
+        process.stderr.write(
+          '\nThere is no outstanding work and no fixture, so there is nothing to record from.\n'
+            + 'A first fixture is written from a database whose embeddings are NOT yet filled:\n'
+            + '  node db/apply.mjs --fresh --seed && node --env-file=.env.local \\\n'
+            + '    scripts/embed.mjs --write-fixture\n',
+        );
+        exitCode = EXIT.FIXTURE;
+      } else {
+        const { authored, derived } = await evalQueries();
+        process.stdout.write(`eval sentences   ${authored.length} as written, ${derived.length} as read\n`);
+
+        const fixture = existing ?? {
+          schema: 'foundit-embeddings/1',
+          model,
+          dimensions: 512,
+          recorded: new Date().toISOString().slice(0, 10),
+          // Keyed by the sha256 of the statement: a statement that is later
+          // rewritten no longer hashes to its entry, so --from-fixture skips
+          // it and says how many it skipped rather than loading a vector of
+          // text that no longer exists.
+          statements: {},
+          // Keyed by the normalised query, which is exactly the query cache's
+          // own key.
+          queries: {},
+        };
+        fixture.statements ??= {};
+        fixture.queries ??= {};
+
+        const keys = [
+          ...new Set(
+            [...authored, ...derived].map((q) => normalizeQuery(q)).filter((q) => q !== ''),
+          ),
+        ].filter((key) => fixture.queries[key] === undefined);
+
+        process.stdout.write(`mode             ${existing ? 'extending the existing fixture' : 'recording a new fixture'}\n`);
+        process.stdout.write(`  new statements ${statements.size}\n`);
+        process.stdout.write(`  new sentences  ${keys.length}\n`);
+
+        let requests = 0;
+        let tokens = 0;
+
+        // The vectors come back as halfvec literals; the fixture stores
+        // float16 bytes, which is what a halfvec column actually holds, and is
+        // a third of the size as text.
+        const pack = (literal) => toFloat16Base64(literal.slice(1, -1).split(',').map(Number));
+
+        const texts = [...statements.keys()];
+        for (let i = 0; i < texts.length; i += EMBEDDINGS_BATCH_SIZE) {
+          const batch = texts.slice(i, i + EMBEDDINGS_BATCH_SIZE);
+          const result = await embedTexts(batch, { cap: MAX_DOCUMENT_INPUT });
+          requests += 1;
+          tokens += result.tokens;
+          batch.forEach((text, n) => {
+            fixture.statements[digest(text)] = pack(result.vectors[n]);
+          });
+        }
+
+        for (let i = 0; i < keys.length; i += EMBEDDINGS_BATCH_SIZE) {
+          const batch = keys.slice(i, i + EMBEDDINGS_BATCH_SIZE);
+          const result = await embedTexts(batch);
+          requests += 1;
+          tokens += result.tokens;
+          batch.forEach((text, n) => {
+            fixture.queries[text] = pack(result.vectors[n]);
+          });
+        }
+
+        if (requests === 0) {
+          process.stdout.write('\nnothing to add   the fixture already holds every sentence and statement\n');
+        } else {
+          if (existing) fixture.extended = new Date().toISOString().slice(0, 10);
+          writeFileSync(FIXTURE_PATH, `${JSON.stringify(fixture)}\n`, 'utf8');
+          const bytes = readFileSync(FIXTURE_PATH).byteLength;
+          process.stdout.write(`\nwrote            db/seed/embeddings.fixture.json\n`);
+          process.stdout.write(`  statements     ${Object.keys(fixture.statements).length}\n`);
+          process.stdout.write(`  queries        ${Object.keys(fixture.queries).length}\n`);
+          process.stdout.write(`  size           ${(bytes / 1024).toFixed(0)} kB\n`);
+          process.stdout.write(`  api requests   ${requests}\n`);
+          process.stdout.write(`  prompt tokens  ${tokens}\n`);
+        }
+      }
     }
   } else if (work.length === 0) {
     process.stdout.write('embedded         0 (nothing has changed)\n');

@@ -23,6 +23,8 @@ import {
   checkConstraints, isConstrained, aggregate, buildSlices,
   parseGolden, parseBaselines, pickBaseline, checkRegression, renderTable,
   buildReport, buildViolationReport, K,
+  parseNegatives, aggregateNegatives, parseCountOf, checkZeroResultRegression,
+  checkNegativesRegression, buildNegativesReport,
 } from './run.mjs';
 
 let passed = 0;
@@ -654,6 +656,105 @@ process.stdout.write('\nthe gate compares like with like\n');
   check('so the gate falls back to the newest row', pickBaseline(rows, true).row.commit, 'aaa1111');
   check('and says it is not comparing like with like', pickBaseline(rows, true).sameMode, false);
   check('an empty table has nothing to pick', pickBaseline([], true), null);
+}
+
+// ---------------------------------------------------------------------------
+process.stdout.write('\nthe negatives: sentences whose right answer is an empty page\n');
+// ---------------------------------------------------------------------------
+{
+  const text = [
+    '# a comment',
+    '{"id":"n01","kind":"far","lang":"en","query":"my car grinds when I brake","note":"car repair"}',
+    '{"id":"n02","kind":"near","query":"translate my cat","constraints":{"pricing":["free"]}}',
+    '{"id":"n03","query":"no kind given","relevant":{}}',
+    '',
+  ].join('\n');
+  const { queries, errors } = parseNegatives(text);
+  check('three negatives parsed, the comment skipped', queries.length, 3);
+  check('no errors in a clean file', errors.length, 0);
+  check('kind is read', queries[1].kind, 'near');
+  check('kind defaults to far', queries[2].kind, 'far');
+  check('an empty relevant map is allowed', queries[2].id, 'n03');
+  checkDeep('constraints are carried like the golden set', queries[1].constraints, { pricing: ['free'] });
+  checkDeep('and a negative never has judgements', queries[0].relevant, {});
+}
+{
+  // A sentence with a right tool is a golden query. The negatives file must
+  // never become a side door into the golden set.
+  const refused = parseNegatives('{"id":"n09","query":"split a bill","relevant":{"splitwise":3}}');
+  check('a negative carrying judgements is refused', refused.queries.length, 0);
+  check('with an error that says where it belongs', /golden/.test(refused.errors[0] ?? ''), true);
+  check('an unknown kind is refused',
+    parseNegatives('{"id":"n1","query":"x","kind":"medium"}').errors.length, 1);
+  check('a duplicate id is refused',
+    parseNegatives('{"id":"n1","query":"x"}\n{"id":"n1","query":"y"}').errors.length, 1);
+  check('an unknown constraint is refused',
+    parseNegatives('{"id":"n1","query":"x","constraints":{"colour":["red"]}}').errors.length, 1);
+}
+{
+  const mk = (id, kind, n) => ({
+    query: { id, kind, lang: 'en', query: `${id} sentence` },
+    results: Array.from({ length: n }, (_, i) => ({ rank: i + 1, slug: `tool-${i}`, matchSource: 'vector' })),
+    latencyMs: 10,
+  });
+  const agg = aggregateNegatives([mk('n1', 'far', 0), mk('n2', 'far', 0), mk('n3', 'near', 3), mk('n4', 'near', 0)]);
+  check('four negatives', agg.queries, 4);
+  check('three came back empty', agg.empty, 3);
+  check('empty rate is 3/4', agg.emptyRate, 0.75, EPS);
+  // (0 + 0 + 3 + 0) / 4 = 0.75 rows leaked per negative.
+  check('mean leaked is averaged over ALL negatives, not the leaky ones', agg.meanLeaked, 0.75, EPS);
+  check('max leaked', agg.maxLeaked, 3);
+  check('far: both empty', agg.byKind.far.empty, 2);
+  check('near: one of two empty', agg.byKind.near.empty, 1);
+  check('no negatives is a rate of 0, not NaN', aggregateNegatives([]).emptyRate, 0);
+
+  const report = buildNegativesReport({ overall: agg, perQuery: [mk('n3', 'near', 3)], golden: { ndcgAt10: 0.7, recallAt10: 0.6, zeroResultQueries: 0, queries: 60 } });
+  check('the report lists what leaked', report.includes('n3') && report.includes('tool-0'), true);
+  check('the report puts the golden numbers beside it', report.includes('nDCG@10 0.7000'), true);
+  check('the negatives report carries no ANSI escapes', hasControlCodes(report), false);
+}
+{
+  checkDeep('"26 of 30" is a count and a total', parseCountOf('26 of 30'), { count: 26, total: 30 });
+  checkDeep('"0 of 60" is zero of sixty', parseCountOf('0 of 60'), { count: 0, total: 60 });
+  checkDeep('a bare number has no total', parseCountOf('4'), { count: 4, total: null });
+  check('a blank cell is nothing, not zero', parseCountOf(''), null);
+  check('a dash is nothing, not zero', parseCountOf('-'), null);
+}
+{
+  const rows = parseBaselines([
+    '| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Zero-result | Negatives empty | What changed |',
+    '| - | - | - | - | - | - | - | - | - | - |',
+    '| 2026-09-10 | aaa1111 | 2 | no | 60 | 0.4497 | 0.4878 | 4 of 60 | | text only |',
+    '| 2026-09-11 | bbb2222 | 3 | yes | 60 | 0.6719 | 0.7035 | 0 of 60 | 26 of 30 | the floor |',
+  ].join('\n'));
+  check('the Zero-result column is read', rows[1].zeroResult.count, 0);
+  check('the Negatives empty column is read', rows[1].negativesEmpty.count, 26);
+  check('a row that did not record negatives has none', rows[0].negativesEmpty, null);
+
+  const floor = rows[1];
+  check('no new empty golden query passes', checkZeroResultRegression(0, floor).regressed, false);
+  check('one new empty golden query fails', checkZeroResultRegression(1, floor).regressed, true);
+  check('the text-only row allows its own four', checkZeroResultRegression(4, rows[0]).regressed, false);
+  check('a row with no Zero-result column gates nothing', checkZeroResultRegression(9, { zeroResult: null }), null);
+
+  check('the same share of negatives empty passes',
+    checkNegativesRegression({ empty: 26, queries: 30 }, floor).regressed, false);
+  check('more negatives empty passes',
+    checkNegativesRegression({ empty: 29, queries: 30 }, floor).regressed, false);
+  check('one fewer negative empty fails',
+    checkNegativesRegression({ empty: 25, queries: 30 }, floor).regressed, true);
+  // A floor of zero: every negative answered with twenty tools. The broken
+  // floor this gate exists to catch.
+  check('a floor of zero fails the gate',
+    checkNegativesRegression({ empty: 0, queries: 30 }, floor).regressed, true);
+  // A rate, so a larger negatives file is judged on its share, not its count:
+  // 35 of 40 (87.5%) is better than 26 of 30 (86.7%).
+  check('a rate, not a count: 35 of 40 passes against 26 of 30',
+    checkNegativesRegression({ empty: 35, queries: 40 }, floor).regressed, false);
+  const missing = checkNegativesRegression(null, floor);
+  check('negatives not run against a row that gates them FAILS', missing.regressed, true);
+  check('and says they were not run', missing.missing, true);
+  check('a row that records no negatives gates nothing', checkNegativesRegression({ empty: 0, queries: 30 }, rows[0]), null);
 }
 
 // ---------------------------------------------------------------------------

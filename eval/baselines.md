@@ -285,3 +285,101 @@ Three things that curve says:
   single digit in any of them. Read the latency as an order of magnitude, and
   read the single-query timing in `docs/loop-progress.md` — one round trip,
   measured five times in a row — as the number that speaks to the 150 ms gate.
+
+---
+
+## Phase 3 amended: the relevance floor
+
+The owner read the live results page and said that a sentence the catalogue
+cannot answer must not come back with twelve unrelated apps. Phase 3 had made
+that the normal case: the vector leg ranks every eligible tool, so there was
+always a nearest neighbour and never an empty page.
+
+**nDCG could not see it.** It only ever asks questions that have answers. So
+the instrument grew a second half — `eval/negatives.jsonl`, 30 sentences whose
+right answer is nothing at all (`eval/README.md`, "The negatives") — and the
+floor was chosen by measuring against both sets at once.
+
+### Every threshold tried
+
+Four numbers, all in `public.relevance_floor()`: the per-result floor, the
+gate a query's best eligible match must clear (one value for a sentence
+containing Latin letters, one for a sentence with none), and the trigram
+similarity at which a name counts as what was typed. Each row below is a full
+run of both sets against the same database and the same fixture.
+
+| result | gate Latin | gate other | name | recall@10 | nDCG@10 | non-English | golden empty | negatives empty | mean leaked |
+| ------ | ---------- | ---------- | ---- | --------- | ------- | ----------- | ------------ | --------------- | ----------- |
+| 0 | 0 | 0 | 0.50 | 0.6747 | 0.7018 | 0.6052 | 0 | **0 of 30** | 20.00 |
+| 0.30 | 0.30 | 0.30 | 0.50 | 0.6719 | 0.7035 | 0.6025 | 0 | 5 of 30 | 7.57 |
+| 0.35 | 0.35 | 0.35 | 0.50 | 0.6489 | 0.6997 | 0.6073 | 0 | 12 of 30 | 3.43 |
+| 0.40 | 0.40 | 0.40 | 0.50 | 0.5644 | 0.6653 | 0.4889 | **2** | 21 of 30 | 0.90 |
+| 0.45 | 0.45 | 0.45 | 0.50 | 0.4150 | **0.5306** | 0.4174 | **3** | 26 of 30 | 0.30 |
+| 0.25 | 0.45 | 0.37 | 0.50 | 0.6706 | 0.7013 | 0.6023 | 0 | 26 of 30 | 2.63 |
+| 0.30 | 0.45 | 0.37 | 0.50 | 0.6719 | 0.7035 | 0.6025 | 0 | 26 of 30 | 2.23 |
+| 0.35 | 0.45 | 0.37 | 0.50 | 0.6489 | 0.6997 | 0.6073 | 0 | 26 of 30 | 1.50 |
+| 0.40 | 0.45 | 0.37 | 0.50 | 0.5644 | 0.6653 | 0.4889 | **2** | 26 of 30 | 0.60 |
+| 0.30 | 0.43 | 0.37 | 0.50 | 0.6719 | 0.7035 | 0.6025 | 0 | 23 of 30 | 3.97 |
+| 0.30 | 0.44 | 0.37 | 0.50 | 0.6719 | 0.7035 | 0.6025 | 0 | 25 of 30 | 2.90 |
+| 0.30 | 0.46 | 0.37 | 0.50 | 0.6553 | 0.6952 | 0.6025 | **1** | 26 of 30 | 2.23 |
+| 0.30 | 0.47 | 0.37 | 0.50 | 0.6553 | 0.6952 | 0.6025 | **1** | 27 of 30 | 1.57 |
+| **0.30** | **0.45** | **0.35** | **0.50** | **0.6719** | **0.7035** | **0.6025** | **0** | **26 of 30** | **2.23** |
+| 0.30 | 0.45 | 0.36 | 0.50 | 0.6719 | 0.7035 | 0.6025 | 0 | 26 of 30 | 2.23 |
+| 0.30 | 0.45 | 0.38 | 0.50 | 0.6719 | 0.7035 | 0.6025 | **1** | 26 of 30 | 2.23 |
+| 0.30 | 0.45 | 0.40 | 0.50 | 0.6664 | 0.6911 | 0.5280 | **2** | 26 of 30 | 2.23 |
+| 0.30 | 0.45 | 0.45 | 0.50 | 0.6497 | 0.6790 | 0.4553 | **3** | 26 of 30 | 2.23 |
+| 0.30 | 0.45 | 0.37 | 0.30 | 0.6719 | 0.7035 | 0.6025 | 0 | 26 of 30 | 2.23 |
+| 0.30 | 0.45 | 0.37 | 0.70 | 0.6719 | 0.7035 | 0.6025 | 0 | 26 of 30 | 2.23 |
+
+*"golden empty" is how many of the 60 golden queries came back with nothing —
+a person with a real problem told that nothing fits. "mean leaked" is rows
+returned per negative, averaged over all 30, at the fetch limit of 20.*
+
+### What the sweep says, in four findings
+
+- **One threshold cannot do both jobs.** Every single-value row is either
+  useless against the negatives (0.30 empties five of thirty) or destroys the
+  answers (0.45 costs 0.17 of nDCG and empties three golden queries). The
+  overlap is real: three English negatives' nearest tools sit at 0.47–0.49,
+  above the lowest golden query's best match at 0.451.
+- **So the gate and the floor are different questions.** "Is anything in the
+  catalogue clearly about this?" is asked once per query at 0.45; "is this one
+  close enough to show?" is asked per result at 0.30. That pair keeps every
+  golden query answered *and* empties 26 of 30 negatives.
+- **A sentence with no Latin letters needs its own gate.** Against an English
+  catalogue, cross-script similarity runs lower: the three golden queries that
+  never reach 0.45 are Hebrew, Hebrew and Russian, while a Hebrew *negative*
+  reaches 0.52 by matching the catalogue's own Hebrew statements. One gate for
+  both (0.45/0.45) empties those three and costs 0.15 of the non-English
+  slice. 0.35, 0.36 and 0.37 are indistinguishable on the table above, and
+  0.38 empties q009.
+- **0.35 rather than 0.37, and the reason is `--read-query`.** Every row above
+  searches the golden set as written. The path a visitor takes reads the
+  sentence first, and at 0.37 the Hebrew q009 comes back EMPTY once
+  `lib/constraints.ts` has lifted "free" out of it: the text changes, the
+  vector changes, and its best match falls a thousandth under the gate.
+  Authored numbers are identical at both values (0.7035, 0 empty, 26 of 30);
+  derived zero-result goes 1 → 0. The table alone would not have caught it,
+  which is the whole reason that mode exists.
+- **The name threshold changes nothing measurable** between 0.30 and 0.70 on
+  these 90 sentences. It is kept at 0.50 as the stricter reading of "the name
+  is what was typed", and recorded as unmeasured rather than as tuned.
+
+### What is honest to say about these numbers
+
+**The margins are thin, and they are thin in the direction that matters.** The
+Latin gate sits at 0.45 with the lowest golden query at 0.451 — one
+thousandth — and the non-Latin gate at 0.37 with the lowest at 0.376. A
+catalogue change, a re-embedding, or sixty different queries could move either
+side of that. This is a floor fitted to ninety sentences, not a calibrated
+relevance score, and the four leaks it leaves (`n13`, `n16`, `n19`, `n25`) are
+the near misses and the same-script case it cannot separate.
+
+**It is still the right trade.** Before it, every one of the thirty
+unanswerable sentences returned twenty tools; after it, twenty-six return
+nothing and the other four return fewer. The golden set did not pay for it:
+nDCG went up by 0.0017, because the rows the floor removes from a good page
+were below the good answers anyway.
+
+Phase 5 is where a score means something. When it arrives, this floor is the
+first thing it should replace.

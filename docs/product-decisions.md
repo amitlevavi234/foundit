@@ -96,6 +96,34 @@ no account) are shown as met or unmet on each result.
 The results page is a conversation: the person can add more detail and re-run the
 match rather than starting over.
 
+**Amended 11 September 2026, after the owner's review of the live results page.**
+Two changes, both his, and neither alters the rule above.
+
+*How a result matched is no longer on the face of every card.* His words: "how the
+match goes doesn't need to show on each card." The "Matched: problem + description"
+label, the sentence explaining it and the quoted problem statement moved behind a
+small, quiet **"Why this?"** on each card — a native disclosure, keyboard-operable,
+closed by default. The card keeps the name, the summary, the constraint chips
+(**met and unmet stay visible**: that is the rule above and a Phase 5 non-negotiable,
+and a person must never have to open something to see a constraint the tool
+misses), likes, Save, and Open with the domain beside it. The designed fit bar with
+its percentage stays out until Phase 5 calibrates a real score, because a rescaled
+similarity shown as a percentage is the lie `docs/build-phases.md` forbids. When the
+bar arrives it is where the answer to "why this?" will live.
+
+*If nothing fits, the page says so.* "If there are no matching for what I asked I
+don't want to see apps that are not related … I prefer a note saying there are no
+tools like that right now." A relevance floor in the database
+(`db/migrations/0006_relevance_floor.sql`) now drops every result without evidence
+— not close in meaning, not carrying every word, not named what was typed — so a
+page may hold three results, or none, and the heading counts what is there rather
+than promising twelve. An empty page says plainly that Foundit does not have a tool
+for that yet, and offers the ways forward that exist: browse the problems people
+solved, describe it differently, or drop a constraint. It does not apologise, and it
+does not promise the tool will be added. The honesty rule above now covers the page
+as well as the card: a partial answer looks like a partial answer, and no answer
+looks like no answer.
+
 ## 7. Homepage
 
 A single chat-style input, example prompts in several languages, and a "top tools"

@@ -77,6 +77,7 @@ loaded catalogue. Without the function it exits 3 and says so.
 | `--golden=PATH` | `eval/golden.jsonl` | Which golden set to read |
 | `--baselines=PATH` | `eval/baselines.md` | Which baselines table `--baseline` compares against |
 | `--read-query` | off | Also run every query as the app reads it, and print both slices side by side |
+| `--negatives=PATH` | `eval/negatives.jsonl` | Which negatives to run. A default file that is missing is a note; a path somebody named that is missing is a usage error |
 
 `--baselines=` exists so the regression gate can be exercised against a
 fixture. Without it the only way to see the gate fire was to edit a tracked
@@ -97,7 +98,7 @@ notice, because that is the ordinary state before the first number is recorded.
 | 1 | Usage or configuration: no `DATABASE_URL`, missing golden set, malformed JSONL |
 | 2 | **Constraint violation** — a returned tool broke a hard filter |
 | 3 | Connection or query error, including a statement timeout |
-| 4 | Regression: nDCG@10 fell more than the tolerance below the recorded baseline |
+| 4 | Regression against the recorded baseline: nDCG@10 fell more than the tolerance, **or** more golden queries came back empty than the row records, **or** a smaller share of the negatives came back empty (see [The negatives](#the-negatives-sentences-the-catalogue-cannot-answer)) |
 
 A constraint violation outranks the scores. If it fires, the run fails no matter
 how good the numbers look, and the exit code stays 2 even if the run also
@@ -443,10 +444,118 @@ those two names still mean those two things; if Phase 4 renames or reshapes them
 `eval/reader.mjs` is the single file to update, and the numbers it reports change
 on their own — which is the whole point.
 
+## The negatives: sentences the catalogue cannot answer
+
+### Why this exists
+
+nDCG only ever asks questions that have answers. Phase 3's vector leg ranks
+every eligible tool, so a sentence the catalogue cannot answer came back with
+its twelve nearest neighbours under a heading that sounded sure of them — and
+nDCG scored that exactly as it scored an honest empty page, because neither
+has a judged tool in it. The owner saw the result and called it ridiculous.
+`db/migrations/0006_relevance_floor.sql` is the fix, and a fix nobody can
+measure is a fix nobody can keep, so the instrument grew a second half.
+
+`eval/negatives.jsonl` holds 30 sentences whose right answer is an empty page:
+
+| Kind | n | What they are |
+| --- | --- | --- |
+| `far` | 15 | Nothing to do with software at all: car repair, a divorce lawyer, a waterproof jacket, a plumber, a babysitter, a skin cream. Ten English, five not (Hebrew ×2, Spanish, Russian, Arabic) |
+| `near` | 15 | Share words with real listings and want something none of them does: "translate what my cat is trying to tell me" (DeepL translates between people), "back up my WhatsApp chats" (the backup tools back up a computer), "find someone to clean my flat" (Tody tracks cleaning; it is not a cleaner). Fourteen English, one French |
+
+One of them (`n10`) carries a pricing constraint, so the empty answer is also
+exercised on a constrained search. Each line's `note` says what it asks for
+and, for a near miss, which listings share its words and why none of them
+serves it.
+
+It is a **separate file** and is never merged into `eval/golden.jsonl`. The
+parser refuses a negative that carries a `relevant` map: a sentence with a
+right tool is a golden query, and this file must not become a side door into
+the golden set.
+
+### How the sentences were checked
+
+Every candidate was checked against the published catalogue before it was
+kept — all 223 tools' names and summaries and all 504 problem statements,
+dumped from the development database into one file and read against each
+sentence. A candidate was dropped if any listing plausibly serves it, and nine
+were: cheap flights next week (Google Flights, Skyscanner), filing a small
+business's tax return (GnuCash keeps the books), splitting the rent with
+flatmates (Tricount and Splitwise do exactly that), recording a phone call
+(Otter records a call on speaker), turning holiday footage into a film
+automatically (CapCut's templates), streaming a service from another country
+(Proton VPN), digitising VHS tapes (OBS records a capture device), a mortgage
+calculator (Wolfram Alpha), and hiring a car at an airport (Rome2Rio lists
+driving). What was left is the 30 in the file.
+
+The same rule as the golden set: **a negative is never edited or deleted to
+make a number move.** The one legitimate reason to remove one is that the
+catalogue changed — a tool that really does serve it was added — and then it
+is removed with a note saying which tool, and the baseline row gets a note too.
+
+### What the run reports
+
+The negatives go through exactly the search, plan and fetch limit the golden
+queries do, and the report puts the two side by side:
+
+```
+negatives    n  empty  empty %  mean leaked  max  far empty  near empty
+----------  --  -----  -------  -----------  ---  ---------  ----------
+as written  30     26    86.7%          2.2   20      14/15       12/15
+
+  beside the golden set: nDCG@10 0.7035, recall@10 0.6719, 0 of 60 golden queries empty
+```
+
+- **empty %** — the share that came back with nothing at all. The headline,
+  and what `--baseline` gates.
+- **mean leaked** — rows returned per negative, averaged over all 30, at the
+  fetch limit (20). One negative leaking a single tool and one leaking twenty
+  are both wrong; this is the number that tells them apart.
+- Every negative that leaked is listed with its first five rows, so a leak can
+  be read rather than guessed at.
+
+With `--read-query` the negatives run a second time as the app reads them, and
+get their own row.
+
+A constraint violation on a negative fails the run with exit 2, exactly as on
+a golden query.
+
+### Vectors, and the fixture
+
+The floor only applies when the sentence has a vector (0006, point D), so the
+negatives measure nothing unless their vectors are there. The fixture holds
+them — the 30 as written and their `--read-query` readings, 32 new sentences
+in all — so CI measures the floor with no key. `scripts/embed.mjs
+--write-fixture` now **extends** an existing fixture with only the sentences
+and statements it lacks, and never re-fetches one it already holds: a
+re-fetched vector rounds into float16 differently and moves the golden number
+in the fourth decimal for a reason nobody changed. Extending it for the
+negatives left all 576 existing entries byte-identical.
+
+With no key and no fixture, the floor does not apply, the negatives leak as
+they did in Phase 3, and the run is compared against the text-only row —
+which records no negatives, so nothing is gated on them.
+
 ## Regressions
 
 `--baseline` reads the last row of the recorded-baselines table in
 `eval/baselines.md` that has numbers in it and compares nDCG@10 against it.
+
+**Two more gates read the same row**, both added with the relevance floor:
+
+- **Zero-result.** The run may not have more golden queries come back empty
+  than the row's `Zero-result` column records. A floor that empties a golden
+  query is too high for that query whatever the negatives say. (A count, not
+  a per-query list; every row the floor has been measured against records 0,
+  where the two are the same thing.)
+- **Negatives empty.** The share of `eval/negatives.jsonl` answered with an
+  empty page may not fall below the share in the row's `Negatives empty`
+  column. A rate, so adding negatives later does not trip it by arithmetic.
+  If the row records negatives and none were run, that FAILS — a gate that
+  switches itself off when its input file goes missing is not a gate.
+
+Both are skipped for a row that leaves the column blank, which is every row
+recorded before the floor.
 
 **Tolerance: 0.005 absolute** — half a point of nDCG, inclusive at the boundary
 (a drop *of* 0.005 passes; a drop *past* it does not). The harness is

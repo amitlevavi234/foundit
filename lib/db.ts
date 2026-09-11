@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { unstable_cache } from 'next/cache';
 import pg from 'pg';
 
 import {
@@ -191,35 +192,128 @@ export function touchQueryEmbedding(query: string): void {
   void runTouchQueryEmbedding(getPool(), query).catch(() => {});
 }
 
-/** Everything the homepage draws. One round trip. */
+/* ===========================================================================
+ * The catalogue screens, cached for a minute.
+ *
+ * The homepage and /browse each spend about 200 ms in PostgreSQL on this
+ * laptop, and nearly all of it is row-level security doing its job: every one
+ * of the 504 problem statements is checked by tool_is_mine() and
+ * tool_is_visible() on its way to becoming three cards (EXPLAIN ANALYZE,
+ * recorded in docs/loop-progress.md). That cost is the price of the boundary
+ * and is not negotiable. What is negotiable is paying it once per visitor.
+ *
+ * So the four catalogue reads are kept for CATALOGUE_REVALIDATE_SECONDS in
+ * Next's data cache and served stale-while-revalidate: a visitor gets the
+ * stored answer and, at most once a minute, a background request refreshes
+ * it. A like or a new listing therefore shows up within a minute rather than
+ * at once, which nothing on these pages promises otherwise.
+ *
+ * Three rules keep this honest:
+ *
+ *   1. ONLY THE ANONYMOUS VIEW IS CACHED. The pool connects as foundit_app
+ *      with no request claims, so every row here is what a stranger may see.
+ *      Nothing that runs with a person's identity may ever be wrapped in this
+ *      — the day Phase 6 adds sign-in, a cached per-person answer would be
+ *      served to the next visitor. Search is NOT cached here: it has its own
+ *      cache (the query vector) and its own rules.
+ *
+ *   2. A STRANGER CANNOT GROW THE CACHE. The cache key includes the
+ *      arguments, and `?in=` and `/tools/<slug>` come straight off the URL.
+ *      Unbounded, a script could write one entry per invented string, which is
+ *      the disk-filling bug 0005 fixed in the query cache. So a category is
+ *      cached only when it is one the (cached) category list contains, and a
+ *      tool page only when a published tool exists: an unknown one is asked
+ *      of the database directly, exactly as before, and stored nowhere.
+ *
+ *   3. STILL ONE ROUND TRIP. A cache miss runs the same single statement it
+ *      always did; nothing here adds a query to a page.
+ * ======================================================================== */
+
+/** How long a catalogue page's data may be served before it is refreshed. */
+export const CATALOGUE_REVALIDATE_SECONDS = 60;
+
+const CATALOGUE_CACHE = { revalidate: CATALOGUE_REVALIDATE_SECONDS, tags: ['catalogue'] };
+
+const homeCached = unstable_cache(
+  (topLimit: number, foundLimit: number) => runHome(getPool(), topLimit, foundLimit),
+  ['catalogue:home:v1'],
+  CATALOGUE_CACHE,
+);
+
+const browseCached = unstable_cache(
+  (category: string | null, limit: number) => runBrowse(getPool(), category, limit),
+  ['catalogue:browse:v1'],
+  CATALOGUE_CACHE,
+);
+
+const topCached = unstable_cache(
+  (category: string | null, ranking: TopRanking, limit: number) =>
+    runTop(getPool(), category, ranking, limit),
+  ['catalogue:top:v1'],
+  CATALOGUE_CACHE,
+);
+
+/** Thrown inside the cached function so a missing tool is never stored. */
+const NOT_PUBLISHED = 'foundit:tool-not-published';
+
+const toolCached = unstable_cache(
+  async (slug: string, reviewLimit: number) => {
+    const tool = await runToolPage(getPool(), slug, reviewLimit);
+    // unstable_cache stores what it returns and never what it throws, so an
+    // invented slug leaves nothing behind (rule 2 above).
+    if (!tool) throw Object.assign(new Error(NOT_PUBLISHED), { code: NOT_PUBLISHED });
+    return tool;
+  },
+  ['catalogue:tool:v1'],
+  CATALOGUE_CACHE,
+);
+
+/** Everything the homepage draws. One round trip on a miss, none on a hit. */
 export async function getHome(topLimit = 6, foundLimit = 3): Promise<HomeData> {
-  return runHome(getPool(), topLimit, foundLimit);
+  return homeCached(topLimit, foundLimit);
 }
 
-/** Everything /browse draws, for all categories or one. One round trip. */
+/** Everything /browse draws, for all categories or one. One round trip on a miss. */
 export async function getBrowse(
   category: string | null = null,
   limit = 12,
 ): Promise<BrowseData> {
-  return runBrowse(getPool(), category, limit);
+  if (category === null) return browseCached(null, limit);
+  const all = await browseCached(null, limit);
+  if (!all.categories.some((c) => c.slug === category)) {
+    // Not a category this catalogue has: answered, never stored.
+    return runBrowse(getPool(), category, limit);
+  }
+  return browseCached(category, limit);
 }
 
-/** Everything /top draws, ranked by a real counter. One round trip. */
+/** Everything /top draws, ranked by a real counter. One round trip on a miss. */
 export async function getTop(
   category: string | null = null,
   ranking: TopRanking = 'likes',
   limit = 25,
 ): Promise<TopData> {
-  return runTop(getPool(), category, ranking, limit);
+  if (category === null) return topCached(null, ranking, limit);
+  const all = await topCached(null, ranking, limit);
+  if (!all.categories.some((c) => c.slug === category)) {
+    return runTop(getPool(), category, ranking, limit);
+  }
+  return topCached(category, ranking, limit);
 }
 
 /**
  * One tool page — the listing, its problems, its reviews and their bylines,
  * the ratings and three alternatives — or `null` if no published tool has that
- * slug. One round trip, however many sections the page has.
+ * slug. One round trip on a miss, however many sections the page has.
  */
 export async function getToolPage(slug: string, reviewLimit = 10): Promise<ToolPageData | null> {
-  return runToolPage(getPool(), slug, reviewLimit);
+  try {
+    return await toolCached(slug, reviewLimit);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === NOT_PUBLISHED) return null;
+    if ((error as { message?: unknown } | null)?.message === NOT_PUBLISHED) return null;
+    throw error;
+  }
 }
 
 /**

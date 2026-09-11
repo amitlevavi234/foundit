@@ -18,6 +18,14 @@
 //   DATABASE_URL=... node eval/run.mjs [--json] [--baseline] [--limit=N]
 //                                      [--timeout=MS] [--golden=PATH]
 //                                      [--baselines=PATH] [--read-query]
+//                                      [--negatives=PATH]
+//
+// The negatives (eval/negatives.jsonl) are the other half of the instrument
+// since the relevance floor (db/migrations/0006_relevance_floor.sql): thirty
+// sentences the catalogue genuinely cannot answer, whose right answer is an
+// empty page. nDCG never asks a question that has no answer, so without them
+// a search that pads every page with its nearest neighbours scores exactly as
+// well as one that says "nothing fits". See eval/README.md, "The negatives".
 //
 // --read-query adds a second, opt-in slice that derives each query's
 // constraints and search text from lib/constraints.ts instead of reading them
@@ -71,6 +79,10 @@ const REGRESSION_TOLERANCE = 0.005;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EVAL_DIR = path.join(ROOT, 'eval');
 const GOLDEN_PATH = path.join(EVAL_DIR, 'golden.jsonl');
+/** Sentences with no right answer but "nothing". Never merged into the golden set. */
+const NEGATIVES_PATH = path.join(EVAL_DIR, 'negatives.jsonl');
+/** A negative is either far from anything the catalogue does, or a near miss. */
+export const NEGATIVE_KINDS = ['far', 'near'];
 const BASELINES_PATH = path.join(EVAL_DIR, 'baselines.md');
 const RESULTS_DIR = path.join(EVAL_DIR, 'results');
 /** The recorded vectors that let a keyless run measure the real hybrid search. */
@@ -448,9 +460,156 @@ export function parseGolden(text) {
   return { queries, errors };
 }
 
+/**
+ * Parse eval/negatives.jsonl: sentences the catalogue genuinely cannot answer.
+ *
+ * Same line format and the same strictness as the golden set — every problem
+ * reported with its line number — with one difference that is the whole point:
+ * a negative has NO `relevant` map. Its right answer is an empty page. An entry
+ * that carries judgements is refused rather than quietly scored, because a
+ * sentence with a right tool is a golden query and belongs in the golden set,
+ * which this file must never become a side door into.
+ *
+ * `kind` is "far" (car repair, a lawyer, a jacket) or "near" (shares words
+ * with real listings and wants something none of them does). It is reported,
+ * never scored differently: a near miss that leaks is exactly as wrong as a far
+ * one, it is just the more likely of the two.
+ */
+export function parseNegatives(text) {
+  const queries = [];
+  const errors = [];
+  const seenIds = new Set();
+
+  text.split(/\r?\n/).forEach((raw, index) => {
+    const lineNo = index + 1;
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) return;
+
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (err) {
+      errors.push(`line ${lineNo}: not valid JSON — ${err.message}`);
+      return;
+    }
+    if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+      errors.push(`line ${lineNo}: expected a JSON object`);
+      return;
+    }
+    if (typeof obj.id !== 'string' || obj.id === '') {
+      errors.push(`line ${lineNo}: missing "id"`);
+      return;
+    }
+    if (seenIds.has(obj.id)) {
+      errors.push(`line ${lineNo}: duplicate id "${obj.id}"`);
+      return;
+    }
+    seenIds.add(obj.id);
+    if (typeof obj.query !== 'string' || obj.query.trim() === '') {
+      errors.push(`line ${lineNo} (${obj.id}): missing "query"`);
+      return;
+    }
+    if (
+      obj.relevant !== undefined &&
+      (obj.relevant === null ||
+        typeof obj.relevant !== 'object' ||
+        Array.isArray(obj.relevant) ||
+        Object.keys(obj.relevant).length > 0)
+    ) {
+      errors.push(
+        `line ${lineNo} (${obj.id}): a negative has no right answer, so it carries no "relevant" map — ` +
+          'a sentence with a right tool belongs in eval/golden.jsonl',
+      );
+      return;
+    }
+    const kind = obj.kind === undefined ? 'far' : obj.kind;
+    if (!NEGATIVE_KINDS.includes(kind)) {
+      errors.push(`line ${lineNo} (${obj.id}): "kind" must be one of ${NEGATIVE_KINDS.join(', ')}`);
+      return;
+    }
+
+    const constraints = {};
+    const entryErrors = [];
+    if (obj.constraints !== undefined) {
+      if (obj.constraints === null || typeof obj.constraints !== 'object' || Array.isArray(obj.constraints)) {
+        errors.push(`line ${lineNo} (${obj.id}): "constraints" must be an object`);
+        return;
+      }
+      for (const [key, value] of Object.entries(obj.constraints)) {
+        if (!CONSTRAINT_KEYS.includes(key)) {
+          entryErrors.push(`line ${lineNo} (${obj.id}): unknown constraint "${key}"`);
+          continue;
+        }
+        if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+          entryErrors.push(`line ${lineNo} (${obj.id}): constraint "${key}" must be an array of strings`);
+          continue;
+        }
+        if (value.length > 0) constraints[key] = value;
+      }
+    }
+    if (entryErrors.length > 0) {
+      errors.push(...entryErrors);
+      return;
+    }
+
+    queries.push({
+      id: obj.id,
+      query: obj.query,
+      lang: typeof obj.lang === 'string' && obj.lang ? obj.lang : 'en',
+      note: typeof obj.note === 'string' ? obj.note : '',
+      kind,
+      constraints,
+      relevant: {},
+      line: lineNo,
+    });
+  });
+
+  return { queries, errors };
+}
+
+/**
+ * What the negatives say, in two numbers and a breakdown.
+ *
+ *   emptyRate   the share that came back with nothing at all — the right
+ *               answer. The headline, and what --baseline gates.
+ *   meanLeaked  how many rows came back per negative, averaged over all of
+ *               them, at the fetch limit. A negative that leaks one tool and a
+ *               negative that leaks twenty are both wrong, and this is the
+ *               number that tells them apart.
+ */
+export function aggregateNegatives(entries) {
+  const counts = entries.map((e) => e.results.length);
+  const byKind = {};
+  for (const kind of NEGATIVE_KINDS) {
+    const subset = entries.filter((e) => e.query.kind === kind);
+    byKind[kind] = {
+      queries: subset.length,
+      empty: subset.filter((e) => e.results.length === 0).length,
+    };
+  }
+  const empty = counts.filter((c) => c === 0).length;
+  return {
+    queries: entries.length,
+    empty,
+    emptyRate: entries.length ? empty / entries.length : 0,
+    meanLeaked: mean(counts),
+    maxLeaked: counts.length ? Math.max(...counts) : 0,
+    byKind,
+    meanLatencyMs: mean(entries.map((e) => e.latencyMs)),
+    p95LatencyMs: percentile(entries.map((e) => e.latencyMs), 95),
+  };
+}
+
 // ===========================================================================
 // Baselines
 // ===========================================================================
+
+/** `"26 of 30"` -> {count: 26, total: 30}; `"3"` -> {count: 3, total: null}; else null. */
+export function parseCountOf(cell) {
+  const m = /^\s*(\d+)(?:\s*of\s*(\d+))?/i.exec(String(cell ?? ''));
+  if (!m) return null;
+  return { count: Number(m[1]), total: m[2] === undefined ? null : Number(m[2]) };
+}
 
 /**
  * Read eval/baselines.md and return every row that actually has numbers in it,
@@ -530,6 +689,11 @@ export function parseBaselines(markdown) {
       // that has nothing to do with anybody's change. Empty on rows recorded
       // before the column existed, which is handled in pickBaseline.
       vectors: cell('vectors').toLowerCase(),
+      // Two gates besides nDCG, both read off the same row. Blank on rows
+      // recorded before the relevance floor, and a blank gate is skipped
+      // rather than invented.
+      zeroResult: parseCountOf(cell('zero-result')),
+      negativesEmpty: parseCountOf(cell('negatives empty')),
       note: cell('what changed'),
     });
   }
@@ -572,6 +736,53 @@ export function checkRegression(current, baseline, tolerance = REGRESSION_TOLERA
     delta,
     tolerance,
     baseline,
+  };
+}
+
+/**
+ * A golden query that comes back empty is a person with a real problem shown
+ * a page saying Foundit has nothing for it. The relevance floor makes that
+ * possible for the first time since Phase 3, so the count is gated: no more
+ * empty golden queries than the recorded row had. Null when the row does not
+ * record the count.
+ */
+export function checkZeroResultRegression(currentZero, baseline) {
+  const recorded = baseline?.zeroResult;
+  if (!recorded) return null;
+  return {
+    regressed: currentZero > recorded.count,
+    current: currentZero,
+    recorded: recorded.count,
+  };
+}
+
+/**
+ * The negatives gate: the share of eval/negatives.jsonl answered with an empty
+ * page must not fall below the share the recorded row achieved. A rate rather
+ * than a count, so adding negatives later does not trip it by arithmetic.
+ *
+ * `current` null means the negatives were not run. Against a row that records
+ * them that is a FAILURE, not a pass: a gate that switches itself off when its
+ * input file goes missing is the failure this harness keeps being built to
+ * prevent.
+ */
+export function checkNegativesRegression(current, baseline) {
+  const recorded = baseline?.negativesEmpty;
+  if (!recorded || !recorded.total) return null;
+  const recordedRate = recorded.count / recorded.total;
+  if (!current) {
+    return { regressed: true, missing: true, recordedRate, recorded };
+  }
+  const rate = current.queries ? current.empty / current.queries : 0;
+  return {
+    // 1e-12 for the same reason checkRegression has one: two equal rates
+    // computed from different counts must not differ in the last bit.
+    regressed: rate < recordedRate - 1e-12,
+    missing: false,
+    rate,
+    recordedRate,
+    recorded,
+    current,
   };
 }
 
@@ -652,6 +863,8 @@ function parseArgs(argv) {
     golden: GOLDEN_PATH,
     baselines: BASELINES_PATH,
     baselinesExplicit: false,
+    negatives: NEGATIVES_PATH,
+    negativesExplicit: false,
     readQuery: false,
     help: false,
   };
@@ -669,6 +882,10 @@ function parseArgs(argv) {
     else if (arg.startsWith('--baselines=')) {
       opts.baselines = path.resolve(process.cwd(), arg.slice(12));
       opts.baselinesExplicit = true;
+    }
+    else if (arg.startsWith('--negatives=')) {
+      opts.negatives = path.resolve(process.cwd(), arg.slice(12));
+      opts.negativesExplicit = true;
     }
     else return { error: `unknown argument: ${arg}` , opts };
   }
@@ -693,6 +910,9 @@ const USAGE = `Foundit search evaluation harness
   --golden=PATH   golden set to read (default eval/golden.jsonl)
   --baselines=PATH  baselines table to compare against with --baseline
                   (default eval/baselines.md)
+  --negatives=PATH  sentences the catalogue cannot answer, whose right answer is
+                  an empty page (default eval/negatives.jsonl). --baseline gates
+                  the share that come back empty.
   --read-query    also run every query through lib/constraints.ts — derived
                   constraints, residual text — and print both slices and the
                   divergence between them. Off by default; changes nothing
@@ -1096,6 +1316,23 @@ async function main(argv) {
 
   const unjudged = queries.filter((q) => Object.keys(q.relevant).length === 0);
 
+  // --- Negatives ---------------------------------------------------------
+  // The default file missing is a note and a skipped section; a file somebody
+  // NAMED missing is a typo, and a typo must not switch a gate off.
+  let negatives = [];
+  if (existsSync(opts.negatives)) {
+    const parsed = parseNegatives(await readFile(opts.negatives, 'utf8'));
+    if (parsed.errors.length > 0) {
+      process.stderr.write(`ERROR: ${parsed.errors.length} problem(s) in ${opts.negatives}:\n`);
+      for (const e of parsed.errors) process.stderr.write(`  ${e}\n`);
+      return EXIT.USAGE;
+    }
+    negatives = parsed.queries;
+  } else if (opts.negativesExplicit) {
+    process.stderr.write(`ERROR: --negatives=${opts.negatives} does not exist.\n`);
+    return EXIT.USAGE;
+  }
+
   // --- Connect -----------------------------------------------------------
   let pg;
   try {
@@ -1149,6 +1386,9 @@ async function main(argv) {
   let warm = { wanted: 0, cached: 0, embedded: 0, requests: 0, tokens: 0, note: null };
   let perQuery = [];
   let derivedPerQuery = null;
+  /** The negatives, as written and (with --read-query) as read. Null when not run. */
+  let negPerQuery = null;
+  let derivedNegPerQuery = null;
   const allViolations = [];
   const derivedViolations = [];
   let client;
@@ -1177,9 +1417,9 @@ async function main(argv) {
     // with no user column, and it happens before the session is sealed
     // read-only rather than despite it.
     try {
-      const texts = queries.map((q) => AUTHORED_PLAN(q).text);
+      const texts = [...queries, ...negatives].map((q) => AUTHORED_PLAN(q).text);
       if (derivedPlan) {
-        for (const q of queries) texts.push(derivedPlan(q).text);
+        for (const q of [...queries, ...negatives]) texts.push(derivedPlan(q).text);
       }
       warm = await warmQueryCache(client, texts, redact);
       process.stdout.write(
@@ -1200,13 +1440,23 @@ async function main(argv) {
     if (derivedPlan) {
       derivedPerQuery = await runPass(client, queries, opts, derivedPlan, redact);
     }
+    // The negatives go through exactly the same search, the same plan and the
+    // same fetch limit. Nothing about them is special except what counts as
+    // right.
+    if (negatives.length > 0) {
+      negPerQuery = await runPass(client, negatives, opts, AUTHORED_PLAN, redact);
+      if (derivedPlan) {
+        derivedNegPerQuery = await runPass(client, negatives, opts, derivedPlan, redact);
+      }
+    }
 
     // --- One lookup for the ground truth about every returned tool --------
-    // Both passes are covered by the one lookup: a slug is a slug, and the
+    // Every pass is covered by the one lookup: a slug is a slug, and the
     // facts about it do not depend on which query brought it back.
     const returnedSlugs = [
       ...new Set(
-        [...perQuery, ...(derivedPerQuery ?? [])].flatMap((r) => r.results.map((x) => x.slug)),
+        [...perQuery, ...(derivedPerQuery ?? []), ...(negPerQuery ?? []), ...(derivedNegPerQuery ?? [])]
+          .flatMap((r) => r.results.map((x) => x.slug)),
       ),
     ];
     const factsBySlug = new Map();
@@ -1234,6 +1484,19 @@ async function main(argv) {
     if (derivedPerQuery) {
       scorePass(derivedPerQuery, factsBySlug);
       for (const entry of derivedPerQuery) derivedViolations.push(...entry.violations);
+    }
+    // A negative that leaks is a quality failure. A negative that leaks a tool
+    // its own constraints excluded is a WHERE clause leaking, and fails the run
+    // exactly as a golden query would.
+    for (const entry of negPerQuery ?? []) {
+      allViolations.push(
+        ...checkConstraints({ id: entry.query.id, constraints: entry.constraints }, entry.results, factsBySlug),
+      );
+    }
+    for (const entry of derivedNegPerQuery ?? []) {
+      derivedViolations.push(
+        ...checkConstraints({ id: entry.query.id, constraints: entry.constraints }, entry.results, factsBySlug),
+      );
     }
   } catch (err) {
     // runPass reports the detail and throws this to unwind past the `finally`
@@ -1270,6 +1533,17 @@ async function main(argv) {
   if (derivedPerQuery) {
     readerComparison = compareReadings(perQuery, derivedPerQuery);
     process.stdout.write(`${buildReaderReport(readerComparison)}\n`);
+  }
+
+  // --- The negatives ---------------------------------------------------------
+  const negOverall = negPerQuery ? aggregateNegatives(negPerQuery) : null;
+  const derivedNegOverall = derivedNegPerQuery ? aggregateNegatives(derivedNegPerQuery) : null;
+  if (negOverall) {
+    process.stdout.write(
+      `${buildNegativesReport({ overall: negOverall, perQuery: negPerQuery, derived: derivedNegOverall, golden: overall })}\n`,
+    );
+  } else {
+    process.stdout.write(`\nNEGATIVES: ${path.relative(ROOT, opts.negatives).split(path.sep).join('/')} not found — not measured.\n`);
   }
 
   // --- Hard failures --------------------------------------------------------
@@ -1357,6 +1631,48 @@ async function main(argv) {
           );
           if (exitCode === EXIT.OK) exitCode = EXIT.REGRESSION;
         }
+
+        // --- Two more gates off the same row ---------------------------------
+        const zero = checkZeroResultRegression(overall.zeroResultQueries, latest);
+        if (zero) {
+          process.stdout.write(
+            `          golden queries with no results: ${zero.current} now, ${zero.recorded} recorded` +
+              ` — ${zero.regressed ? 'REGRESSION' : 'ok'}\n`,
+          );
+          if (zero.regressed) {
+            process.stdout.write(
+              `\nFAIL: ${zero.current - zero.recorded} more golden quer${zero.current - zero.recorded === 1 ? 'y' : 'ies'} ` +
+                'came back empty than the recorded baseline allows.\n' +
+                'Each is a person with a real problem told that nothing fits. A floor that\n' +
+                'empties a golden query is too high for that query, whatever the negatives say.\n',
+            );
+            if (exitCode === EXIT.OK) exitCode = EXIT.REGRESSION;
+          }
+        }
+
+        const neg = checkNegativesRegression(negOverall, latest);
+        if (neg) {
+          const pctOf = (r) => `${(r * 100).toFixed(1)}%`;
+          process.stdout.write(
+            neg.missing
+              ? '          negatives answered with nothing: NOT MEASURED' +
+                  ` (recorded ${neg.recorded.count} of ${neg.recorded.total}) — REGRESSION\n`
+              : `          negatives answered with nothing: ${neg.current.empty} of ${neg.current.queries}` +
+                  ` (${pctOf(neg.rate)}) now, ${neg.recorded.count} of ${neg.recorded.total}` +
+                  ` (${pctOf(neg.recordedRate)}) recorded — ${neg.regressed ? 'REGRESSION' : 'ok'}\n`,
+          );
+          if (neg.regressed) {
+            process.stdout.write(
+              neg.missing
+                ? '\nFAIL: the recorded baseline gates the negatives and none were run.\n' +
+                    'A gate that turns itself off when its file goes missing is not a gate.\n'
+                : '\nFAIL: fewer of the negatives came back empty than the recorded baseline.\n' +
+                    'Sentences the catalogue cannot answer are being answered with tools again.\n' +
+                    'Do not edit eval/negatives.jsonl to make this pass.\n',
+            );
+            if (exitCode === EXIT.OK) exitCode = EXIT.REGRESSION;
+          }
+        }
       }
     }
   }
@@ -1380,6 +1696,23 @@ async function main(argv) {
       vectorsUsed,
       constraintViolations: allViolations,
       regression,
+      // Null when eval/negatives.jsonl was not run.
+      negatives: negOverall
+        ? {
+            path: path.relative(ROOT, opts.negatives).split(path.sep).join('/'),
+            overall: negOverall,
+            derived: derivedNegOverall,
+            queries: negPerQuery.map((e) => ({
+              id: e.query.id,
+              query: e.query.query,
+              lang: e.query.lang,
+              kind: e.query.kind,
+              resultCount: e.results.length,
+              latencyMs: e.latencyMs,
+              returned: e.results.map((r) => ({ rank: r.rank, slug: r.slug, matchSource: r.matchSource })),
+            })),
+          }
+        : null,
       // Null unless --read-query was passed, so the shape of a default run's
       // JSON is unchanged and anything reading it keeps working.
       readQuery: readerComparison
@@ -1697,6 +2030,72 @@ export function buildReaderReport(cmp) {
     out.push('');
   }
 
+  return out.join('\n');
+}
+
+/**
+ * The negatives section: how many of the sentences the catalogue cannot
+ * answer came back empty, beside the golden numbers so the trade is on one
+ * screen, and every one that leaked with what it leaked.
+ */
+export function buildNegativesReport({ overall, perQuery, derived = null, golden = null }) {
+  const out = [];
+  const pctOf = (r) => `${(r * 100).toFixed(1)}%`;
+  out.push('');
+  out.push('=== The negatives: sentences the catalogue cannot answer ====================');
+  out.push('Right answer: an empty page. Every row returned here is a tool shown to');
+  out.push('somebody whose problem nothing in the catalogue solves.');
+  out.push('');
+  const rows = [
+    [
+      'as written',
+      String(overall.queries),
+      `${overall.empty}`,
+      pctOf(overall.emptyRate),
+      n1(overall.meanLeaked),
+      String(overall.maxLeaked),
+      `${overall.byKind.far?.empty ?? 0}/${overall.byKind.far?.queries ?? 0}`,
+      `${overall.byKind.near?.empty ?? 0}/${overall.byKind.near?.queries ?? 0}`,
+    ],
+  ];
+  if (derived) {
+    rows.push([
+      'as read (--read-query)',
+      String(derived.queries),
+      `${derived.empty}`,
+      pctOf(derived.emptyRate),
+      n1(derived.meanLeaked),
+      String(derived.maxLeaked),
+      `${derived.byKind.far?.empty ?? 0}/${derived.byKind.far?.queries ?? 0}`,
+      `${derived.byKind.near?.empty ?? 0}/${derived.byKind.near?.queries ?? 0}`,
+    ]);
+  }
+  out.push(
+    renderTable(
+      ['negatives', 'n', 'empty', 'empty %', 'mean leaked', 'max', 'far empty', 'near empty'],
+      rows,
+      ['l', 'r', 'r', 'r', 'r', 'r', 'r', 'r'],
+    ),
+  );
+  if (golden) {
+    out.push('');
+    out.push(
+      `  beside the golden set: nDCG@10 ${n4(golden.ndcgAt10)}, recall@10 ${n4(golden.recallAt10)}, ` +
+        `${golden.zeroResultQueries} of ${golden.queries} golden queries empty`,
+    );
+  }
+  const leaked = perQuery.filter((e) => e.results.length > 0);
+  out.push('');
+  if (leaked.length === 0) {
+    out.push('No negative returned anything.');
+  } else {
+    out.push(`--- The ${leaked.length} that leaked ---------------------------------------------------`);
+    for (const e of leaked) {
+      out.push(`  ${e.query.id}  ${e.query.kind.padEnd(4)}  ${e.query.lang.padEnd(3)}  n=${String(e.results.length).padStart(2)}  ${e.query.query}`);
+      out.push(`        ${e.results.slice(0, 5).map((r) => `${r.rank}.${r.slug}(${r.matchSource})`).join('  ')}`);
+    }
+  }
+  out.push('');
   return out.join('\n');
 }
 

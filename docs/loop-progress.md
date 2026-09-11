@@ -2,7 +2,7 @@
 
 Read at the start of every tick, updated before the end of it.
 
-**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed — all three awaiting Amit's sign-off; 4 next
+**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended by the owner's review — a relevance floor, calmer cards and page speed ("After Phase 3: the owner's review" below); all awaiting Amit's sign-off; 4 next
 **Server:** `foundit-prod`, Hetzner CX23, Falkenstein, `167.233.217.138`, Ubuntu 24.04.4
 
 ## Phase 0b — the machine
@@ -333,7 +333,170 @@ Two honest statements about that:
   general one: a definer function that writes what another definer function
   reads is one function in two halves, and has to be reasoned about as one.**
 
-## Tried and rejected
+## After Phase 3: the owner's review
+
+Amit read the live results page and said three things. Paraphrased once here,
+then answered in order below.
+
+1. *"If there are no matching for what I asked I don't want to see apps that
+   are not related, it's ridiculous. I prefer a note saying there are no tools
+   like that right now."*
+2. *"How the match goes doesn't need to show on each card."*
+3. *The pages feel slow.*
+
+The first was Phase 3's own known weakness, written down in this document and
+found by the owner in a minute: the vector leg ranks every eligible tool, so a
+sentence the catalogue cannot answer came back with its nearest neighbours
+under a confident heading.
+
+| Deliverable | Status | Evidence |
+| --- | --- | --- |
+| A relevance floor, in one new migration, applied and idempotent | done | `0006_relevance_floor.sql`; the first apply runs it, a second skips all six. Nothing else under `db/` changed except its test suite |
+| All filtering stays in PostgreSQL, one round trip | done | the floor is a `where` clause inside `search_tools_impl`, evaluated after the constraints and before the limit; `lib/sql.ts` is unchanged |
+| 30 sentences the catalogue cannot answer | done | `eval/negatives.jsonl`: 15 far, 15 near misses, 6 non-English. Each checked against all 223 listings and 504 statements; nine candidates dropped because a tool really does serve them |
+| The thresholds measured, not argued | done | 20 configurations, each a full run of both sets; the table is in `eval/baselines.md` |
+| **Gate: nDCG within 0.01, no golden query newly empty, ≥85% of negatives empty** | **passed** | **0.7035 against 0.7018 (+0.0017); 0 golden empty in both slices; 26 of 30 negatives empty (86.7%) as written, 27 of 30 (90.0%) as read** |
+| Constraints still filter first | done | `db/test/vectors_test.sql` builds the worst case — a paid tool whose vector IS the query, whose name is what was typed, whose statement carries every term — and insists it is gone when the search says free. And that a tool the constraints removed cannot make the gate pass for another tool |
+| `--baseline` gates the negatives and the empty-page count | done | two new columns read off the same row; a floor of 0 fails it by 26 of 30. 176 scoring assertions, up from 133 |
+| CI measures it with no key | done | the fixture gained the negatives' 32 sentences and every one of the 576 existing vectors is byte-identical; a keyless run on a fresh database reproduces 0.7035 exactly |
+| Calmer cards | done | the match label, its note and the quoted statement are behind "Why this?"; `tests/card.test.mjs` renders the real component and fails if any of it appears outside the disclosure |
+| Constraint chips still on the face of every card | done | same test, met and unmet |
+| An honest empty page | done | rendered text below |
+| Pages respond | done | home 130 → 45 ms, browse 122 → 42 ms TTFB in production; every catalogue page under the 150 ms target |
+| Something on screen at once, everywhere | done | `loading.tsx` for home, browse, top, the tool page and results, all in the results loading state's own style |
+
+### How the floor works, in one paragraph
+
+A result survives if it has evidence: its best problem statement is close
+enough in meaning, **or** its listing carries every term of the sentence, **or**
+its name is a close trigram match for what was typed. "Close enough in
+meaning" is two questions rather than one — is anything in the *eligible* set
+clearly about this (a per-query gate), and is this particular result close
+enough to show (a lower per-result floor) — because one threshold cannot do
+both jobs. And a sentence written with no Latin letters gets a lower gate,
+because cosine similarity between Hebrew, Russian or Arabic and an English
+catalogue runs systematically lower. All four numbers live in
+`public.relevance_floor()`, a constant no caller can pass.
+
+**No vector, no floor.** With no key, a provider that is down, or the first
+search of a sentence before its vector comes back, the search is exactly the
+Phase 2 search — as 0004 promised — because the only half of the floor that
+could still run is the lexical half, and that alone would empty nearly every
+page.
+
+### The three results pages, as they render
+
+```
+my car makes a grinding noise when I brake
+  No constraints read from this one
+  Foundit doesn’t have a tool for that yet.
+  Nothing in the catalogue comes close to what you described, so there is
+  nothing here to show you — rather than a page of tools that don’t fit.
+  Two ways forward: browse the problems people have already solved here, or
+  describe it differently in the box below — the situation rather than the
+  tool: what you are trying to get done, and what would make an answer no use
+  to you.
+  [Browse problems people solved here] [Start a new search]
+
+track what I eat and find out whether I am short of any vitamins
+  10 tools come close. Nothing else in the catalogue was close enough to show.
+  Cronometer · Logs what you eat against a carefully curated food database…
+  [Free tier] [Has a free tier]   › Why this? (Cronometer)
+
+we all paid for different bits of the holiday and now nobody knows who owes who
+  The first 12 that come close.
+  Receiptly · Photographs a receipt and splits the line items between the
+  people who ate what.   [Free tier] [Has a free tier]   › Why this?
+```
+
+Opened, "Why this?" holds what used to be on the face of the card: *Matched:
+problem + description — your words turned up in a problem this tool lists and
+in its own description*, and the statement they matched.
+
+### Why the pages were slow, and what it was not
+
+It was not the fonts, not the bundle and not `next dev` compiling. Both slow
+pages spend their time in the database, and `EXPLAIN (ANALYZE)` as
+`foundit_app` says exactly where: the homepage's "found lately" scans all 504
+problem statements, and row-level security evaluates `tool_is_mine()` and
+`tool_is_visible()` **once per row** on the way — 58 ms of a 192 ms statement,
+to draw three cards. `/browse` pays the same toll twice. That cost is the
+security boundary doing its job and is not negotiable; paying it per visitor
+is.
+
+So the four catalogue reads are cached for a minute and served
+stale-while-revalidate. Search is not cached this way and must not be: it has
+its own cache and its own rules. Two rules keep it honest — only the anonymous
+view is ever stored, and a stranger cannot grow the cache with invented
+categories or slugs, which would be 0005's disk-filling bug again in a new
+place.
+
+Production, 10 runs per page after one warm-up, median / p95 time to first
+byte:
+
+| Page | Before | After | Total, after |
+| --- | --- | --- | --- |
+| `/` | 130.0 / 164.9 | **45.5** / 100.8 | 57.8 |
+| `/browse` | 121.7 / 167.7 | **42.1** / 92.8 | 56.0 |
+| `/top` | 69.2 / 97.9 | **52.0** / 94.4 | 62.4 |
+| `/tools/keepassxc` | 36.3 / 60.2 | **34.3** / 51.1 | 42.1 |
+| `/results` (cache hit) | 23.5 / 39.3 | 35.5 / 64.1 | 161.4 |
+| `/results` (first-time sentence) | 23.1 / 30.1 | 25.3 / 47.8 | 367.4 |
+| `/about` | 8.9 / 13.8 | 7.2 / 11.4 | 7.4 |
+
+Targets: every static or revalidated page under 150 ms median (met), a results
+cache hit under 400 ms (met, 161 ms end to end). `/results` streams its shell
+before the search runs, so its time to first byte was never the number that
+mattered; the total is.
+
+### Known weaknesses, stated rather than hidden
+
+- **The margins are thin, and they are thin where it counts.** The Latin gate
+  is 0.45 and the lowest golden query's best match is 0.451. The non-Latin
+  gate is 0.35 and the lowest is 0.376 — chosen at 0.35 rather than 0.37
+  precisely because at 0.37 the Hebrew q009 empties once the reader has taken
+  "free" out of it. Re-embedding the catalogue, or sixty different queries,
+  could move either side of that. **This is a floor fitted to ninety
+  sentences, not a calibrated score**, and Phase 5 should replace it.
+- **Four negatives still leak**, and they are the shape of what this cannot
+  do: three English near misses (`n13` WhatsApp backup, `n16` a smart lock,
+  `n19` a cleaner) whose nearest tools sit at 0.47–0.49, and `n25`, a Hebrew
+  sentence about a car whose nearest neighbours are the catalogue's own Hebrew
+  statements — same script, inflated similarity, nothing to do with meaning.
+- **The negatives were written by the same hand that tuned the thresholds.**
+  That is the Phase 2 corpus mistake in a smaller costume. They were checked
+  against the catalogue rather than against the search, and nine candidates
+  were dropped for being answerable, but an adversarial review should write
+  thirty of its own and re-measure.
+- **A tool whose statements are not yet embedded is nearly invisible.** With a
+  vector for the sentence and none for the tool, only the all-terms and name
+  routes can surface it. Today the job runs to completion; from Phase 7,
+  somebody's new listing is unfindable by meaning until it does.
+- **The page cannot say WHY it is empty** — nothing close, or a constraint
+  that removed what was — without one search per constraint, which is the
+  fan-out this codebase does not do. With constraints stated it says both are
+  possible and offers to drop one.
+- **recall@10 fell 0.6747 → 0.6719.** One judged tool that used to scrape into
+  a top ten is now below the floor. nDCG went up because what the floor
+  removes from a good page sits under the good answers.
+- **q009 still scores 0.0000.** The floor did not fix retrieval for Hebrew; it
+  stopped that query padding its page. Those are different problems and Phase
+  4 owns the second.
+- **Cached catalogue pages are up to a minute stale**, and the cache is keyed
+  on arguments only. The day accounts land, nothing that runs with a person's
+  claims may be wrapped in it, and Phase 7's writes need `revalidateTag`.
+  `unstable_cache` is also, by name, an unstable API.
+- **The page still overflows sideways at 375 px, and did before this change.**
+  The header's nav does not wrap: measured at 781 px against a 375 px viewport
+  on this build *and* on `a9db7b2`. The cards themselves are clean — no
+  button, chip, domain or disclosure crosses a card edge at 1280, 1000 or 375
+  — and a long tool name now wraps inside its card rather than over the
+  border. The header is a separate, pre-existing defect on a product that is
+  desktop-only for now (§1).
+- **Every number here is from this laptop**, against Docker through WSL2. The
+  server is the gate, at deploy.
+
+
 
 - **Docker on the owner's laptop.** Docker Desktop crashes on an orphaned
   `dockerInference` socket that Windows will not delete; five dead folders had
@@ -349,6 +512,25 @@ Two honest statements about that:
   it with an `archive_command` that shells out to pgBackRest. Without it,
   Postgres retains every WAL segment it cannot archive until the disk fills.
   Turn it on in the same change that installs pgBackRest.
+- **One cosine threshold for the relevance floor.** Every single value is
+  either useless against the negatives or destroys the answers: 0.30 empties
+  five of thirty, 0.45 costs 0.17 of nDCG and empties three golden queries.
+  The sets overlap — three English negatives sit above the lowest golden
+  query — so it became a per-query gate and a lower per-result floor.
+- **A floor relative to the query's own spread** (a z-score over the whole
+  catalogue, or "within δ of the best"). Worse, and instructively so: a
+  negative's nearest tool is an *outlier* against a low background, so the
+  Hebrew car sentence scores a higher z than any golden query. Measured and
+  recorded in the sweep rather than argued about.
+- **Statically rendering the homepage with a short revalidate.** It would be
+  the fastest thing possible, and it makes `next build` need a reachable
+  database to prerender the page — which the deploy in `research/10` does not
+  have. Caching the four catalogue reads instead gets the same page in 45 ms
+  with no build-time dependency.
+- **`next build` in this working copy while `next dev` is running.** They
+  share `.next`, so building under the owner's dev server corrupts it. The
+  production builds and timings in this section were taken in a copy of the
+  tree at `%TEMP%`, against the same database.
 
 ## Blocked on Amit
 

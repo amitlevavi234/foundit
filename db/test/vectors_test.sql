@@ -769,6 +769,183 @@ $$;
 
 reset role;
 
+-- ===========================================================================
+-- 7. THE RELEVANCE FLOOR (0006), AND WHAT IT MUST NEVER DO.
+--
+--    0006 drops every result without evidence — close in meaning, carrying
+--    every term, or named what was typed. A new filter next to the
+--    constraints is the other classic way a WHERE clause goes wrong: evidence
+--    that is judged over the WHOLE catalogue can let a tool the constraints
+--    removed decide what survives. These checks build the worst case on
+--    purpose — a paid tool with every kind of evidence at once — and insist
+--    that "free" still means free, and that a page with nothing left is empty
+--    rather than padded.
+-- ===========================================================================
+
+-- --- structural: the floor is a constant, not something a caller can pass --
+do $$
+declare r record; n integer;
+begin
+  select * into r from public.relevance_floor();
+  if r.result_min is null or r.result_min <= 0 then
+    perform pg_temp.fail('relevance_floor() has no per-result floor');
+  end if;
+  if r.gate_latin < r.result_min or r.gate_non_latin < r.result_min then
+    perform pg_temp.fail('a gate is below the per-result floor, so the gate does nothing');
+  end if;
+
+  -- INPUT arguments only: proargnames also lists a table function's result
+  -- columns (mode 't'), and query_vector_ranks' `clears_floor` is an answer,
+  -- not something a caller can set.
+  select count(*) into n
+    from pg_proc p
+    join pg_namespace ns on ns.oid = p.pronamespace
+   cross join lateral unnest(p.proargnames, p.proargmodes::text[]) as a(arg, mode)
+   where ns.nspname = 'public'
+     and p.proname in ('search_tools', 'search_tools_impl', 'query_vector_ranks')
+     and coalesce(a.mode, 'i') in ('i', 'b', 'v')
+     and a.arg ~* '(floor|threshold|gate|min_sim)';
+  if n > 0 then
+    perform pg_temp.fail('search takes a floor or threshold argument; a caller could pass zero');
+  end if;
+
+  -- query_vector_ranks still returns no distance: its result columns are the
+  -- id, the rank and one boolean.
+  select count(*) into n
+    from pg_proc p
+   cross join lateral unnest(p.proargnames, p.proargmodes::text[]) as a(arg, mode)
+   where p.oid = 'public.query_vector_ranks(text, halfvec, bigint[], int)'::regprocedure
+     and a.mode = 't'
+     and a.arg not in ('tool_id', 'rank_ix', 'clears_floor');
+  if n > 0 then
+    perform pg_temp.fail('query_vector_ranks returns something besides a rank and a verdict');
+  end if;
+end
+$$;
+
+-- A vector pointing a given share of the way along one axis and the rest along
+-- another: cosine similarity to unit(p_a) is exactly p_w.
+create or replace function pg_temp.mix(p_a int, p_w real, p_b int)
+returns halfvec language sql immutable as $$
+  select ('[' || string_agg(
+            case when i = p_a then p_w::text
+                 when i = p_b then sqrt(1 - p_w * p_w)::real::text
+                 else '0' end, ',') || ']')::halfvec(512)
+    from generate_series(0, 511) as i;
+$$;
+
+do $$
+declare v_paid bigint; v_near bigint; v_w real;
+begin
+  -- Halfway between the per-result floor and the Latin gate: close enough to
+  -- show beside something clearly close, not close enough to be the page on
+  -- its own. Read from the function, so this test follows the thresholds
+  -- wherever a later migration moves them.
+  select (f.result_min + f.gate_latin) / 2 into v_w from public.relevance_floor() f;
+
+  -- A paid tool with EVERY kind of evidence for 'zzfloor lantern': its name is
+  -- what will be typed, its statement carries every term, and its vector is the
+  -- query vector itself.
+  insert into public.tools (slug, name, url, summary, pricing, status, published_at)
+  values ('zz-floor-paid', 'Zzfloor Lantern', 'https://zz-floor-paid.example',
+          'A paid tool that exists only inside this test transaction.',
+          'paid', 'published', now())
+  returning id into v_paid;
+
+  -- A free tool that is only moderately close in meaning and shares no word.
+  insert into public.tools (slug, name, url, summary, pricing, status, published_at)
+  values ('zz-floor-near', 'Qwvbnm Kettle', 'https://zz-floor-near.example',
+          'A free tool that exists only inside this test transaction.',
+          'free', 'published', now())
+  returning id into v_near;
+
+  insert into public.tool_problems (tool_id, statement, embedding, embedding_model, embedded_at)
+  values (v_paid, 'zzfloor lantern glows in the dark', pg_temp.unit(6),
+          public.embedding_model(), now()),
+         (v_near, 'qwvbnm unrelated kettle descaling', pg_temp.mix(6, v_w, 7),
+          public.embedding_model(), now());
+end
+$$;
+
+set role foundit_app;
+
+do $$
+declare n integer; v_slugs text;
+begin
+  perform pg_temp.be(null);
+
+  -- Premise: unconstrained, the paid tool is there, and the moderately close
+  -- free one comes along beside it. If either is missing the checks below
+  -- would pass for the wrong reason.
+  select string_agg(s.slug::text, ',' order by s.slug) into v_slugs
+    from public.search_tools('zzfloor lantern', p_limit => 50,
+                             p_embedding => pg_temp.unit(6)) s
+   where s.slug::text in ('zz-floor-paid', 'zz-floor-near');
+  if v_slugs is distinct from 'zz-floor-near,zz-floor-paid' then
+    perform pg_temp.fail('premise: unconstrained, expected both test tools, got '
+                      || coalesce(v_slugs, '(neither)'));
+  end if;
+
+  -- THE ONE THAT MATTERS. Say free. The paid tool has every kind of evidence
+  -- the floor accepts and must still be gone, at any rank.
+  select count(*) into n
+    from public.search_tools('zzfloor lantern',
+           p_pricing   => array['free']::pricing_model[],
+           p_limit     => 50,
+           p_embedding => pg_temp.unit(6)) s
+   where s.slug::text = 'zz-floor-paid';
+  if n > 0 then
+    perform pg_temp.fail('the relevance floor surfaced a paid tool for a query that said free');
+  end if;
+
+  -- And the gate is asked of the FILTERED set. With the paid tool filtered out
+  -- nothing eligible is clearly close, so the moderately close free tool —
+  -- which shares no word and no name with the sentence — has no evidence of
+  -- its own and must not appear. A floor judged over the whole catalogue
+  -- would let the excluded tool vouch for it.
+  select count(*) into n
+    from public.search_tools('zzfloor lantern',
+           p_pricing   => array['free']::pricing_model[],
+           p_limit     => 50,
+           p_embedding => pg_temp.unit(6)) s
+   where s.slug::text = 'zz-floor-near';
+  if n > 0 then
+    perform pg_temp.fail('a tool the constraints removed made the gate pass for another tool');
+  end if;
+end
+$$;
+
+-- A sentence nothing is close to, sharing no word with any listing, with a
+-- vector pointing away from everything: the page is EMPTY. Before 0006 the
+-- vector leg ranked every eligible tool and this returned fifty rows.
+do $$
+declare n integer;
+begin
+  perform pg_temp.be(null);
+  select count(*) into n
+    from public.search_tools('qqzzxx vvbbnn', p_limit => 50,
+                             p_embedding => pg_temp.unit(500)) s;
+  if n <> 0 then
+    perform pg_temp.fail('a sentence with no evidence anywhere returned ' || n
+                      || ' row(s); the floor is not filtering');
+  end if;
+
+  -- No vector, no floor: the same sentence searched without one is the Phase 2
+  -- search, exactly as 0004 promised. It matches nothing lexically either, so
+  -- the check here is that the flag says a vector was missing — the page then
+  -- goes and gets one rather than accepting an empty answer it did not judge.
+  select count(*) into n
+    from public.search_tools('split expenses with friends while travelling abroad zzz') s
+   where s.embedding_missing;
+  if n = 0 then
+    perform pg_temp.fail('an uncached sentence did not report its missing vector, so the floor '
+                      || 'could not tell "judged empty" from "not judged"');
+  end if;
+end
+$$;
+
+reset role;
+
 select 'All vector, cache and constraint-filter checks passed.' as result;
 
 -- Nothing this file did survives it. Reached only when every check above
