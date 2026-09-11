@@ -134,7 +134,7 @@ const NOT_AN_AUDIENCE = String.raw`(?!\s+(?:developers?|devs?|engineers?|program
  * paid tier exists — the artboards show exactly that, a "Free" chip met by a
  * freemium listing. `free_trial` is not in the list: a trial ends.
  */
-const FREE_PRICING: PricingModel[] = ['free', 'open_source', 'donation', 'freemium'];
+export const FREE_PRICING: PricingModel[] = ['free', 'open_source', 'donation', 'freemium'];
 
 /**
  * The interface language somebody asked for.

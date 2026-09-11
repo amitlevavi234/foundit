@@ -7,12 +7,17 @@ import {
   runBrowse,
   runHome,
   runLogSearchEvent,
+  runPrefetch,
   runSearch,
   runSearchDetailed,
   runStoreQueryEmbedding,
+  runStoreQueryReading,
   runToolPage,
   runTop,
   runTouchQueryEmbedding,
+  runTouchQueryReading,
+  QueryTooLongError,
+  type Prefetch,
 } from './sql';
 import type {
   BrowseData,
@@ -190,6 +195,57 @@ export function storeQueryEmbedding(query: string, vector: string, model: string
  */
 export function touchQueryEmbedding(query: string): void {
   void runTouchQueryEmbedding(getPool(), query).catch(() => {});
+}
+
+/**
+ * Ask both caches, in one statement, before either paid call is made.
+ *
+ * This is the round trip Phase 4 added and Phase 3 did not have, and it buys
+ * the concurrency: knowing up front whether the sentence has been read and
+ * whether the text has a vector is what lets the reader and the embedder start
+ * together instead of one discovering it needed the other's answer.
+ *
+ * A failure is not an error. Both caches missing is the slow path, not a broken
+ * page, so this answers "neither" rather than throwing — except for a query
+ * over the cap, which is the one thing the page must say out loud.
+ */
+export async function prefetchForSearch(query: string, searchText: string): Promise<Prefetch> {
+  try {
+    return await runPrefetch(getPool(), query, searchText);
+  } catch (error) {
+    if (error instanceof QueryTooLongError) throw error;
+    // The reason, and nothing else: no query text. The slow path is a correct
+    // page, so nobody sees anything.
+    console.error(
+      `the cache prefetch failed (${
+        (error as { code?: string } | null)?.code ?? 'unknown'
+      }); the search ran as though both caches had missed`,
+    );
+    return { reading: null, embeddingMissing: true };
+  }
+}
+
+/**
+ * Keep the reading for a sentence, so the next person who types it costs
+ * nothing.
+ *
+ * Fire and forget, exactly like `storeQueryEmbedding`: call it after the
+ * response has gone out and do not await it.
+ *
+ * `public.query_readings` has no user column and this call has no argument that
+ * could become one.
+ */
+export function storeQueryReading(query: string, reading: unknown, model: string): void {
+  void runStoreQueryReading(getPool(), query, reading, model).catch(() => {
+    // Silent for the same reason logSearchEvent is: the only thing worth
+    // logging here is the query text, and the query text is exactly what must
+    // never appear in a log line beside a timestamp and a request.
+  });
+}
+
+/** Record that a cached reading was used, for eviction. Fire and forget. */
+export function touchQueryReading(query: string): void {
+  void runTouchQueryReading(getPool(), query).catch(() => {});
 }
 
 /* ===========================================================================

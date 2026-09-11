@@ -159,6 +159,62 @@ Search needs no separate warming: the query vector for a sentence is cached in
 `public.query_embeddings` the first time anybody searches for it, and the eval
 harness fills that cache for its own 60 queries before it measures.
 
+## Reading the sentences
+
+```bash
+node --env-file=.env.local scripts/read.mjs --dry-run        # count the work, call nothing
+node --env-file=.env.local scripts/read.mjs --write-fixture  # record them (costs API calls)
+node --env-file=.env.local scripts/read.mjs --from-fixture   # load the recorded ones, call nothing
+```
+
+The sibling of `scripts/embed.mjs`, and it exists for the same reason: **CI has
+no key and must not have one**, and a run with no readings measures a different
+search from the one that ships. Every sentence `eval/run.mjs` searches with —
+the golden set, both negatives files, and the 240 mechanical perturbations — is
+read once, by hand, with a key; every later run loads the recorded readings and
+calls nothing.
+
+**The order matters.** `scripts/read.mjs --write-fixture` first, then
+`scripts/embed.mjs --write-fixture`. The shipped path embeds the English
+restatement of a non-English sentence, and that restatement does not exist until
+the readings do; run them the other way round and the fixture holds no vector
+for it, so a keyless run measures those sentences text-only and quietly reports
+a different number.
+
+It connects as **`foundit_app`**, from `DATABASE_URL`, and writes through
+`public.store_query_reading` — the same definer function a visitor's search
+uses, so the fixture cannot put anything in `public.query_readings` that a
+search could not. There is no fourth role: what `0005` forbids is one role
+holding two halves of an oracle, and a reading has no halves.
+
+`OPENAI_API_KEY` is read first and `EMBEDDINGS_API_KEY` second — one account,
+two names, so a deployment can scope a key to the model without a code change
+and nobody has to keep a second copy of the same secret. **Neither may ever be
+echoed, printed, `cat`-ed or `source`-d.** If you need to know one is there,
+print its length.
+
+### Why a sentence is read twice
+
+`gpt-5-nano` has no temperature control — the API refuses the parameter — so at
+minimal reasoning effort its answers have a tail. Measured on one sentence:
+
+```
+"we all paid for different bits of the holiday and now nobody knows who owes who?"
+  recorded once as  asks_for_software: false
+  sampled six more times:  true true true true true true
+```
+
+One sample in seven would have told somebody with a real question that Foundit
+has nothing for it. So `readSentence` makes two calls, in flight together, and
+**a refusal needs both votes**; either sample saying "yes, software" is a
+search. The English restatement takes the opposite rule — whichever sample
+produced one wins — because there the tail is a *missing* answer and a
+restatement is only ever embedded, so a second chance at it can add a vector and
+can never delete an answer.
+
+Two calls, together, is about $0.00028 a search against a ceiling of $0.002, and
+a cached sentence costs neither.
+
 ## Running the search evaluation
 
 ```bash
@@ -169,9 +225,31 @@ It scores the golden set in `eval/golden.jsonl` and prints recall@10 and
 nDCG@10. **The golden set is never edited to make a score move.** If the number
 is bad, the search is bad.
 
+**Since Phase 4 the headline pass is the SHIPPED path** — the rules, plus the
+model's cached reading, merged — rather than the golden set's own hand-written
+constraints. That is a change of instrument and it is recorded as one in
+`eval/baselines.md`: phases 2 and 3 measured the ranker with the reading held
+correct by assumption, which was right while nothing read a sentence, and Phase
+4's whole subject is reading the sentence. Both passes still run and both are
+printed; `--plan=written` makes the old one the headline again.
+
+```bash
+node eval/run.mjs --plan=written    # the Phase 2 and 3 instrument
+node eval/run.mjs --plan=rules      # lib/constraints.ts alone: what Phase 3 shipped
+node eval/run.mjs --accept=none     # the reader, contributing no constraints
+node eval/run.mjs --no-refuse       # ignore "this is not a request for software"
+node eval/run.mjs --embed=text      # embed the sentence rather than its restatement
+```
+
+Every one of those was run before the defaults were chosen, and the table is in
+`eval/baselines.md`. None of them is a knob to turn when the number is
+disappointing; they are how the number was arrived at.
+
 ## Rules that are not negotiable
 
-- No real password, key or token in any file git tracks. Ever.
+- No real password, key or token in any file git tracks. Ever. That includes
+  `OPENAI_API_KEY`, which is the same secret as `EMBEDDINGS_API_KEY` unless
+  somebody has deliberately separated them.
 - Never disable row-level security, never connect as a superuser or as the
   table owner, never write a policy that evaluates to `true`. If one of those
   looks like the fix, you have found a real problem — stop and say so.

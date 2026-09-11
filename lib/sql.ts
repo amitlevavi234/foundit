@@ -310,6 +310,103 @@ export const STORE_QUERY_EMBEDDING_SQL = `
 export const TOUCH_QUERY_EMBEDDING_SQL = `
   select public.touch_query_embedding(p_query => $1::text)`;
 
+/* ===========================================================================
+ * Phase 4: the sentence reader's cache.
+ * ======================================================================== */
+
+/**
+ * The one round trip a search makes before it searches.
+ *
+ * Two primary-key lookups in one statement, and they answer the two questions
+ * that decide what the search has to pay for: has this sentence been read
+ * before, and is there a vector for the text we are about to rank on. Both come
+ * back before either paid call is made, which is what lets the two calls start
+ * together instead of one after the other.
+ *
+ * `$1` is the sentence as typed — the reading is keyed on the whole question.
+ * `$2` is the residual the rules left, which is what gets embedded and searched.
+ * They are different strings on purpose and the two caches are keyed on the one
+ * each belongs to.
+ *
+ * It costs one round trip that Phase 3 did not spend. The alternative was to
+ * ask the search itself, which cannot work: the search's own constraints depend
+ * on the reading, so a search that also returned the reading would have run
+ * with the wrong constraints. One cheap statement, and then one search.
+ */
+export const PREFETCH_SQL = `
+  select public.query_reading($1::text)                as reading,
+         public.query_embedding_missing($2::text)      as embedding_missing`;
+
+/**
+ * Keep the reading for this sentence, so the next person who types it costs
+ * nothing. Called after the response has gone out and never awaited.
+ *
+ * The sentence goes in raw and the function normalises it, so no caller can
+ * invent a cache key. `public.query_readings` has no user column, no session
+ * column and no IP column, and this statement has no argument that could carry
+ * one — the same shape, and the same reason, as `log_search_event` and
+ * `store_query_embedding`.
+ */
+export const STORE_QUERY_READING_SQL = `
+  select public.store_query_reading(
+    p_query   => $1::text,
+    p_reading => $2::jsonb,
+    p_model   => $3::text
+  )`;
+
+/** Mark a cached reading as used, for eviction. Fire and forget. */
+export const TOUCH_QUERY_READING_SQL = `
+  select public.touch_query_reading(p_query => $1::text)`;
+
+/** What one prefetch found. Neither field says anything about anybody. */
+export interface Prefetch {
+  /** The stored reading, unvalidated — the caller checks it. Null on a miss. */
+  reading: unknown;
+  /** True when the search would have to fetch a vector. */
+  embeddingMissing: boolean;
+}
+
+/**
+ * Ask both caches in one statement.
+ *
+ * A failure here is not an error: it means both caches missed, which is the
+ * slow path and a perfectly good page. The caller gets `{ reading: null,
+ * embeddingMissing: true }` and carries on.
+ */
+export async function runPrefetch(
+  exec: Executor,
+  query: string,
+  searchText: string,
+): Promise<Prefetch> {
+  const trimmed = query.trim();
+  if (trimmed.length > MAX_QUERY_LENGTH) {
+    throw new QueryTooLongError(trimmed.length);
+  }
+  const { rows } = await exec.query<{ reading: unknown; embedding_missing: boolean | null }>(
+    PREFETCH_SQL,
+    [trimmed, searchText],
+  );
+  return {
+    reading: rows[0]?.reading ?? null,
+    embeddingMissing: rows[0]?.embedding_missing !== false,
+  };
+}
+
+/** Cache the reading for one sentence. Fire and forget, never awaited. */
+export async function runStoreQueryReading(
+  exec: Executor,
+  query: string,
+  reading: unknown,
+  model: string,
+): Promise<void> {
+  await exec.query(STORE_QUERY_READING_SQL, [query, JSON.stringify(reading), model]);
+}
+
+/** Record that a cached reading was used. Fire and forget, same as above. */
+export async function runTouchQueryReading(exec: Executor, query: string): Promise<void> {
+  await exec.query(TOUCH_QUERY_READING_SQL, [query]);
+}
+
 /** The homepage: the ranked strip, the problem cards, and the two totals. */
 export const HOME_SQL = `
   with top_tools as (

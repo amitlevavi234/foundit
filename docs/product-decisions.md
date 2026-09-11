@@ -350,3 +350,70 @@ never fetch a URL a maker submitted. What changed is that we now send *the
 visitor's own words* to a third party, which is a different fact about a
 different piece of data, and it belongs on the privacy page rather than in a
 footnote about outbound links.
+
+## 16. What the sentence reader does, and what it will not do (added 12 September 2026)
+
+Phase 4 added a second paid call to a search: `gpt-5-nano` reads the sentence
+somebody typed and reports what it requires. This section is what that model is
+allowed to decide, and — more usefully — what it is not.
+
+**It reads the sentence and nothing else.** The request carries the normalised,
+200-character-capped sentence, the instructions, and five settings. No
+catalogue, no tool names, no slugs, no list of what we have, nothing about the
+visitor, the session or the request. The model is not choosing an answer; it is
+reading a question.
+
+**It can name no tool, because no field can hold one.** The schema has seven
+fields and every one is an enum member, an ISO language code, a boolean, or a
+restatement of the person's own sentence. The one field that could smuggle text
+into the ranker — `residual` — is accepted only when it is proved to be a
+*deletion* of what was typed: every character of it appearing in the input, in
+order. A model that rewrote, translated or embellished the sentence fails that
+check and the rules' version stands.
+
+**The rules keep the last word.** `lib/constraints.ts` runs first, costs
+nothing, and is never overruled: a dimension the rules read is a dimension the
+model cannot touch. The model may only fill one they left empty.
+
+**And it may only fill one dimension: pricing.** This was measured rather than
+decided, on the golden set and both negatives files, and the numbers are in
+`eval/baselines.md`. Letting the model contribute platforms or flags made the
+search worse in a way worth stating plainly: asked what a sentence requires, a
+model offers the things people generally want. "Notes app where my notes stay
+as files on my own computer" came back requiring `accessible` and `no_ads`, and
+the page emptied. Pricing is different because the phrasings are endless
+("without paying for anything", "without owning photoshop") and the only two
+readings a sentence can produce are already enumerated.
+
+**A non-English sentence is restated in English, and the restatement is
+embedded — never filtered on and never ranked on.** The catalogue is English and
+indexed as English, so this is the first thing in four phases to move the
+non-English slice for a structural reason rather than a tuning one. Giving the
+restatement to full-text search as well was measured and was worse; it is not
+done.
+
+**"This is not a request for software" empties the page, and needs three
+agreements to do it.** The sentence must not name a program in any language the
+catalogue serves, and *both* of two independent samples of the model must say
+so. That is not belt and braces for its own sake — one sample in seven said a
+question about splitting a holiday bill was not a request for software, and the
+cost of being wrong is a person with a real problem told that nothing exists.
+The page that results says Foundit only lists software and that this sounds
+like something else, and then offers the same two ways forward as the other
+empty state. It does not apologise, because nothing went wrong.
+
+**Nothing the reader does is joinable to a person.** The readings cache
+(`public.query_readings`) has no user column, no session column, no IP column
+and no foreign key, exactly like `query_embeddings` and `search_events`. The
+rate limiter that bounds the spend keeps nothing at all: a token bucket in
+memory, keyed on a salted hash of an address that is never stored or logged, and
+a restart forgets everybody.
+
+**`store: false` is in the request.** The Responses API retains a response by
+default so it can be fetched back by id. The sentence somebody typed is the text
+`search_events` refuses to attach to a person, and leaving a copy of it in a
+provider's dashboard would undo that at the far end.
+
+§15 still stands and now covers two calls rather than one: **the privacy notice
+must name the provider and the transfer before a real person uses Foundit.**
+What leaves the server is the same sentence it was; it now leaves twice.

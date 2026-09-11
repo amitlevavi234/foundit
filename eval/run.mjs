@@ -939,13 +939,41 @@ function parseArgs(argv) {
     negativesExplicit: false,
     heldOut: HELD_OUT_PATH,
     heldOutExplicit: false,
+    /**
+     * How the headline pass reads each sentence.
+     *
+     *   shipped  rules + the model's cached reading, merged — what a visitor
+     *            gets, and the default from Phase 4 on
+     *   rules    lib/constraints.ts alone — what Phase 3 shipped
+     *   written  the golden set's own hand-written constraints — the Phase 2
+     *            and 3 instrument, kept so the old number is still reachable
+     */
+    plan: 'shipped',
+    /** Merge options, so the alternatives are measured rather than argued. */
+    merge: 'rules-win',
+    text: 'rules',
+    embed: 'english',
+    /** Which dimensions the model may contribute; 'none' for none of them. */
+    accept: 'pricing',
+    /** Whether `asks_for_software: false` empties the page. */
+    refuse: true,
     readQuery: false,
     help: false,
   };
   for (const arg of argv) {
     if (arg === '--json') opts.json = true;
     else if (arg === '--baseline') opts.baseline = true;
+    // Kept because npm run eval:read-query names it, and because it said
+    // exactly this before Phase 4 made it the default: run the reader's pass
+    // and print it beside the golden set's own constraints. It now costs
+    // nothing because both always run.
     else if (arg === '--read-query') opts.readQuery = true;
+    else if (arg.startsWith('--plan=')) opts.plan = arg.slice(7);
+    else if (arg.startsWith('--merge=')) opts.merge = arg.slice(8);
+    else if (arg.startsWith('--text=')) opts.text = arg.slice(7);
+    else if (arg.startsWith('--embed=')) opts.embed = arg.slice(8);
+    else if (arg.startsWith('--accept=')) opts.accept = arg.slice(9);
+    else if (arg === '--no-refuse') opts.refuse = false;
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg.startsWith('--limit=')) opts.limit = Number.parseInt(arg.slice(8), 10);
     else if (arg.startsWith('--timeout=')) opts.timeout = Number.parseInt(arg.slice(10), 10);
@@ -973,6 +1001,24 @@ function parseArgs(argv) {
   if (!Number.isInteger(opts.timeout) || opts.timeout < 100) {
     return { error: '--timeout must be an integer >= 100 (milliseconds)', opts };
   }
+  for (const [flag, value, allowed] of [
+    ['--plan', opts.plan, ['shipped', 'rules', 'written']],
+    ['--merge', opts.merge, ['rules-win', 'model-wins']],
+    ['--text', opts.text, ['rules', 'shorter', 'restated']],
+    ['--embed', opts.embed, ['text', 'english', 'fused']],
+  ]) {
+    if (!allowed.includes(value)) {
+      return { error: `${flag} must be one of ${allowed.join(', ')}, not "${value}"`, opts };
+    }
+  }
+  const dimensions = ['pricing', 'platforms', 'languages', 'flags'];
+  opts.acceptList =
+    opts.accept === 'none' ? [] : opts.accept.split(',').map((s) => s.trim()).filter(Boolean);
+  for (const value of opts.acceptList) {
+    if (!dimensions.includes(value)) {
+      return { error: `--accept names "${value}"; it takes ${dimensions.join(', ')} or none`, opts };
+    }
+  }
   return { opts };
 }
 
@@ -994,10 +1040,19 @@ const USAGE = `Foundit search evaluation harness
   --held-out=PATH   a second negatives file nobody tuned against
                   (default eval/negatives.review.jsonl). Reported separately and
                   gated separately: it is the honest number.
-  --read-query    also run every query through lib/constraints.ts — derived
-                  constraints, residual text — and print both slices and the
-                  divergence between them. Off by default; changes nothing
-                  about the headline numbers or the regression gate.
+  --plan=WHICH    how the headline pass reads each sentence (default shipped)
+                    shipped  the rules pass plus gpt-5-nano's cached reading,
+                             merged — what a visitor gets
+                    rules    lib/constraints.ts alone — what Phase 3 shipped
+                    written  the golden set's own constraints — the Phase 2 and
+                             3 instrument
+  --merge=WHICH   rules-win (default) or model-wins, on a dimension both read
+  --text=WHICH    rules (default), shorter, or restated: what is ranked on
+  --embed=WHICH   english (default), text or fused: what the vector leg embeds
+  --accept=LIST   which dimensions the model may contribute, comma separated
+                  (default pricing; "none" for none)
+  --no-refuse     ignore the model's "this is not a request for software"
+  --read-query    accepted and ignored. Both passes always run since Phase 4.
 
 Exit: 0 ok, 1 usage, 2 constraint violation, 3 database, 4 regression.`;
 
@@ -1009,7 +1064,8 @@ const SEARCH_SQL = `
       p_platforms => $3::platform[],
       p_flags     => $4::tool_flag[],
       p_languages => $5::text[],
-      p_limit     => $6::int
+      p_limit     => $6::int,
+      p_embedding => $7::halfvec
     )`;
 
 const FACTS_SQL = `
@@ -1031,6 +1087,34 @@ const MISSING_EMBEDDINGS_SQL = `
 const STORE_QUERY_EMBEDDINGS_SQL = `
   select public.store_query_embedding(x.q, x.e::halfvec, $3::text)
     from unnest($1::text[], $2::text[]) as x(q, e)`;
+
+/**
+ * Phase 4's half of the same arrangement: the model's reading of every sentence
+ * this run is about to search with, loaded into public.query_readings from
+ * db/seed/embeddings.fixture.json before the session is sealed read-only.
+ *
+ * Same reasoning as the vectors, and the same consequence: CI has no key, and
+ * without this a keyless run would measure the rules-only search and gate
+ * nothing at all about the model pass.
+ */
+const STORE_QUERY_READINGS_SQL = `
+  select count(*)
+    from unnest($1::text[], $2::jsonb[]) as x(q, r),
+         lateral public.store_query_reading(x.q, x.r, $3::text)`;
+
+/**
+ * Read the readings back OUT of the database, rather than straight out of the
+ * fixture.
+ *
+ * That is deliberate and it costs one statement. The application reads a
+ * reading through public.query_reading, which is a SECURITY DEFINER function
+ * over a table foundit_app holds no grant on; measuring from the fixture
+ * instead would leave the migration, the grants and the shape CHECK beside the
+ * measured path rather than on it.
+ */
+const QUERY_READINGS_SQL = `
+  select t as text, public.query_reading(t) as reading
+    from unnest($1::text[]) as t`;
 
 /**
  * Fill the query-embedding cache for every sentence this run is about to
@@ -1072,7 +1156,7 @@ const STORE_QUERY_EMBEDDINGS_SQL = `
  * numbers a ten-thousandth apart.
  */
 /** The fixture format this harness reads. Bumped in 0007 with tool summaries. */
-const FIXTURE_SCHEMA = 'foundit-embeddings/2';
+const FIXTURE_SCHEMA = 'foundit-embeddings/3';
 
 function fixtureQueryVectors(embeddings) {
   try {
@@ -1101,6 +1185,21 @@ function fixtureQueryVectors(embeddings) {
   }
 }
 
+/**
+ * Fill the query-embedding cache with each sentence's OWN vector.
+ *
+ * The cache is keyed on the searched text, so it can only ever hold one vector
+ * per key — and two passes of this harness search the same text wanting two
+ * different vectors, because the shipped plan embeds a non-English sentence's
+ * English restatement instead. Writing one pass's vector under a key the other
+ * pass also reads made the reference pass measure the shipped plan's vectors,
+ * silently and only for the sentences where the rules stripped nothing.
+ *
+ * So the cache holds the plain thing and nothing else, and a pass that wants a
+ * different vector carries it as an argument — `resolveVectors` below, and
+ * `p_embedding`. That is the application's own cache-miss path, and it produces
+ * the identical ranking to a hit by construction.
+ */
 async function warmQueryCache(client, texts, redact) {
   const summary = {
     wanted: 0,
@@ -1115,9 +1214,6 @@ async function warmQueryCache(client, texts, redact) {
     note: null,
   };
 
-  const unique = [...new Set(texts.map((t) => String(t ?? '')).filter((t) => t.trim() !== ''))];
-  if (unique.length === 0) return summary;
-
   // Dynamic, for the same reason eval/reader.mjs is: a default run must not
   // fail to start because a module it may not need did not load.
   let embeddings;
@@ -1127,9 +1223,13 @@ async function warmQueryCache(client, texts, redact) {
     summary.note = `lib/embeddings.ts did not load (${redact(err?.message ?? err)}); every query measures text-only`;
     return summary;
   }
+  normalizeQueryImpl = embeddings.normalizeQuery;
 
-  const normalized = [...new Set(unique.map((t) => embeddings.normalizeQuery(t)).filter((t) => t !== ''))];
+  const normalized = [
+    ...new Set(texts.map((t) => embeddings.normalizeQuery(t ?? '')).filter((t) => t !== '')),
+  ];
   summary.wanted = normalized.length;
+  if (normalized.length === 0) return summary;
 
   const { rows } = await client.query(MISSING_EMBEDDINGS_SQL, [normalized]);
   let missing = rows.map((r) => r.text);
@@ -1148,7 +1248,6 @@ async function warmQueryCache(client, texts, redact) {
         // The fixture records the model it was written from; a mismatch is
         // refused by store_query_embedding rather than mixed in.
         JSON.parse(readFileSync(FIXTURE_PATH, 'utf8')).model,
-
       ]);
       summary.fromFixture = have.length;
       summary.missing -= have.length;
@@ -1200,6 +1299,127 @@ async function warmQueryCache(client, texts, redact) {
 }
 
 /**
+ * The vector literal for each of these texts, from the fixture or the API.
+ *
+ * Used for the one case the cache cannot serve: the shipped plan embedding a
+ * sentence's English restatement rather than the sentence. The literal is then
+ * passed to `search_tools` as `p_embedding`, which is what app/results/page.tsx
+ * does on a cache miss, and what makes the measured pass independent of what
+ * any other pass left in the cache.
+ *
+ * A text with no recorded vector and no key measures text-only, and is counted
+ * so the run says so rather than quietly reporting a different search.
+ */
+async function resolveVectors(texts, redact) {
+  const out = { vectors: new Map(), missing: 0, requests: 0, tokens: 0, note: null };
+  let embeddings;
+  try {
+    embeddings = await import('../lib/embeddings.ts');
+  } catch {
+    out.missing = texts.length;
+    return out;
+  }
+
+  const wanted = [
+    ...new Set(texts.map((t) => embeddings.normalizeQuery(t ?? '')).filter((t) => t !== '')),
+  ];
+  if (wanted.length === 0) return out;
+
+  const recorded = fixtureQueryVectors(embeddings);
+  const missing = [];
+  for (const text of wanted) {
+    if (recorded[text] !== undefined) out.vectors.set(text, recorded[text]);
+    else missing.push(text);
+  }
+  if (missing.length === 0) return out;
+
+  if (!embeddings.embeddingsConfigured()) {
+    out.missing = missing.length;
+    out.note =
+      `${missing.length} sentence(s) the shipped plan wants a vector for are not in the ` +
+      'fixture and there is no key; those measure text-only. Re-record: ' +
+      'scripts/read.mjs --write-fixture then scripts/embed.mjs --write-fixture';
+    return out;
+  }
+
+  for (let i = 0; i < missing.length; i += embeddings.EMBEDDINGS_BATCH_SIZE) {
+    const batch = missing.slice(i, i + embeddings.EMBEDDINGS_BATCH_SIZE);
+    try {
+      const result = await embeddings.embedTexts(batch);
+      out.requests += 1;
+      out.tokens += result.tokens;
+      batch.forEach((text, n) => out.vectors.set(text, result.vectors[n]));
+    } catch (err) {
+      out.missing += batch.length;
+      out.note = `the embedding provider failed (${redact(err?.message ?? err)})`;
+    }
+  }
+  return out;
+}
+
+/**
+ * Load the recorded readings into public.query_readings, then read them back
+ * out through the definer function the application uses.
+ *
+ * Two statements, and the second one is the point: what the shipped plan gets
+ * is what `public.query_reading()` returns, so the migration, the grant and the
+ * table's shape CHECK are all on the measured path. A sentence with no recorded
+ * reading comes back null and measures rules-only, exactly as a visitor's
+ * search does when the model is unreachable.
+ */
+async function warmReadingCache(client, texts, redact) {
+  const summary = { wanted: 0, loaded: 0, available: 0, missing: 0, note: null, readings: new Map() };
+
+  let fixture;
+  try {
+    fixture = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
+  } catch {
+    summary.note = 'no fixture, so no sentence has a reading; every query measures rules-only';
+    return summary;
+  }
+  const recorded = fixture?.readings ?? {};
+  const model = fixture?.readingModel;
+
+  const keys = [...new Set(texts.map((t) => normalizedKey(t)).filter((t) => t !== ''))];
+  summary.wanted = keys.length;
+  if (keys.length === 0) return summary;
+
+  const have = keys.filter((k) => recorded[k] !== undefined);
+  if (have.length > 0 && model) {
+    const BATCH = 200;
+    try {
+      for (let i = 0; i < have.length; i += BATCH) {
+        const batch = have.slice(i, i + BATCH);
+        await client.query(STORE_QUERY_READINGS_SQL, [
+          batch,
+          batch.map((k) => JSON.stringify(recorded[k])),
+          model,
+        ]);
+        summary.loaded += batch.length;
+      }
+    } catch (err) {
+      // A role without EXECUTE on the setter, or a model mismatch. Report it
+      // and measure what the cache already holds; this is not a reason to fail.
+      summary.note = `the reading cache could not be written (${redact(err?.message ?? err)})`;
+    }
+  } else if (have.length > 0 && !model) {
+    summary.note = 'the fixture holds readings but records no model, so none was loaded';
+  }
+
+  try {
+    const { rows } = await client.query(QUERY_READINGS_SQL, [keys]);
+    for (const row of rows) {
+      if (row.reading) summary.readings.set(row.text, row.reading);
+    }
+  } catch (err) {
+    summary.note = `the readings could not be read back (${redact(err?.message ?? err)})`;
+  }
+  summary.available = summary.readings.size;
+  summary.missing = keys.length - summary.available;
+  return summary;
+}
+
+/**
  * Thrown to abandon a run from inside a helper. `main` opens the pool in a
  * `try/finally`, so a helper cannot simply `return EXIT.DATABASE` — it has to
  * unwind through that `finally` and hand the exit code back at the top.
@@ -1225,7 +1445,62 @@ class EvalExit extends Error {
  * a sentence into constraints, so no change to that code can move this number
  * in either direction. `--read-query` and DERIVED plans exist because of that.
  */
-const AUTHORED_PLAN = (q) => ({ text: q.query, constraints: q.constraints });
+const AUTHORED_PLAN = (q) => ({ text: q.query, constraints: q.constraints, embedText: q.query });
+
+/**
+ * The shipped plan: the sentence read the way a visitor's search reads it.
+ *
+ * Rules first (lib/constraints.ts), then the model's cached reading, merged by
+ * lib/reading.ts with the rules winning every dimension they spoke for. What
+ * comes out is the text full-text search ranks on, the text the vector leg
+ * embeds, the merged constraints, and whether this is a request for a software
+ * tool at all.
+ *
+ * **This is the default pass from Phase 4 on**, and that is a change of
+ * instrument recorded in eval/baselines.md rather than slipped in. Phases 2 and
+ * 3 measured the ranker with the reading held constant and correct — the golden
+ * set's own hand-written constraints — which was the right instrument while
+ * nothing read a sentence. Phase 4 is the phase whose whole subject is reading
+ * the sentence, so the number has to be what a visitor gets. `--plan=written`
+ * still produces the old one, and the run prints both side by side.
+ *
+ * @param readings  normalised sentence -> the reading the database returned
+ */
+const shippedPlan = (readings, readForSearch, options, vectors = new Map()) => (q) => {
+  const plan = readForSearch(q.query, readings.get(normalizedKey(q.query)) ?? null, options);
+  // A vector is carried only when the text being embedded is NOT the text being
+  // searched. Otherwise null means "look in the cache", which is the
+  // single-round-trip path every repeated search takes.
+  const embedKey = normalizedKey(plan.embedText);
+  const vector = embedKey !== normalizedKey(plan.text) ? (vectors.get(embedKey) ?? null) : null;
+  return {
+    text: plan.text,
+    embedText: plan.embedText,
+    vector,
+    constraints: plan.constraints,
+    keys: plan.keys,
+    asksForSoftware: plan.asksForSoftware,
+    usedModel: plan.usedModel,
+    fromModel: plan.fromModel,
+    refused: plan.refused,
+    english: plan.english,
+  };
+};
+
+/** The rules pass alone — Phase 3's reader, for the three-way comparison. */
+const rulesPlan = (readRulesOnly) => (q) => readRulesOnly(q.query);
+
+/**
+ * The cache key for a sentence, mirrored from lib/embeddings.ts.
+ *
+ * Assigned once the module loads, because lib/embeddings.ts is a dynamic import
+ * — a default run must not fail to start because a module it may not need did
+ * not load.
+ */
+let normalizeQueryImpl = (t) => String(t ?? '').trim().toLowerCase();
+function normalizedKey(text) {
+  return normalizeQueryImpl(text);
+}
 
 /**
  * Every golden query, four ways it might have been typed instead.
@@ -1264,10 +1539,36 @@ async function runPass(client, queries, opts, plan, redact) {
       constraints.flags ?? null,
       constraints.languages ?? null,
       opts.limit,
+      // Null means "look in the cache", which is what the reference pass wants
+      // and what a repeated search does. The shipped plan supplies the vector
+      // of the text it chose to embed, exactly as the application does when the
+      // cache did not have one.
+      planned.vector ?? null,
     ];
 
     const t0 = performance.now();
     let rows;
+
+    // The reader said this is not a request for a software tool at all, so the
+    // page says so and never searches (app/results/page.tsx, the NotSoftware
+    // empty state). Modelled here exactly: no statement is sent, and the
+    // measured result is the empty page a visitor would see. A golden query
+    // refused this way scores 0 and shows up in the zero-result gate, which is
+    // the whole point — a reader that refuses a real question must fail the run.
+    if (planned.asksForSoftware === false) {
+      entries.push({
+        query: q,
+        searchText: planned.text,
+        constraints,
+        readerKeys: planned.keys ?? null,
+        plan: planned,
+        refusedAsNotSoftware: true,
+        results: [],
+        latencyMs: 0,
+      });
+      continue;
+    }
+
     try {
       ({ rows } = await client.query(SEARCH_SQL, params));
     } catch (err) {
@@ -1321,8 +1622,10 @@ async function runPass(client, queries, opts, plan, redact) {
       query: q,
       searchText: planned.text,
       constraints,
-      // Only the derived plan sets these; they are reported, never asserted on.
+      // Only a reading plan sets these; they are reported, never asserted on.
       readerKeys: planned.keys ?? null,
+      plan: planned,
+      refusedAsNotSoftware: false,
       results,
       latencyMs,
     });
@@ -1496,19 +1799,22 @@ async function main(argv) {
   // configuration error rather than half-way through a run. It is a dynamic
   // import on purpose: the default run must not so much as touch
   // lib/constraints.ts, which is TypeScript and needs Node's type stripping.
-  let derivedPlan = null;
-  if (opts.readQuery) {
+  let reader = null;
+  if (opts.plan !== 'written') {
     try {
-      const { readForSearch } = await import('./reader.mjs');
-      derivedPlan = (q) => readForSearch(q.query);
+      reader = await import('./reader.mjs');
     } catch (err) {
       process.stderr.write(
         [
-          'ERROR: --read-query could not load the sentence reader.',
+          `ERROR: --plan=${opts.plan} could not load the sentence reader.`,
           `  ${redact(err?.message ?? err)}`,
           '',
-          'eval/reader.mjs imports lib/constraints.ts directly, which needs a Node',
-          `that strips TypeScript types (this repository requires >= 26; running ${process.version}).`,
+          'eval/reader.mjs imports lib/constraints.ts, lib/reading.ts and',
+          'lib/reader-model.ts directly, which needs a Node that strips TypeScript',
+          `types (this repository requires >= 26; running ${process.version}).`,
+          '',
+          'To measure the ranker with the reading held constant instead, and touch',
+          'none of those files: --plan=written.',
           '',
         ].join('\n'),
       );
@@ -1520,15 +1826,17 @@ async function main(argv) {
   /** What the cache warm-up did, reported and put in the JSON. */
   let warm = { wanted: 0, cached: 0, embedded: 0, requests: 0, tokens: 0, note: null };
   let perQuery = [];
-  let derivedPerQuery = null;
+  /** The vector of each restatement the shipped plan embeds, when it differs. */
+  let shippedVectors = new Map();
+  let writtenPerQuery = null;
   /** The negatives, as written and (with --read-query) as read. Null when not run. */
   let negPerQuery = null;
-  let derivedNegPerQuery = null;
+  let writtenNegPerQuery = null;
   /** The held-out negatives, and the golden set's mechanical variants. */
   let heldPerQuery = null;
   let perturbedPerQuery = null;
   const allViolations = [];
-  const derivedViolations = [];
+  const writtenViolations = [];
   let client;
 
   try {
@@ -1543,23 +1851,85 @@ async function main(argv) {
     process.stdout.write(
       `Foundit eval — ${queries.length} queries, metrics @${K}, fetching ${opts.limit} rows each.\n`,
     );
-    if (derivedPlan) {
+    process.stdout.write(
+      `  headline pass: --plan=${opts.plan}` +
+        (opts.plan === 'shipped'
+          ? ` (merge=${opts.merge}, text=${opts.text}, embed=${opts.embed}, ` +
+            `accept=${opts.acceptList.join('+') || 'none'}, ` +
+            `refuse=${opts.refuse ? 'on' : 'off'})`
+          : '') +
+        '\n',
+    );
+    if (opts.plan !== 'written') {
       process.stdout.write(
-        '  --read-query: running each query twice — once as written in the golden\n' +
-          '  set, once as lib/constraints.ts reads it.\n',
+        '  every query runs twice — once as the golden set writes it (the ranker\n' +
+          '  alone), once as the shipped reader reads it. The gap is printed below.\n',
       );
     }
+
+    // --- The model's reading, before anything else -------------------------
+    // First, because the shipped plan's searched text and embedded text both
+    // come out of it, so the vectors that have to be warmed are not known until
+    // it has run. Loaded from the fixture, read back through the definer
+    // function, and never fetched from the provider here.
+    const everySentence = [...queries, ...negatives, ...heldOut, ...perturbed].map((q) => q.query);
+    let readings = { wanted: 0, loaded: 0, available: 0, missing: 0, note: null, readings: new Map() };
+    if (opts.plan === 'shipped') {
+      try {
+        readings = await warmReadingCache(client, everySentence, redact);
+        process.stdout.write(
+          `  readings: ${readings.loaded} loaded from the fixture, ` +
+            `${readings.available} of ${readings.wanted} sentences have one, ` +
+            `${readings.missing} measure rules-only.\n`,
+        );
+        if (readings.note) process.stdout.write(`  NOTE: ${readings.note}\n`);
+      } catch (err) {
+        process.stderr.write(`ERROR warming the reading cache.\n  ${redact(err.message)}\n`);
+        return EXIT.DATABASE;
+      }
+    }
+
+    // --- The plans ---------------------------------------------------------
+    const mergeOptions = {
+      mode: opts.merge,
+      text: opts.text,
+      embed: opts.embed,
+      accept: opts.acceptList,
+      refuse: opts.refuse,
+    };
+    let headlinePlan =
+      opts.plan === 'written'
+        ? AUTHORED_PLAN
+        : opts.plan === 'rules'
+          ? rulesPlan(reader.readRulesOnly)
+          : shippedPlan(readings.readings, reader.readForSearch, mergeOptions);
 
     // --- The vector leg's half of the search, before anything is measured ---
     // This is the only write the harness makes anywhere, it goes to a cache
     // with no user column, and it happens before the session is sealed
     // read-only rather than despite it.
+    //
+    // Two steps, and they are different things. The CACHE gets each searched
+    // sentence's own vector — the steady state every repeated search reads. The
+    // shipped plan additionally needs the vector of whatever it chose to embed,
+    // which for a non-English sentence is the English restatement and is NOT
+    // what belongs under that key; that one is carried as an argument instead.
+    //
+    // Writing it into the cache was the first arrangement and it was wrong: the
+    // reference pass searches the same text and reads the same key, so for
+    // every sentence the rules strip nothing from, the reference pass was
+    // silently measuring the shipped plan's vectors. It showed up as a
+    // reference number that had moved without the reference plan changing.
     try {
-      const texts = [...queries, ...negatives, ...heldOut, ...perturbed].map(
-        (q) => AUTHORED_PLAN(q).text,
-      );
-      if (derivedPlan) {
-        for (const q of [...queries, ...negatives, ...heldOut]) texts.push(derivedPlan(q).text);
+      const texts = [];
+      const embedTexts = [];
+      for (const q of [...queries, ...negatives, ...heldOut, ...perturbed]) {
+        texts.push(AUTHORED_PLAN(q).text);
+        if (headlinePlan !== AUTHORED_PLAN) {
+          const plan = headlinePlan(q);
+          texts.push(plan.text);
+          if (plan.embedText && plan.embedText !== plan.text) embedTexts.push(plan.embedText);
+        }
       }
       warm = await warmQueryCache(client, texts, redact);
       process.stdout.write(
@@ -1567,35 +1937,62 @@ async function main(argv) {
           `${warm.embedded} embedded in ${warm.requests} request(s), ${warm.tokens} prompt tokens.\n`,
       );
       if (warm.note) process.stdout.write(`  NOTE: ${warm.note}\n`);
+
+      if (embedTexts.length > 0) {
+        const resolved = await resolveVectors(embedTexts, redact);
+        shippedVectors = resolved.vectors;
+        process.stdout.write(
+          `  restatement vectors: ${resolved.vectors.size} resolved, ` +
+            `${resolved.missing} not found, ${resolved.requests} request(s).\n`,
+        );
+        if (resolved.note) process.stdout.write(`  NOTE: ${resolved.note}\n`);
+      }
     } catch (err) {
       process.stderr.write(`ERROR warming the query-embedding cache.\n  ${redact(err.message)}\n`);
       return EXIT.DATABASE;
+    }
+
+    // Rebuilt now that the restatement vectors are in hand, so the plan can
+    // carry one.
+    if (opts.plan === 'shipped') {
+      headlinePlan = shippedPlan(
+        readings.readings,
+        reader.readForSearch,
+        mergeOptions,
+        shippedVectors,
+      );
     }
 
     // Everything from here is measurement, and measurement does not write.
     await client.query('set session characteristics as transaction read only');
 
     // --- Run every query, sequentially ------------------------------------
-    perQuery = await runPass(client, queries, opts, AUTHORED_PLAN, redact);
-    if (derivedPlan) {
-      derivedPerQuery = await runPass(client, queries, opts, derivedPlan, redact);
+    // perQuery is the HEADLINE pass — what a visitor gets. writtenPerQuery is
+    // the reference: the same ranker handed the golden set's own constraints,
+    // which is what Phases 2 and 3 recorded. Both are printed; the first is the
+    // one the gate reads.
+    perQuery = await runPass(client, queries, opts, headlinePlan, redact);
+    if (headlinePlan !== AUTHORED_PLAN) {
+      writtenPerQuery = await runPass(client, queries, opts, AUTHORED_PLAN, redact);
     }
     // The negatives go through exactly the same search, the same plan and the
     // same fetch limit. Nothing about them is special except what counts as
     // right.
     if (negatives.length > 0) {
-      negPerQuery = await runPass(client, negatives, opts, AUTHORED_PLAN, redact);
-      if (derivedPlan) {
-        derivedNegPerQuery = await runPass(client, negatives, opts, derivedPlan, redact);
+      negPerQuery = await runPass(client, negatives, opts, headlinePlan, redact);
+      if (headlinePlan !== AUTHORED_PLAN) {
+        writtenNegPerQuery = await runPass(client, negatives, opts, AUTHORED_PLAN, redact);
       }
     }
     if (heldOut.length > 0) {
-      heldPerQuery = await runPass(client, heldOut, opts, AUTHORED_PLAN, redact);
+      heldPerQuery = await runPass(client, heldOut, opts, headlinePlan, redact);
     }
     // 240 more searches, and the only thing read off them is whether each came
-    // back empty.
+    // back empty. Since Phase 4 they go through the headline plan, so the gate
+    // asks of the reader what it already asked of the floor: does a full stop
+    // decide whether this question has an answer?
     if (perturbed.length > 0) {
-      perturbedPerQuery = await runPass(client, perturbed, opts, AUTHORED_PLAN, redact);
+      perturbedPerQuery = await runPass(client, perturbed, opts, headlinePlan, redact);
     }
 
     // --- One lookup for the ground truth about every returned tool --------
@@ -1605,9 +2002,9 @@ async function main(argv) {
       ...new Set(
         [
           ...perQuery,
-          ...(derivedPerQuery ?? []),
+          ...(writtenPerQuery ?? []),
           ...(negPerQuery ?? []),
-          ...(derivedNegPerQuery ?? []),
+          ...(writtenNegPerQuery ?? []),
           ...(heldPerQuery ?? []),
           ...(perturbedPerQuery ?? []),
         ].flatMap((r) => r.results.map((x) => x.slug)),
@@ -1635,9 +2032,9 @@ async function main(argv) {
     // --- Score -------------------------------------------------------------
     scorePass(perQuery, factsBySlug);
     for (const entry of perQuery) allViolations.push(...entry.violations);
-    if (derivedPerQuery) {
-      scorePass(derivedPerQuery, factsBySlug);
-      for (const entry of derivedPerQuery) derivedViolations.push(...entry.violations);
+    if (writtenPerQuery) {
+      scorePass(writtenPerQuery, factsBySlug);
+      for (const entry of writtenPerQuery) writtenViolations.push(...entry.violations);
     }
     // A negative that leaks is a quality failure. A negative that leaks a tool
     // its own constraints excluded is a WHERE clause leaking, and fails the run
@@ -1647,8 +2044,8 @@ async function main(argv) {
         ...checkConstraints({ id: entry.query.id, constraints: entry.constraints }, entry.results, factsBySlug),
       );
     }
-    for (const entry of derivedNegPerQuery ?? []) {
-      derivedViolations.push(
+    for (const entry of writtenNegPerQuery ?? []) {
+      writtenViolations.push(
         ...checkConstraints({ id: entry.query.id, constraints: entry.constraints }, entry.results, factsBySlug),
       );
     }
@@ -1684,17 +2081,19 @@ async function main(argv) {
 
   // --- The reader, when it was asked for ------------------------------------
   let readerComparison = null;
-  if (derivedPerQuery) {
-    readerComparison = compareReadings(perQuery, derivedPerQuery);
+  if (writtenPerQuery) {
+    // As written first, as read second: `compareReadings` calls the first
+    // "authored" and the second "derived", and the derived one is the headline.
+    readerComparison = compareReadings(writtenPerQuery, perQuery);
     process.stdout.write(`${buildReaderReport(readerComparison)}\n`);
   }
 
   // --- The negatives ---------------------------------------------------------
   const negOverall = negPerQuery ? aggregateNegatives(negPerQuery) : null;
-  const derivedNegOverall = derivedNegPerQuery ? aggregateNegatives(derivedNegPerQuery) : null;
+  const writtenNegOverall = writtenNegPerQuery ? aggregateNegatives(writtenNegPerQuery) : null;
   if (negOverall) {
     process.stdout.write(
-      `${buildNegativesReport({ overall: negOverall, perQuery: negPerQuery, derived: derivedNegOverall, golden: overall })}\n`,
+      `${buildNegativesReport({ overall: negOverall, perQuery: negPerQuery, derived: writtenNegOverall, golden: overall })}\n`,
     );
   } else {
     process.stdout.write(`\nNEGATIVES: ${path.relative(ROOT, opts.negatives).split(path.sep).join('/')} not found — not measured.\n`);
@@ -1707,6 +2106,7 @@ async function main(argv) {
         overall: heldOverall,
         perQuery: heldPerQuery,
         title: 'HELD OUT: negatives nobody tuned against',
+        label: 'as the shipped reader reads it',
         note:
           'Written by a reviewer who had not read eval/negatives.jsonl. This is the\n' +
           'number that says whether the floor generalises; the other one says whether\n' +
@@ -1722,6 +2122,17 @@ async function main(argv) {
     process.stdout.write(`${buildPerturbationReport(perturbedPerQuery)}\n`);
   }
 
+  // --- What it costs ---------------------------------------------------------
+  // Dynamic, like every other TypeScript import here, so a run that cannot
+  // strip types still produces its numbers and says why this section is absent.
+  try {
+    const prices = await import('../lib/prices.ts');
+    const fixture = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
+    process.stdout.write(`${buildCostReport(fixture, prices)}\n`);
+  } catch (err) {
+    process.stdout.write(`\nCOST: not priced (${redact(err?.message ?? err)}).\n`);
+  }
+
   // --- Hard failures --------------------------------------------------------
   let exitCode = EXIT.OK;
 
@@ -1734,9 +2145,12 @@ async function main(argv) {
   // authored pass — search_tools returned a row its own arguments excluded —
   // so it fails the run too. It cannot affect anything that does not ask for
   // it: --read-query is opt-in and npm test does not pass it.
-  if (derivedViolations.length > 0) {
-    process.stdout.write('\n(the violations below are from the --read-query derived pass)\n');
-    printViolations(derivedViolations);
+  if (writtenViolations.length > 0) {
+    process.stdout.write(
+      '\n(the violations below are from the reference pass — the same ranker handed\n' +
+        ' the golden set\'s own constraints rather than the reader\'s)\n',
+    );
+    printViolations(writtenViolations);
     exitCode = EXIT.CONSTRAINT_VIOLATION;
   }
 
@@ -1926,7 +2340,7 @@ async function main(argv) {
         ? {
             path: path.relative(ROOT, opts.negatives).split(path.sep).join('/'),
             overall: negOverall,
-            derived: derivedNegOverall,
+            derived: writtenNegOverall,
             queries: negPerQuery.map((e) => ({
               id: e.query.id,
               query: e.query.query,
@@ -1950,7 +2364,7 @@ async function main(argv) {
             unchangedCount: readerComparison.unchangedCount,
             relations: readerComparison.relations,
             emptiedText: readerComparison.emptiedText,
-            constraintViolations: derivedViolations,
+            constraintViolations: writtenViolations,
             queries: readerComparison.rows,
           }
         : null,
@@ -2270,6 +2684,8 @@ export function buildNegativesReport({
   golden = null,
   title = 'The negatives: sentences the catalogue cannot answer',
   note = null,
+  label = 'as the shipped reader reads it',
+  derivedLabel = 'as written, no reader',
 }) {
   const out = [];
   const pctOf = (r) => `${(r * 100).toFixed(1)}%`;
@@ -2281,7 +2697,7 @@ export function buildNegativesReport({
   out.push('');
   const rows = [
     [
-      'as written',
+      label,
       String(overall.queries),
       `${overall.empty}`,
       pctOf(overall.emptyRate),
@@ -2293,7 +2709,7 @@ export function buildNegativesReport({
   ];
   if (derived) {
     rows.push([
-      'as read (--read-query)',
+      derivedLabel,
       String(derived.queries),
       `${derived.empty}`,
       pctOf(derived.emptyRate),
@@ -2341,6 +2757,82 @@ export function buildNegativesReport({
  * a sentence twice the same way, and a search that answers a question only in
  * its canonical spelling does not answer it.
  */
+/**
+ * What a search costs, from the providers' own usage numbers.
+ *
+ * Not an estimate and not a token count of the prompt as written: these are the
+ * `usage` fields the two APIs returned, totalled over every sentence that has
+ * ever been recorded into db/seed/embeddings.fixture.json and divided by how
+ * many that was. A keyless run makes no call to count, so the fixture carrying
+ * the numbers is what makes this figure available at all — and it is the same
+ * figure on a laptop and on CI, which is the point.
+ *
+ * Priced at the FULL input rate. The reader's prompt is about 1,650 tokens of
+ * instructions that never change, so the provider's automatic prefix caching
+ * will often bill a tenth of that; a ceiling wants the pessimistic number, and
+ * nothing here sets a cache key because a cache key on somebody's sentence is a
+ * correlation handle.
+ *
+ * @param fixture   the parsed fixture, for its recorded token totals
+ * @param embedding tokens this run's own embedding calls used, if any
+ */
+export function buildCostReport(fixture, prices) {
+  const out = [];
+  const recorded = fixture?.readingTokens ?? null;
+
+  out.push('');
+  out.push(`=== What a search costs ${'='.repeat(52)}`);
+
+  if (!recorded || !recorded.sentences) {
+    out.push('No recorded token counts in db/seed/embeddings.fixture.json, so this run');
+    out.push('cannot price a search. Re-record: scripts/read.mjs --write-fixture.');
+    return out.join('\n');
+  }
+
+  // The embedding side: one query embedding per uncached search. The document
+  // side is a one-off batch job and is not a per-search cost.
+  const readerIn = recorded.in / recorded.sentences;
+  const readerOut = recorded.out / recorded.sentences;
+  // Measured the same way: the whole fixture's query vectors cost this many
+  // prompt tokens for this many sentences. A short sentence is a few tokens and
+  // it barely registers beside the reader, which is itself the point.
+  const embeddingIn = fixture?.queryTokens?.sentences
+    ? fixture.queryTokens.in / fixture.queryTokens.sentences
+    : 8;
+
+  const cost = prices.costOf({ readerIn, readerOut, embeddingIn, searches: 1 });
+
+  out.push(
+    renderTable(
+      ['per search', 'tokens', '$ / 1M', '$ each'],
+      [
+        ['reader in', n1(readerIn), prices.READER_INPUT_PER_MTOK.toFixed(3), cost.reader.toFixed(8)],
+        ['reader out', n1(readerOut), prices.READER_OUTPUT_PER_MTOK.toFixed(3), ''],
+        ['embedding in', n1(embeddingIn), prices.EMBEDDING_INPUT_PER_MTOK.toFixed(3), cost.embedding.toFixed(8)],
+      ],
+      ['l', 'r', 'r', 'r'],
+    ),
+  );
+  out.push('');
+  out.push(`  cost per search              $${cost.perSearch.toFixed(6)}`);
+  out.push(`  cost per thousand searches   $${cost.perThousand.toFixed(4)}`);
+  out.push(
+    `  ceiling (docs/build-phases) $${prices.MAX_COST_PER_SEARCH.toFixed(6)} per search — ` +
+      `${cost.withinCeiling ? 'within it' : 'OVER IT'}`,
+  );
+  out.push(
+    `  measured from ${recorded.sentences} readings recorded on ${fixture.readingsRecorded ?? 'an unknown date'}, ` +
+      `at prices read from ${prices.PRICES_SOURCE} on ${prices.PRICES_READ_ON}`,
+  );
+  out.push('');
+  out.push('  Every sentence typed twice costs nothing at all: both caches are keyed on');
+  out.push('  the normalised text, so the figures above are the price of a FIRST-EVER');
+  out.push('  sentence and the steady state is cheaper than this by whatever share of');
+  out.push('  searches repeat.');
+
+  return out.join('\n');
+}
+
 export function buildPerturbationReport(entries) {
   const out = [];
   const empty = entries.filter((e) => e.results.length === 0);

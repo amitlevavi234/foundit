@@ -24,14 +24,21 @@ import {
 } from '@/lib/constraints';
 import {
   logSearchEvent,
+  prefetchForSearch,
   searchToolsDetailed,
   storeQueryEmbedding,
+  storeQueryReading,
   touchQueryEmbedding,
+  touchQueryReading,
 } from '@/lib/db';
 import { embedQuery } from '@/lib/embeddings';
+import { allowSearch, mayCallEmbeddings, mayCallReader } from '@/lib/rate-limit';
+import { readSentence, validateReading, READER_MODEL } from '@/lib/reader-model';
+import { readSentenceWith } from '@/lib/reading';
 import { clarifier, matchBand, matchedProblemOf } from '@/lib/results';
 import { MAX_QUERY_LENGTH, QueryTooLongError } from '@/lib/sql';
 import type { ToolResultDetail } from '@/lib/types';
+import { visitorAddress } from '@/lib/visitor';
 
 /* ===========================================================================
  * The results screen — Results.dc.html, and its three companions.
@@ -117,6 +124,22 @@ export default async function Results({ searchParams }: ResultsProps) {
   const dropped = many(params.drop);
   const category = one(params.in) ?? null;
   const skipped = one(params.skip) === '1';
+
+  /* --- the per-visitor limit ----------------------------------------------
+   *
+   * Taken here, before anything is planned, so a visitor over the limit costs
+   * one hash lookup rather than a search. The address is hashed with a salt
+   * generated at start-up and thrown away; nothing about who this is is
+   * persisted, logged or written to a row. See lib/rate-limit.ts.
+   *
+   * It is deliberately NOT inside the Suspense boundary below. A 429 is a
+   * different page, not a different answer, and streaming the shell of a page
+   * that is about to say "wait a while" would be theatre.
+   */
+  const allowance = allowSearch(await visitorAddress());
+  if (!allowance.allowed) {
+    return <TooManySearches retryAfterSeconds={allowance.retryAfterSeconds} />;
+  }
 
   // Two different strings come out of one sentence, and they are not
   // interchangeable. `constraints` become WHERE clauses. `searchText` is the
@@ -239,6 +262,21 @@ interface AnswerProps {
   skipped: boolean;
 }
 
+/**
+ * One search's timeline, printed only when FOUNDIT_TIMELINE is set.
+ *
+ * It exists because "the two paid calls run concurrently" is a claim, and a
+ * claim about concurrency is worth exactly as much as the timestamps under it.
+ * It prints durations and nothing else: no sentence, no key, no address, no
+ * result. Off unless somebody asks for it, and never on in production.
+ */
+function timeline(label: string, marks: Array<[string, number]>): void {
+  if (process.env.FOUNDIT_TIMELINE !== '1') return;
+  const base = marks[0]?.[1] ?? 0;
+  const line = marks.map(([name, at]) => `${name}@${(at - base).toFixed(1)}ms`).join('  ');
+  console.error(`[timeline] ${label}  ${line}`);
+}
+
 async function Answer({
   query,
   searchText,
@@ -253,70 +291,125 @@ async function Answer({
   // quietly let it through a limit the screen has already promised.
   let tooLong = query.length > MAX_QUERY_LENGTH;
 
-  /* --- the vector leg, and what it costs -------------------------------
+  /* --- what a search costs, and in what order --------------------------
    *
-   * The search below runs with no vector argument, which means "look in the
-   * cache yourself". Almost always that is the whole of it: the sentence has
-   * been typed before, the database finds the vector on a primary key, the
-   * hybrid search runs, and the page is ONE round trip — which is the phase's
-   * efficiency promise and the reason the flag exists rather than a separate
-   * "is it cached?" question asked first.
+   *   1. ONE round trip that asks both caches at once: has this sentence been
+   *      read before, and is there a vector for the text about to be ranked?
+   *      Two primary-key lookups in one statement (lib/sql.ts, PREFETCH_SQL).
    *
-   * When it is not cached, the answer we already have is the Phase 2 answer —
-   * correct, filtered, and perfectly renderable. So the cost of a miss is one
-   * embedding call and one more search, and nothing about the failure of
-   * either is visible to the person reading the page: `embedQuery` returns
-   * null rather than throwing when the key is absent, the provider is down,
-   * the call times out or the response is malformed, and the text-only results
-   * stand.
+   *   2. The two paid calls, TOGETHER. Whatever step 1 said was missing is
+   *      fetched in a single `Promise.all` — the model reading the sentence and
+   *      the embedder embedding the text, in flight at the same time, because
+   *      neither needs the other's answer. This is the phase's concurrency
+   *      requirement and `FOUNDIT_TIMELINE=1` prints the proof.
    *
-   * The store and the touch are both fire-and-forget, after the response.
+   *   3. ONE search, with the merged constraints and the vector in hand.
+   *
+   * So a sentence somebody has typed before is two round trips and no spend; a
+   * first-ever sentence is two round trips and two calls that overlap, rather
+   * than two that queue. Phase 3's arrangement — search, discover a vector is
+   * missing, embed, search again — cannot survive the reader, because the
+   * reader changes the constraints the search runs with, and a search run
+   * before the reading is a search with the wrong WHERE clause.
+   *
+   * Every failure here is null, never an exception. No key, a provider that is
+   * down, a call that times out, a malformed answer, a schema the validator
+   * refuses, a daily cap already reached: each leaves the search with less than
+   * it wanted and nobody sees an error. With no reading it is Phase 3. With no
+   * vector as well it is Phase 2. Both render perfectly well.
    */
   let embeddingMissing = false;
   /** True when the rows below were ranked with meaning as well as words. */
   let usedVector = false;
+  /** The constraints the model contributed, for the chips under the heading. */
+  let fromModel: ReadConstraint[] = [];
+  /** The sentence is not a request for software at all. */
+  let notSoftware = false;
   /** Nothing was left to rank on, so there is no "search" to loosen. */
   const browseOnly = searchText === '';
+  let merged = { constraints, filters: toSearchConstraints(constraints), text: searchText };
+
   const startedAt = performance.now();
+  const marks: Array<[string, number]> = [['start', startedAt]];
+  const mark = (name: string) => marks.push([name, performance.now()]);
+
   try {
     if (!tooLong) {
-      const filters = toSearchConstraints(constraints);
-      let answer = await searchToolsDetailed(searchText, filters, RESULT_LIMIT, category);
-      results = answer.results;
-      embeddingMissing = answer.embeddingMissing;
-      usedVector = !embeddingMissing && searchText !== '';
+      // --- 1. both caches, one statement --------------------------------
+      const cached = await prefetchForSearch(query, searchText);
+      mark('prefetch');
 
-      if (embeddingMissing) {
-        const embedded = await embedQuery(searchText);
-        if (embedded) {
-          // The second search can fail on its own — a timeout, a dropped
-          // connection, the pool exhausted — and if it does, the text-only
-          // answer already in `results` is a perfectly good page. Losing it and
-          // showing an error instead would be the vector leg taking the search
-          // down, which is the one thing this phase promised it would not do.
-          try {
-            answer = await searchToolsDetailed(
-              searchText,
-              filters,
-              RESULT_LIMIT,
-              category,
-              embedded.vector,
-            );
-            results = answer.results;
-            usedVector = true;
-          } catch (error) {
-            if (error instanceof QueryTooLongError) throw error;
-            // The reason, and nothing else. No query text: this is the endpoint
-            // that collects health, money and relationship trouble, and a log
-            // line already carries a timestamp and a request.
-            console.error(
-              `the search with a query vector failed (${
-                (error as { code?: string } | null)?.code ?? 'unknown'
-              }); the text-only results were served instead`,
-            );
-          }
-          after(() => storeQueryEmbedding(searchText, embedded.vector, embedded.model));
-        }
+      // --- 2. both paid calls, together ---------------------------------
+      // The caps are taken here rather than inside the call so a cache hit
+      // never counts against them: most searches make no paid call at all.
+      const wantsReading = cached.reading === null && !browseOnly;
+      const wantsVector = cached.embeddingMissing && !browseOnly;
+      const readingAllowed = wantsReading && mayCallReader();
+      const vectorAllowed = wantsVector && mayCallEmbeddings();
+
+      // Each leg marks its own finish as well as the pair's, so the timeline
+      // shows two calls that started together and finished at different times
+      // rather than one window that could have held them in a queue. That is
+      // the difference between evidence and a claim.
+      mark('both-start');
+      const [fresh, embedded] = await Promise.all([
+        readingAllowed
+          ? readSentence(query).then((r) => {
+              mark('reader-done');
+              return r;
+            })
+          : Promise.resolve(null),
+        vectorAllowed
+          ? embedQuery(searchText).then((r) => {
+              mark('embedder-done');
+              return r;
+            })
+          : Promise.resolve(null),
+      ]);
+      mark('both-done');
+
+      // --- the reading, from the cache or from the call -----------------
+      // A cached reading is validated again rather than trusted: a row in a
+      // cache is not more trustworthy than the model answer it came from, it
+      // is the same answer later, and the shape CHECK in the database is about
+      // structure rather than about the values being ones this build knows.
+      const checked = cached.reading !== null ? validateReading(cached.reading, query) : null;
+      const reading = fresh?.reading ?? (checked && 'reading' in checked ? checked.reading : null);
+      if (checked && 'error' in checked) {
+        console.error(`a cached reading was refused (${checked.error}); the rules pass stands`);
+      }
+
+      const plan = readSentenceWith(query, dropped, reading);
+      merged = { constraints: plan.constraints, filters: plan.filters, text: plan.text };
+      notSoftware = !plan.asksForSoftware;
+      fromModel = plan.constraints.filter((c) => plan.fromModel.includes(c.key));
+
+      // --- 3. one search ------------------------------------------------
+      // Nothing is searched for a sentence that is not a request for software:
+      // the page says so, and a search would only produce the nearest
+      // neighbours this phase exists to stop showing.
+      if (!notSoftware) {
+        const answer = await searchToolsDetailed(
+          merged.text,
+          merged.filters,
+          RESULT_LIMIT,
+          category,
+          embedded?.vector ?? null,
+        );
+        results = answer.results;
+        embeddingMissing = answer.embeddingMissing;
+        usedVector = (embedded !== null || !embeddingMissing) && merged.text !== '';
+        mark('search');
+      }
+
+      // --- after the response has gone out ------------------------------
+      if (embedded) {
+        after(() => storeQueryEmbedding(merged.text, embedded.vector, embedded.model));
+      }
+      if (fresh) {
+        after(() => storeQueryReading(query, toStored(fresh.reading), READER_MODEL));
+      } else if (cached.reading !== null) {
+        after(() => touchQueryReading(query));
       }
     }
   } catch (error) {
@@ -327,6 +420,12 @@ async function Answer({
     }
   }
   const latencyMs = Math.round(performance.now() - startedAt);
+  timeline(notSoftware ? 'refused' : 'searched', marks);
+
+  // From here the page draws what the merged reading produced, not what the
+  // rules alone read.
+  constraints = merged.constraints;
+  searchText = merged.text;
 
   if (!tooLong) {
     const top = results[0];
@@ -375,6 +474,14 @@ async function Answer({
         to the part that describes the problem and try again.
       </EmptyState>
     );
+  }
+
+  // The reader says this is not a request for a software tool at all — a
+  // plumber, a jacket, a recipe, an errand at a government office. No search
+  // ran, because the only thing a search could produce here is the page of
+  // nearest neighbours the owner asked us to stop showing.
+  if (notSoftware) {
+    return <NotSoftware />;
   }
 
   if (results.length === 0) {
@@ -443,6 +550,35 @@ async function Answer({
 
   return (
     <>
+      {/* What the rules missed and the model read.
+         *
+         * A second row rather than a merge into the one in the shell above, and
+         * the reason is timing rather than taste: the shell is rendered from the
+         * URL alone and streams immediately, which is what puts the question and
+         * the chips on screen while PostgreSQL is still working. A chip that
+         * needs a model call cannot be in it without holding the whole shell
+         * back by a second and a half for the sake of one word.
+         *
+         * So it arrives with the results, says where it came from, and is
+         * removable exactly like the others — ?drop= knows nothing about which
+         * half of the reader produced a key. */}
+      {fromModel.length > 0 ? (
+        <div className="understood">
+          <span className="understood-label">Also read from your sentence</span>
+          {fromModel.map((c) => (
+            <ChipLink
+              key={c.key}
+              href={href({ q: query, drop: [...dropped, c.key], category, skip: skipped })}
+              label={c.label}
+              state="explicit"
+              removable
+              removeLabel={`Search again without ${c.label}`}
+              title={`${c.label} — read from the words of your sentence, and a filter rather than a preference. Remove it to widen the search.`}
+            />
+          ))}
+        </div>
+      ) : null}
+
       {question ? (
         <section
           className="slab slab-coral rise"
@@ -631,6 +767,122 @@ async function Answer({
         Not quite it? Tell me what to change below. Search stays free, and no account is needed.
       </div>
     </>
+  );
+}
+
+/**
+ * The stored shape of a reading: the database's seven snake_case fields.
+ *
+ * One place, so `public.query_readings`' shape CHECK, the validator in
+ * lib/reader-model.ts and this cannot drift into three opinions.
+ */
+function toStored(reading: {
+  pricing: string[];
+  platforms: string[];
+  languages: string[];
+  flags: string[];
+  english: string;
+  asksForSoftware: boolean;
+  residual: string;
+}): Record<string, unknown> {
+  return {
+    pricing: reading.pricing,
+    platforms: reading.platforms,
+    languages: reading.languages,
+    flags: reading.flags,
+    english: reading.english,
+    asks_for_software: reading.asksForSoftware,
+    residual: reading.residual,
+  };
+}
+
+/**
+ * ResultsTooMany — the per-visitor rate limit, in the product's voice.
+ *
+ * Not an error page and not a scolding. Somebody who has searched sixty times
+ * in an hour is either a script, which does not read, or a person having a very
+ * determined afternoon, who deserves a sentence rather than a status code.
+ *
+ * It says nothing about how the limit works, how long the window is, or how
+ * many are left. All three would be a tuning guide for whoever is hammering it.
+ */
+function TooManySearches({ retryAfterSeconds }: { retryAfterSeconds: number }) {
+  const minutes = Math.max(1, Math.round(retryAfterSeconds / 60));
+  return (
+    <div className="page">
+      <SiteHeader />
+      <BackLink href="/">Home</BackLink>
+      <main id="main" className="shell" style={{ padding: '8px 56px 40px', flex: 1 }}>
+        <EmptyState
+          title="That’s a lot of searching."
+          actions={
+            <>
+              <Link href="/browse" className="btn btn-coral" style={{ textDecoration: 'none' }}>
+                Browse problems people solved here
+              </Link>
+              <Link href="/" className="btn btn-sm" style={{ textDecoration: 'none' }}>
+                Back to the start
+              </Link>
+            </>
+          }
+        >
+          <p style={{ margin: 0 }}>
+            Searching here costs us a little money each time, so there is a ceiling on how much
+            one person can do in an hour, and you have reached it. Nothing is wrong and nothing
+            has been recorded about you.
+          </p>
+          <p style={{ margin: '12px 0 0' }}>
+            Come back in about {minutes} {minutes === 1 ? 'minute' : 'minutes'} and it will work
+            again. In the meantime the catalogue is all still there to browse.
+          </p>
+        </EmptyState>
+      </main>
+    </div>
+  );
+}
+
+/**
+ * ResultsNotSoftware — the sentence is not asking for a software tool.
+ *
+ * This is Phase 4's answer to the thing the relevance floor could only partly
+ * do. A floor is a cosine distance, and "a recording studio that rents by the
+ * hour" really is about recording, so it sits above any threshold that leaves
+ * the real questions answered (eval/baselines.md, "Why the bar cannot be met").
+ * Reading the sentence is a different question with a different answer.
+ *
+ * Three things it deliberately does not do. It does not apologise — nothing
+ * went wrong, and this is a correct answer. It does not guess what the person
+ * should do instead, because we do not know any plumbers. And it does not say
+ * "your search was invalid": the sentence was perfectly clear, it is the
+ * catalogue that is narrow, and the copy says which of the two it is.
+ */
+function NotSoftware() {
+  return (
+    <EmptyState
+      title="Foundit only lists software."
+      actions={
+        <>
+          <Link href="/browse" className="btn btn-coral" style={{ textDecoration: 'none' }}>
+            Browse problems people solved here
+          </Link>
+          <Link href="/" className="btn btn-sm" style={{ textDecoration: 'none' }}>
+            Start a new search
+          </Link>
+        </>
+      }
+    >
+      <p style={{ margin: 0 }}>
+        Everything here is a tool or an app you would install or open, and what you have
+        described sounds like something else — a person, an object, or an answer rather than a
+        program. So there is nothing to show you, rather than a page of software that does not
+        fit.
+      </p>
+      <p style={{ margin: '12px 0 0' }}>
+        Two ways forward: browse the problems people have already solved here, or describe it
+        differently in the box below — if there really is a program in this somewhere, say what
+        it would need to do.
+      </p>
+    </EmptyState>
   );
 }
 

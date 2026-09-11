@@ -93,7 +93,7 @@ const SENTENCE_FILES = [
 ];
 
 /** The fixture format. Bumped in 0007, when tool summaries joined it. */
-const FIXTURE_SCHEMA = 'foundit-embeddings/2';
+const FIXTURE_SCHEMA = 'foundit-embeddings/3';
 
 /** The role this job runs as, and the only one it will accept. */
 const ROLE = 'foundit_embed';
@@ -235,8 +235,23 @@ async function evalSentences() {
 
   let derived = [];
   try {
-    const { readForSearch } = await import('../eval/reader.mjs');
-    derived = authored.map((q) => readForSearch(q).text).filter((t) => t.trim() !== '');
+    const { readForSearch, fixtureReadings } = await import('../eval/reader.mjs');
+    // Since Phase 4 the shipped path embeds `embedText`, which is not the
+    // searched text: for a non-English sentence it is the sentence fused with
+    // the model's English restatement. So the fixture needs a vector for BOTH,
+    // and for the perturbations as well as the sentences — the perturbation
+    // gate now measures the reader, not only the floor.
+    //
+    // The readings come out of this same fixture, which is why
+    // scripts/read.mjs --write-fixture has to run BEFORE this: with no reading
+    // there is no restatement, no fused text, and no vector recorded for it.
+    const readings = fixtureReadings();
+    const plans = [...authored, ...perturbed].map((q) =>
+      readForSearch(q, readings[normalizeQuery(q)] ?? null),
+    );
+    derived = plans
+      .flatMap((plan) => [plan.text, plan.embedText])
+      .filter((t) => typeof t === 'string' && t.trim() !== '');
   } catch (error) {
     process.stdout.write(
       `  NOTE: the sentence reader did not load (${error?.code ?? 'error'}), so the fixture\n`
@@ -277,6 +292,9 @@ function readFixture({ required = true } = {}) {
   parsed.statements ??= {};
   parsed.tools ??= {};
   parsed.queries ??= {};
+  // Phase 4's half of the same file. This job never writes it — scripts/read.mjs
+  // does — but it must survive a round trip through here untouched.
+  parsed.readings ??= {};
   return parsed;
 }
 
@@ -443,14 +461,28 @@ try {
       }
 
       if (exitCode === EXIT.OK) {
+        // The query side's tokens are accumulated separately from the corpus
+        // side's, because only this half is a per-search cost: eval/run.mjs
+        // prices a search from it, and a document batch is a one-off job.
+        let queryTokens = 0;
+        let queryCount = 0;
         for (let i = 0; i < keys.length; i += EMBEDDINGS_BATCH_SIZE) {
           const batch = keys.slice(i, i + EMBEDDINGS_BATCH_SIZE);
           const result = await embedTexts(batch);
           requests += 1;
           tokens += result.tokens;
+          queryTokens += result.tokens;
+          queryCount += batch.length;
           batch.forEach((text, n) => {
             fixture.queries[text] = pack(result.vectors[n]);
           });
+        }
+        if (queryCount > 0) {
+          const prior = fixture.queryTokens ?? { in: 0, sentences: 0 };
+          fixture.queryTokens = {
+            in: prior.in + queryTokens,
+            sentences: prior.sentences + queryCount,
+          };
         }
 
         if (requests === 0) {

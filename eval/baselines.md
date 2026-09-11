@@ -557,3 +557,222 @@ below the cutoff.
 
 The floor itself costs the golden set nothing at 0.34 — 0.7589 → 0.7618 — which
 is the whole reason it is set there rather than higher.
+
+## Phase 4: reading the sentence
+
+### The instrument changed, and that is recorded rather than slipped in
+
+Every row above measured the **authored** plan: the golden set's own
+hand-written constraints, and the whole sentence handed to full-text search.
+That was the right instrument while nothing in the product read a sentence — it
+holds the reading correct by assumption and measures the ranker alone.
+
+Phase 4's entire subject is reading the sentence, so from this row on the
+headline is the **shipped** plan: the rules pass, plus gpt-5-nano's cached
+reading, merged. It is what a visitor gets.
+
+Both passes still run on every invocation and both are printed. The comparison
+below is the one the phase was set — beat 0.7618 — and it is deliberately
+across that change of instrument. The reference pass reproduces 0.7618 exactly
+on the same run, which is what says the instrument itself did not move:
+
+```
+slice        n  recall@10  nDCG@10  mean ms  p95 ms  zero
+----------  --  ---------  -------  -------  ------  ----
+authored    60     0.7364   0.7618     58.4    95.6     0
+derived     60     0.7719   0.7763     70.0   103.2     0
+DIVERGENCE        +0.0356  +0.0145    +11.5            +0
+```
+
+**That divergence is the headline result.** In Phase 3 it was **−0.0183**: the
+reader cost the search a fifth of a point, and `docs/loop-progress.md` listed
+the six queries that carried all of it. It is now **+0.0145**. For the first
+time the reading in front of the ranker makes the ranker better rather than
+worse.
+
+### The recorded run
+
+| Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero |
+| ----- | - | --------- | ------- | ------- | ------ | ---- |
+| all | 60 | 0.7719 | 0.7763 | 70.0 | 103.2 | 0 |
+| english | 50 | 0.7413 | 0.7665 | 71.6 | 105.4 | 0 |
+| non-english | 10 | 0.9250 | 0.8254 | 62.0 | 82.8 | 0 |
+| constrained | 15 | 0.8367 | 0.7890 | 63.3 | 103.2 | 0 |
+| unconstrained | 45 | 0.7504 | 0.7721 | 72.2 | 105.4 | 0 |
+
+### Against what a visitor got in Phase 3
+
+The honest like-for-like: `--plan=rules` is `lib/constraints.ts` alone, which is
+exactly the reader Phase 3 shipped, measured on this same database and fixture.
+
+| | rules only (Phase 3's reader) | shipped (rules + model) | change |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.7411 | **0.7763** | +0.0352 |
+| recall@10 | 0.7192 | **0.7719** | +0.0527 |
+| english nDCG | 0.7588 | **0.7665** | +0.0077 |
+| **non-English nDCG** | 0.6523 | **0.8254** | **+0.1731** |
+| golden queries empty | 0 of 60 | 0 of 60 | — |
+| perturbed empty | 0 of 240 | 0 of 240 | — |
+| negatives empty | 10 of 30 (far 8/15, near 2/15) | **13 of 30** (far 10/15, near 3/15) | +3 |
+| held-out empty | 10 of 25 (far 7/10, near 0/10) | **11 of 25** (far 7/10, near 1/10) | +1 |
+
+**Almost the whole gain is non-English**, and it comes from one thing: the
+model restates a non-English sentence in English and that restatement is what
+gets embedded. The catalogue is English, so a Hebrew or Arabic sentence used to
+reach the vector leg through a cross-lingual embedding and reach the other four
+legs not at all.
+
+**The negatives moved less than the phase hoped.** `docs/build-phases.md` and
+the brief expected "not asking for software" to lift the NEAR misses the
+relevance floor could not reach. It lifted the far ones: on the held-out file
+the near-miss share went from 0 of 10 to 1 of 10, and on ours from 2 of 15 to
+3 of 15. That is an improvement and it is a small one, and the reason is
+visible in the file — "I need a lawyer to actually read the contract before I
+sign it" and "guitar lessons where the app listens to me play" are sentences
+where a program really is part of what is wanted. Reading the sentence does not
+help there because the sentence is not the problem; the catalogue is.
+
+### Which dimensions the model may fill, measured
+
+Every row is a full run of the golden set with `--accept=`, everything else at
+the shipped defaults.
+
+| accept | nDCG@10 | english | non-English | golden empty |
+| ------ | ------- | ------- | ----------- | ------------ |
+| none | 0.7559 | 0.7588 | 0.7412 | 0 |
+| **pricing** | **0.7623** | **0.7665** | **0.7412** | **0** |
+| flags | 0.6895 | 0.6991 | 0.6412 | 0 |
+| pricing,flags | 0.6909 | 0.7009 | 0.6412 | 0 |
+| pricing,platforms | 0.7623 | 0.7665 | 0.7412 | 0 |
+| pricing,languages | 0.7214 | 0.7665 | **0.4961** | 0 |
+
+(Measured on the recording before the two-sample vote, so the absolute numbers
+are a hundredth below the shipped row; the ordering is what the choice was made
+on and it is not close.)
+
+**Flags cost a tenth of a point even with a whitelist**, and the mechanism is
+worth writing down because it will come back. Asked what a sentence requires, a
+model offers the things people generally want. Four golden queries lost their
+entire page to flags nobody asked for:
+
+| query | flags the model read | nDCG |
+| ----- | -------------------- | ---- |
+| q055 have long articles read out loud to me while I am walking | has_free_tier, works_offline | 0.9385 → 0.0000 |
+| q003 budgeting app where my bank details never leave my own computer | e2e_encrypted, no_ads | 0.8090 → 0.0000 |
+| q010 notes app where my notes stay as files on my own computer | accessible, no_ads | 0.6338 → 0.0000 |
+| q044 stop adverts and trackers following me around the internet | e2e_encrypted, no_ads | 0.6169 → 0.0000 |
+
+**Languages are worse still, and in the one place it hurts most.** On five of
+the six non-English golden queries the model returned the language the sentence
+was WRITTEN in — `he`, `ru`, `fr`, `pt` — which filters an overwhelmingly
+English catalogue down to almost nothing. Being told not to, in capitals, with
+a worked example, did not stop it. The rules read "with a Russian interface"
+correctly and keep that job.
+
+### What the vector leg embeds, measured
+
+| embed | text | nDCG@10 | non-English |
+| ----- | ---- | ------- | ----------- |
+| text | rules | 0.7475 | 0.6523 |
+| text | restated | 0.7607 | 0.7318 |
+| **english** | **rules** | **0.7623** | **0.7412** |
+| english | restated | 0.7609 | 0.7328 |
+| fused | rules | 0.7619 | 0.7391 |
+| fused | restated | 0.7612 | 0.7346 |
+
+`english` — embed the restatement INSTEAD of the sentence — wins over fusing
+the two into one vector, and wins over giving the restatement to full-text
+search as well (`text=restated`). The last of those is the interesting
+negative: appending an English restatement to the text the ranker sees does
+light up the lexical legs for a non-English sentence, and it is still worse
+than leaving them dark, because the restatement's words are not the
+catalogue's words and the trigram leg in particular starts matching noise.
+
+### The residual, and a knob that turned out to do nothing
+
+`--text=shorter` uses the model's residual when it deleted more than the rules
+did. Over all 115 eval sentences **it fired zero times**: the model reports a
+constraint and then hands back the sentence unchanged. So the shipped default
+is `rules`, the model's `residual` earns nothing today, and the field is kept
+because the guard that validates it — every character present, in order — is
+what makes "the model cannot put words into the ranker" a checkable sentence
+rather than a promise.
+
+`--merge=model-wins` measured identical to `rules-win` to four decimals, because
+with only pricing accepted the two sides almost never disagree. `rules-win`
+ships because it is the safe direction, not because it won.
+
+### The reader is not deterministic, and the perturbation gate found it
+
+The most useful measurement of the phase. gpt-5-nano refuses the `temperature`
+parameter, so at minimal reasoning effort its answers have a tail. Recorded, on
+one sentence:
+
+```
+"we all paid for different bits of the holiday and now nobody knows who owes who?"
+  recorded once as   asks_for_software: false
+  sampled six more:  true true true true true true
+```
+
+One sample in seven, on a question about splitting a bill, would have shown the
+"we only list software" page. The golden set did not catch it — the sentence
+without the question mark read true. **`eval/perturb.mjs` caught it**, because
+the perturbation gate now runs on the shipped plan, and the run went red with
+`perturbed golden queries empty: 1, allowed 0`.
+
+Two fixes, both measured:
+
+1. **A refusal is corroborated against the sentence itself.** If the sentence
+   names a program in any language the catalogue serves, the search runs
+   whatever the model says. Nobody asks for a free plumber or an offline
+   babysitter.
+2. **A refusal needs two votes.** `readSentence` makes two calls, in flight
+   together, and both must say "not software". The English restatement takes
+   the opposite rule — whichever sample produced one wins — because there the
+   tail is a MISSING answer and a restatement can only ever add a vector.
+
+The second one also fixed something nobody was looking for: in the recording
+before it, **five of the ten non-English golden queries came back with an empty
+restatement**, and the non-English slice read 0.6770. With the vote it is
+0.8254.
+
+| recording | nDCG@10 | non-English | perturbed empty |
+| --------- | ------- | ----------- | --------------- |
+| one sample | 0.7623 | 0.7412 | **1 of 240** |
+| one sample, re-recorded | 0.7516 | 0.6770 | 0 of 240 |
+| **two samples, voting** | **0.7763** | **0.8254** | **0 of 240** |
+
+The middle row is the honest one to stare at: the same code, the same prompt,
+re-recorded, moved the headline by 0.011 and the non-English slice by 0.064.
+**A single sample of this model is not a stable measurement**, and the fixture
+is what freezes the one that ships.
+
+### What it costs
+
+From the providers' own `usage` fields, totalled over all 355 recorded
+readings and priced at list rates read from `developers.openai.com/api/docs/pricing`
+on 11 September 2026.
+
+| per search | tokens | $ / 1M | $ each |
+| ---------- | ------ | ------ | ------ |
+| reader in | 3691.0 | 0.050 | 0.00023136 |
+| reader out | 117.0 | 0.400 | (included above) |
+| embedding in | 13.0 | 0.020 | 0.00000026 |
+
+```
+cost per search              $0.000232
+cost per thousand searches   $0.2316
+ceiling (docs/build-phases)  $0.002000 per search — within it, by 8.6x
+```
+
+Three things about that number:
+
+* **It is two reader calls, not one.** 3,691 input tokens is the ~1,850-token
+  prompt twice. The vote doubles the bill and the bill is still a twelfth of a
+  cent.
+* **It is priced pessimistically.** The prompt is nearly all fixed instructions,
+  so the provider's automatic prefix caching will often bill a tenth of the
+  input rate. Nothing here claims that discount, and nothing sets a cache key,
+  because a cache key on somebody's sentence is a correlation handle.
+* **It is the price of a FIRST-EVER sentence.** Both caches are keyed on the
+  normalised text, so a repeat costs nothing at all.

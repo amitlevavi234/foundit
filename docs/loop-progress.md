@@ -2,7 +2,7 @@
 
 Read at the start of every tick, updated before the end of it.
 
-**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended twice — by the owner's review (a relevance floor, calmer cards, page speed) and by an adversarial review of that floor, which it did not pass (summary vectors, a column-level revoke, and a floor that is honest about refusing only 40% of what it should); all awaiting Amit's sign-off; 4 next
+**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended twice — by the owner's review (a relevance floor, calmer cards, page speed) and by an adversarial review of that floor, which it did not pass (summary vectors, a column-level revoke, and a floor that is honest about refusing only 40% of what it should); **4 built and measured, awaiting its adversarial review**; all awaiting Amit's sign-off
 **Server:** `foundit-prod`, Hetzner CX23, Falkenstein, `167.233.217.138`, Ubuntu 24.04.4
 
 ## Phase 0b — the machine
@@ -598,6 +598,182 @@ q027 (Russian), and restated in English         12 results each
   per-result are both 0.34, so the second does nothing today. They are kept
   apart because the frontier table was measured with both, and Phase 5 will
   want the gap back.
+
+## Phase 4 — understanding the sentence — **built, awaiting the adversarial review**
+
+Baseline **nDCG@10 0.7763**, recall@10 0.7719, non-English **0.8254**, 0
+constraint violations, 0 zero-result, 0 of 240 perturbations empty, measured as
+`foundit_app` with no API key at all. Recorded in `eval/baselines.md`.
+
+**The headline is now the shipped path, not the authored one.** Phases 2 and 3
+measured the ranker with the golden set's own hand-written constraints, which
+was right while nothing in the product read a sentence. This phase's subject is
+reading the sentence, so `node eval/run.mjs` measures what a visitor gets. Both
+passes still run; the reference pass reproduces 0.7618 to four decimals on the
+same run, which is what says the instrument did not move underneath the number.
+
+| Deliverable | Status | Evidence |
+| --- | --- | --- |
+| Rules first, no model call, never overruled | done | `lib/constraints.ts` unchanged except one export; a dimension the rules read is one the model cannot touch, and `tests/reader.test.mjs` proves it both ways |
+| gpt-5-nano, strict schema, validated before use | done | `lib/reader-model.ts`: one hardcoded URL, `strict: true`, `additionalProperties: false`, all seven fields required, 3 s timeout, `store: false`. A hand-written validator, no new dependency, refuses 14 kinds of bad answer |
+| It can name no tool | done | every field is an enum member, an ISO code, a boolean or a restatement of the person's own sentence; `residual` is accepted only when proved to be a *deletion* of the input, character by character, in order |
+| Model call and embedding call concurrent | done | one prefetch statement asks both caches, then one `Promise.all`. Timeline below: both start at 197.7 ms, the embedder finishes at 930.9 and the reader at 2234.2 — the window is the longer of the two, not their sum |
+| Readings cached in Postgres, keyed on the normalised query | done | `0008_reader.sql` (**not 0007 — that number was taken by the Phase 3 amendment; the brief's name is recorded in the migration header**). No user column, no foreign key, RLS enabled + forced, **no policy at all**, no grant to `foundit_app`, 20,000-row LRU cap, raises over 200 characters |
+| The fixture covers readings, so CI runs the model path with no key | done | `scripts/read.mjs`, sibling of `scripts/embed.mjs`; 355 readings in `db/seed/embeddings.fixture.json`; a keyless `--baseline` on a fresh database reproduces 0.7763 exactly and exits 0 |
+| Per-visitor rate limit and global daily caps | done | `lib/rate-limit.ts`: token bucket per visitor keyed on `sha256(per-process salt + address)`, nothing persisted or logged. Proven live: two searches, then the page |
+| Over a daily cap, search degrades and never errors | done | with both caps at 1, the second search made no paid call (0.9 ms in the `Promise.all`) and still returned 12 results, saying "Ordered by text match" |
+| Beats the Phase 3-amended row | done | **0.7618 → 0.7763 (+0.0145)**, and against what a visitor actually got in Phase 3 (`--plan=rules`, 0.7411) **+0.0352** |
+| The non-English slice improves specifically | done | **0.6516 → 0.8254 (+0.1738)**. Against the rules-only path, 0.6523 → 0.8254 |
+| The perturbation gate stays at zero | done | 0 of 240 — and it went red first, which is the most useful thing that happened this phase |
+| Negatives improve because "not software" is read | **partly** | ours 10 → 13 of 30; held-out 10 → 11 of 25. **The near misses barely moved** — see below |
+| Cost measured and recorded | done | **$0.000232 a search, $0.2316 per thousand**, from the providers' own usage fields, against a ceiling of $0.002. Priced at full input rate, claiming no cache discount |
+| Two outbound calls, two files, one address each | done | `tests/markup.test.mjs` tightened: exactly two files may call `fetch`, each holds exactly one literal URL, each body's keys are enumerated, neither logs its key |
+| Degrades with no key / a failing provider | done | `tests/reader-failures.test.mjs` stubs the transport for ten kinds of garbage; every one returns null with one log line carrying neither the sentence nor the key |
+| Every suite green | done | `npm test` 143 unit + 176 scoring + the eval; `lint`, `tsc --noEmit`, `build`, `bash db/test.sh` (4 of 4, including the new `reader_test.sql`) |
+| **Adversarial review by a fresh agent** | **not done — the supervisor commissions it** | item 10 of the goal |
+| Owner sees it | waiting on Amit | |
+
+### The concurrency, as one search actually ran
+
+`FOUNDIT_TIMELINE=1`, which prints durations and nothing else — no sentence, no
+address, no key, no result:
+
+```
+[timeline] searched  start@0.0ms  prefetch@197.6ms  both-start@197.7ms
+           embedder-done@930.9ms  reader-done@2234.2ms  both-done@2234.5ms
+           search@2477.9ms
+```
+
+Both legs start at 197.7 ms. The embedder finishes 733 ms later, the reader
+2,036 ms later, and the pair finishes when the slower one does. Sequentially
+that would have been 2,769 ms.
+
+Note the shape, because it is not Phase 3's. A search is now **one prefetch
+statement** (both caches, two primary-key lookups), **then the paid calls**,
+**then one search**. Phase 3's arrangement — search, discover the vector is
+missing, embed, search again — cannot survive a reader, because the reader
+changes the constraints the search runs with and a search run before the
+reading is a search with the wrong WHERE clause.
+
+### What the model is allowed to say, and what measuring said
+
+`docs/product-decisions.md` §16 is the product-facing version. The short one:
+
+- **pricing only.** Letting it contribute flags cost a tenth of a point of
+  nDCG; letting it contribute interface languages cost a quarter of the
+  non-English slice. Both tables are in `eval/baselines.md`.
+- **the English restatement is embedded, never filtered on and never ranked
+  on.** Giving it to full-text search as well was measured and was worse.
+- **"not a request for software" needs three agreements** to empty a page: the
+  sentence must name no program, and both of two independent samples must say
+  so.
+
+### The reader is not deterministic, and that is the finding
+
+gpt-5-nano refuses the `temperature` parameter, so at minimal reasoning effort
+its answers have a tail. On one sentence:
+
+```
+"we all paid for different bits of the holiday and now nobody knows who owes who?"
+  recorded once as   asks_for_software: false
+  sampled six more:  true true true true true true
+```
+
+One sample in seven would have told somebody asking how to split a holiday bill
+that Foundit only lists software. The golden set did not catch it — the same
+sentence without the question mark read `true`. **`eval/perturb.mjs` caught it**,
+because the perturbation gate now runs on the shipped plan rather than on the
+authored one, and the run went red.
+
+The fix is two samples and a vote, and it paid for itself twice: the recording
+before it had **five of the ten non-English golden queries come back with an
+empty restatement**, and the non-English slice read 0.6770 instead of 0.8254.
+
+| recording | nDCG@10 | non-English | perturbed empty |
+| --------- | ------- | ----------- | --------------- |
+| one sample | 0.7623 | 0.7412 | **1 of 240** |
+| one sample, re-recorded | 0.7516 | 0.6770 | 0 of 240 |
+| **two samples, voting** | **0.7763** | **0.8254** | **0 of 240** |
+
+### The three new pages, as they render
+
+```
+I need a plumber who can come out this week to fix a leak
+  No constraints read from this one
+  Foundit only lists software.
+  Everything here is a tool or an app you would install or open, and what you
+  have described sounds like something else — a person, an object, or an answer
+  rather than a program. So there is nothing to show you, rather than a page of
+  software that does not fit.
+  Two ways forward: browse the problems people have already solved here, or
+  describe it differently in the box below — if there really is a program in
+  this somewhere, say what it would need to do.
+  [Browse problems people solved here] [Start a new search]
+
+split a restaurant bill with friends          (the third search in an hour, limit 2)
+  That’s a lot of searching.
+  Searching here costs us a little money each time, so there is a ceiling on how
+  much one person can do in an hour, and you have reached it. Nothing is wrong
+  and nothing has been recorded about you.
+  Come back in about 30 minutes and it will work again. In the meantime the
+  catalogue is all still there to browse.
+  [Browse problems people solved here] [Back to the start]
+
+work out which of my subscriptions I never use   (both daily caps already spent)
+  The first 12 matches.
+  Ordered by text match — where your words turned up, not how well anything fits
+```
+
+The third is the degradation, and the page says what it did rather than
+pretending: no vector leg ran, so the heading claims words rather than meaning.
+
+### Known weaknesses, stated rather than hidden
+
+- **The rate-limit page is a 200, not a 429.** A Next 15 Server Component
+  cannot set a status code, and the only place that can — middleware — runs in
+  a different runtime from the page, so the in-memory bucket cannot be shared
+  with it. A person sees the right page; a bot sees a 200 and no `Retry-After`.
+  The fix is a middleware that owns the limit and returns both, and it means
+  moving the bucket somewhere both runtimes can reach.
+- **The near-miss negatives barely moved.** The brief expected reading "is this
+  software at all" to lift exactly the sentences the relevance floor could not:
+  held-out near misses went 0 of 10 to 1 of 10, and ours 2 of 15 to 3 of 15.
+  The far ones moved (8 → 10 of 15). "A lawyer to actually read the contract
+  before I sign it" and "guitar lessons where the app listens to me play" are
+  sentences where a program genuinely is part of what is wanted; the sentence
+  is not the problem there, the catalogue is.
+- **A single sample of this model is not a reproducible measurement.** Two
+  recordings of the same prompt moved the headline by 0.011 and the non-English
+  slice by 0.064. The fixture freezes the one that ships and CI gates on it, so
+  the NUMBER is reproducible; the READER is not, and re-recording is a decision
+  with a measurable cost rather than a refresh.
+- **The English restatement now decides the non-English slice.** Almost the
+  whole +0.17 rests on the model producing one, and the vote exists because it
+  sometimes does not. If the provider changes the model behind `gpt-5-nano`, the
+  slice moves and nothing fails loudly. `public.reading_model()` retires the
+  cache on a rename; it cannot see a silent change.
+- **A search is two blocking round trips where Phase 3 had one.** The prefetch
+  is two primary-key lookups and measured 86–380 ms on this laptop including
+  connection setup, against a 150 ms target for a cached search that was set on
+  one round trip. The gate is still settled on the server at deploy.
+- **The model's `residual` earns nothing.** It reports a constraint and hands
+  the sentence back unchanged, so `--text=shorter` fired zero times in 115
+  sentences. The field and its deletion check are kept because they are what
+  make "the model cannot put words into the ranker" checkable.
+- **Two names for one secret.** `OPENAI_API_KEY` falls back to
+  `EMBEDDINGS_API_KEY`. That is one secret in one account reachable under two
+  names, which is fewer places to leak it from than two copies — but it does
+  mean a key scoped only to embeddings will be sent to the Responses API.
+- **The visitor's address comes from headers only.** `CF-Connecting-IP`, then
+  `x-real-ip`, then the first `x-forwarded-for`, then one shared bucket. The
+  brief asked for the socket address as the fallback and Next 15 does not expose
+  it. A shared bucket fails in the safe direction (everybody together gets sixty
+  an hour), and behind the tunnel the first header is always set.
+- **`db/seed/embeddings.fixture.json` is 1.9 MB** — 504 statements, 223
+  summaries, 539 sentences and 355 readings — and grows with every eval sentence
+  added. It is still the thing that lets CI measure the real search with no key.
+- **Every number here is from this laptop**, against Docker through WSL2. The
+  server is the gate, at deploy.
 
 ## Tried and rejected
 
