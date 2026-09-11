@@ -702,14 +702,25 @@ dl.facts dd {
 }
 
 /* --- Footer ---------------------------------------------------------------
- * The artboard's row — wordmark on the left, four links on the right — plus
- * one line under it saying which parts of the site are not built yet. */
+ * The artboard's row is wordmark on the left and four links on the right. The
+ * page list has since grown to thirteen (docs/product-decisions.md §14), and
+ * thirteen links in one row is a pile rather than a footer — so the right-hand
+ * side is three labelled columns instead of one line.
+ *
+ * Everything below the row is unchanged: one sentence saying which parts of
+ * the site are not built yet.
+ *
+ * No media query. The row and the columns both wrap on their own, so the
+ * columns drop under the wordmark when the two stop fitting side by side, and
+ * then stack one per line on a phone. Each column is as wide as its longest
+ * label — "How the fit score works" at --t-meta is about 155px, which still
+ * fits inside a 390px viewport's gutters. */
 .site-footer {
   border-top: var(--border);
   padding: var(--s-13) var(--page-gutter);
   display: flex;
   flex-direction: column;
-  gap: var(--s-5);
+  gap: var(--s-11);
   font-size: var(--t-meta);
   color: var(--c-muted);
   margin-top: auto;
@@ -719,8 +730,43 @@ dl.facts dd {
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
-  align-items: center;
-  gap: var(--s-11);
+  align-items: flex-start;
+  gap: var(--s-11) var(--s-14);
+}
+
+.site-footer-cols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-11) var(--s-16);
+}
+
+.site-footer-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+/* A column label, not a heading anybody reads as one: the type scale's
+ * smallest size, in the body face, spaced out so it reads as a label. */
+.site-footer-head {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--t-micro-sm);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: var(--lh-snug);
+  color: var(--c-ink);
+}
+
+.site-footer-col ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
 }
 
 .site-footer-note {
@@ -729,12 +775,6 @@ dl.facts dd {
   font-size: var(--t-micro-sm);
   line-height: var(--lh-body);
   color: var(--c-faint);
-}
-
-.site-footer nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-11);
 }
 
 .site-footer a {

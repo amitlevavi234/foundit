@@ -412,6 +412,15 @@ async function Answer({
           ) : null}
         </div>
         <div className="muted" style={{ fontSize: 'var(--t-body-sm)' }}>
+          {/* The one line on the page that says how the order was arrived at is
+              the right place for the link to the long version. A page that
+              ranks other people's products owes its users that page
+              (research/13 §3.8), and the footer is not where somebody looking
+              at a ranked list goes looking for it. Quiet, because the order is
+              already described in words beside it. */}
+          <div style={{ marginBottom: 4 }}>
+            <Link href="/ranking">How results are ranked</Link>
+          </div>
           {browse ? (
             <>
               You gave constraints and no question, so these are in the catalogue’s own order,{' '}

@@ -159,6 +159,57 @@ test('the component sheet prints the palette’s real values', () => {
   }
 });
 
+test('every page the footer promises exists, is unwritten out loud, and is noindex', () => {
+  // The footer links thirteen pages and not one of them is written
+  // (docs/product-decisions.md §14). Three things have to stay true of each,
+  // and all three are the kind that break silently.
+  //
+  //   The route exists          — otherwise the footer is back to linking 404s,
+  //                               which tests/links.test.mjs also catches.
+  //   It renders UnwrittenPage  — the component is what says, in one panel,
+  //                               that nobody has written this yet. A page that
+  //                               quietly grew real-looking prose instead would
+  //                               be policy nobody agreed to.
+  //   robots: { index: false }  — an empty page under a real title is not what
+  //                               a search for "Foundit privacy" should return.
+  const UNWRITTEN = [
+    'about',
+    'accessibility',
+    'contact',
+    'cookies',
+    'copyright',
+    'guidelines',
+    'help',
+    'pricing',
+    'privacy',
+    'ranking',
+    'report',
+    'security',
+    'terms',
+  ];
+
+  for (const route of UNWRITTEN) {
+    const path = join(ROOT, 'app', route, 'page.tsx');
+    let source;
+    try {
+      source = read(path);
+    } catch {
+      assert.fail(`app/${route}/page.tsx does not exist, so the footer links a 404`);
+    }
+
+    assert.match(
+      source,
+      /<UnwrittenPage\b/,
+      `app/${route}/page.tsx must render UnwrittenPage, which is what says it is unwritten`,
+    );
+    assert.match(
+      source,
+      /robots:\s*\{[^}]*\bindex:\s*false/,
+      `app/${route}/page.tsx must set robots: { index: false }`,
+    );
+  }
+});
+
 test('the reduced-motion block and the canvas it came from say the same five things', () => {
   // styles/motion.css calls its last block "`RM` from design/canvas/build.mjs,
   // verbatim". It was not verbatim: the app had added `animation-delay` and

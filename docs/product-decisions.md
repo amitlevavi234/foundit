@@ -236,3 +236,41 @@ back link the submit artboards draw, in the same place on every screen.
 
 `tests/links.test.mjs` compares every internal link the app renders against the routes
 `app/` actually defines, so this class of defect cannot come back quietly.
+
+**The page list grew from four to thirteen, and the footer grew columns to hold it
+(11 September 2026).** A real site carries more than About, Guidelines, Contact and
+Privacy, and `research/13-required-pages-and-notices.md` §3.7 and §3.8 name the rest.
+Nine more routes now exist, each on the same terms as the first four: an `UnwrittenPage`
+that says it has not been written and what it will cover, inventing no policy, promise or
+address, and `noindex`.
+
+| Page | What it will hold |
+| --- | --- |
+| `/terms` | What you agree to, and where Foundit's responsibility for a third-party tool ends. Acceptable use: scraping, automated submission, malicious links. |
+| `/cookies` | Which cookies exist and why each is necessary. No advertising and no third-party trackers, so there is nothing to consent to — **and no banner is to be built** (§4.3 of the research: a banner asking consent for something done on another basis is a false statement about the site). |
+| `/accessibility` | The commitment, the standard applied (WCAG 2.2 AA; IS 5568 is WCAG 2.0 AA), the known gaps in plain words, and a route for somebody who hits a barrier. W3C names all three, and Israeli regulations 34(ה)/35ה ask for the statement now. The route is the missing part, because no address is decided. |
+| `/ranking` | "How the fit score works": what the score is, what feeds it, what does not — *no tool can pay to rank higher* — where listings come from, how reviews are handled, the limitations, and how a maker corrects a listing. Linked from the results page as well as the footer, because that is where somebody reading a ranked list looks for it. |
+| `/pricing` | Free today; what paid accounts will buy later (§11); and that they will never affect ranking. Folds in the research's "How we make money". |
+| `/security` | What is encrypted, where data lives, who the sub-processors are, how to report a vulnerability. |
+| `/copyright` | Copyright complaints and takedown, including the DMCA §512(c) agent once one is registered. |
+| `/report` | How to report a listing, a review or a security flaw. Today the only working channel is the per-listing "Report this listing" mailto on the tool page, and the page says so. |
+| `/help` | Help and FAQ, written from questions people actually ask. |
+
+`/.well-known/security.txt` is **deliberately not in this change**. RFC 9116 makes exactly
+two fields mandatory and one of them is `Contact:`; a security.txt with an invented
+address is worse than none, because it is the file a researcher trusts instead of looking
+further. The security page says it will exist.
+
+**The footer is three labelled columns, which the artboards do not draw.** They draw one
+row of four links, and that was right for four. Thirteen in a row is a pile, so they are
+grouped — *Foundit* (About, How the fit score works, Pricing, Help, Contact), *Community*
+(Guidelines, Report a problem, Copyright), *Legal* (Terms, Privacy, Cookies,
+Accessibility, Security) — with the wordmark and the "still being built" note where they
+were. This is the one place the build is deliberately ahead of the canvas, and it is
+because the content changed rather than because the design was wrong. It wraps without a
+media query: the columns drop under the wordmark when they stop fitting beside it, and
+stack one per line on a phone.
+
+`tests/markup.test.mjs` holds all thirteen to the same three rules — the route exists, it
+renders `UnwrittenPage`, and it is `noindex` — so one of them cannot quietly grow policy
+nobody agreed to.
