@@ -75,6 +75,7 @@ size of the set noted.
 | 2026-09-11 | bc9abfe | 3 | yes | 60 | 0.6747 | 0.7019 | 72.6 | 115.3 | 0 of 60 | | | | Hybrid retrieval: a fifth RRF leg at weight 3.0, cosine distance over `tool_problems.embedding` (`text-embedding-3-small`, 512 dimensions, `halfvec`), ranking only the constraint-filtered candidate set. |
 | 2026-09-11 | 654f29d | 3 | yes | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 of 60 | | | | The adversarial review's fixes. The search is unchanged; the -0.0001 is float16 rounding, now frozen by `db/seed/embeddings.fixture.json`. **This is the reproducible one** — every run, laptop or CI, key or no key, warms from the same recorded vectors. |
 | 2026-09-11 | 9634cd6 | 3 | yes | 60 | 0.6719 | 0.7035 | 82.5 | 122.5 | 0 of 60 | 26 of 30 | | | **The relevance floor** (`0006_relevance_floor.sql`), after the owner's review. A result is returned only with evidence — close enough in meaning, every term of the sentence, or a close name. The golden set barely moves; the 30 sentences in `eval/negatives.jsonl` go from 0 of 30 answered with an empty page to 26 of 30, and from 20.0 to 2.2 rows leaked each. See "Phase 3 amended" below. |
+| 2026-09-11 | 5c002ff | 3 | yes | 60 | 0.7364 | 0.7618 | 84.6 | 119.8 | 0 of 60 | 10 of 30 | 10 of 25 | 0 of 240 | **Tool summaries embedded** (`0007`), and the floor re-tuned against a held-out negatives file and 240 perturbations. The summaries are the gain: nDCG 0.7035 → 0.7618, recall 0.6719 → 0.7364, non-English 0.6025 → 0.6516. **The negatives share falls, 26 of 30 → 10 of 30, and that is the honest direction**: the old value was fitted to that file, and on the held-out file — which nobody had tuned against — the old floor and this one both refuse 40%. The relative gate the review asked for was built first and refuses nothing at all; see "Phase 3 amended again" below. |
 
 ### Phase 2, by slice
 
@@ -453,6 +454,21 @@ the whole catalogue, and ask whether a sentence's best match is a peak against
 its own background (z = (best − mean)/sd ≥ Z), with each result judged the same
 way. It was built and measured before anything was written. **It does not
 work**, and the reason is worth more than the measurement.
+
+### The recorded run — 5c002ff
+
+| Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero |
+| ----- | - | --------- | ------- | ------- | ------ | ---- |
+| all | 60 | 0.7364 | 0.7618 | 84.6 | 119.8 | 0 |
+| english | 50 | 0.7620 | 0.7838 | 86.3 | 129.3 | 0 |
+| non-english | 10 | 0.6083 | 0.6516 | 76.3 | 103.8 | 0 |
+| constrained | 17 | 0.8098 | 0.7628 | 75.7 | 194.7 | 0 |
+| unconstrained | 43 | 0.7074 | 0.7614 | 88.2 | 119.8 | 0 |
+
+Constraint violations **0**, across the golden set, both negative files and all
+240 perturbations. Negatives 10 of 30 empty (5.1 rows leaked each), held-out 10
+of 25 (4.1 each), perturbations 0 of 240 empty. Warmed entirely from the
+fixture: 355 sentences, no API call.
 
 ### The relative gate, measured
 
