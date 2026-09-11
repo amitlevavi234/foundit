@@ -65,7 +65,22 @@ Or stop after 35 turns, saying plainly what is blocking.
 ## Phase 3 — vectors
 
 ```text
-/goal Phase 3 of docs/build-phases.md is complete: embeddings fill tool_problems.embedding, unchanged rows are skipped on a re-run, hybrid search fuses full-text, vector and trigram signals in one query, and query embeddings are cached. Proven by `node eval/run.mjs` printing a score that BEATS the Phase 2 baseline in eval/baselines.md — paste both numbers — and by a repeated search showing a cache hit under 150ms. Vectors stay halfvec(512), no vector index is created, and no query selects an embedding column into application code. Do not edit eval/golden.jsonl to make the score move. Record the new baseline. Or stop after 25 turns.
+/goal Phase 3 of docs/build-phases.md is complete AND its gate has passed. Read docs/build-phases.md, docs/product-decisions.md, docs/development.md, eval/baselines.md and db/migrations/0002_search.sql first. Every claim below is settled by pasting real command output, never by summarising.
+
+Done means all nine:
+1. A new migration adds the query-embedding cache and the hybrid search; nothing under db/ changes except by adding that migration, and `node db/apply.mjs` applies it to the dev database and is a no-op on a second run. Paste both runs.
+2. An embedding job fills tool_problems.embedding for every published statement with OpenAI text-embedding-3-small shortened to 512 dimensions, stored as halfvec(512), and a second run of the job embeds zero rows because nothing changed. Paste both runs and a count of null embeddings (must be 0).
+3. Hybrid search fuses full-text, vector and trigram signals in one round trip, constraints still filter before ranking and never influence it, and the app still connects as foundit_app. Paste the eval's constraint-violation count (must be 0).
+4. Query embeddings are cached in Postgres keyed on the normalised query; a repeated search is a cache hit that makes no API call and completes in under 150 ms measured as foundit_app. Paste the timing of the first and second run of the same query.
+5. `node eval/run.mjs` BEATS the Phase 2 baseline in eval/baselines.md on nDCG@10 — paste both numbers, authored and `--read-query` — and the new numbers are recorded in eval/baselines.md with the commit hash. eval/golden.jsonl is not edited.
+6. No vector index exists (paste `\di` on tool_problems), and no query in app or eval code selects an embedding column into application memory.
+7. The API key is read from EMBEDDINGS_API_KEY only, never logged or echoed, and the only outbound HTTP call in the application is to one hardcoded OpenAI URL from one file; tests/markup.test.mjs is tightened to say exactly that. When the key is absent or the call fails, search degrades to text-only without an error page. Paste the test output.
+8. `npm test`, `npm run lint`, `npx tsc --noEmit`, `npm run build` and `bash db/test.sh` all pass. Paste each tail.
+9. Review: a FRESH Opus 5 subagent that has not seen the work reviews the migration, the job, the search function and the cache for privacy, cost and correctness — in particular that the cache and search_events remain unjoinable to a person, that the vector leg cannot bypass a constraint filter, and that a failing API cannot take search down. Paste its findings verbatim, then fix each or justify it explicitly.
+
+Constraints that cannot be traded for a passing check: never disable row-level security or write a policy evaluating to true; the app never connects as the owner; no secret in any tracked file or in chat; the server never fetches a URL a stranger supplied; the golden set is never edited to move a score. Update docs/loop-progress.md before finishing. Do not start Phase 4.
+
+Or stop after 30 turns, saying plainly what is blocking.
 ```
 
 ## Phase 4 — understanding the sentence

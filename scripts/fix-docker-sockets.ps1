@@ -72,7 +72,10 @@ Write-Host 'Waiting for the engine (up to 4 minutes)...'
 $deadline = (Get-Date).AddMinutes(4)
 do {
   Start-Sleep -Seconds 10
-  $v = docker version --format '{{.Server.Version}}' 2>&1
+  # Through cmd, not directly: with $ErrorActionPreference = 'Stop', Windows
+  # PowerShell 5.1 turns a native command's stderr into a terminating error the
+  # moment `2>&1` is involved, and the engine's "not up yet" is exactly that.
+  $v = & cmd /c 'docker version --format "{{.Server.Version}}" 2>&1'
   if ($LASTEXITCODE -eq 0) { Write-Host "Docker engine is up: $v"; exit 0 }
 } while ((Get-Date) -lt $deadline)
 
