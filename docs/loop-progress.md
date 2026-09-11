@@ -195,9 +195,10 @@ over five warm sentences, node timer around the single round trip:
 
 | Machine | n | min | median | p95 | max | over 150 ms |
 | ------- | - | --- | ------ | --- | --- | ----------- |
-| idle | 50 | 47.6 | **61.7** | 125.8 | 152.3 | **1 of 50** |
+| idle | 50 | 44.7 | **60.4** | 92.4 | 102.3 | **0 of 50** |
+| idle, an hour earlier | 50 | 47.6 | 61.7 | 125.8 | 152.3 | 1 of 50 |
 | with a `next build` running beside it | 50 | 61.3 | 131.8 | 222.1 | 233.1 | 20 of 50 |
-| before the `rows 20` fix, idle-ish | 50 | 102.8 | 177.4 | 308.7 | 341.5 | 36 of 50 |
+| before the `rows 20` fix | 50 | 102.8 | 177.4 | 308.7 | 341.5 | 36 of 50 |
 
 Two honest statements about that:
 

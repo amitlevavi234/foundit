@@ -147,16 +147,43 @@ const STORE_SQL = `
 /** sha256 of a statement, hex. The fixture's key, and its staleness check. */
 const digest = (text) => createHash('sha256').update(String(text), 'utf8').digest('hex');
 
-/** The golden set's sentences, for --write-fixture. Ids and grades are not read. */
-function goldenQueries() {
-  const out = [];
+/**
+ * The sentences eval/run.mjs will search with, for --write-fixture. Ids and
+ * grades are not read.
+ *
+ * TWO texts per golden entry, not one. The default pass searches the sentence
+ * as written; `--read-query` searches what lib/constraints.ts leaves once the
+ * constraint phrases are taken out, and that is a different string with a
+ * different cache key. A fixture holding only the first makes a keyless
+ * `--read-query` run measure a derived slice that is half text-only — which is
+ * not wrong, exactly, but it is a number nobody can interpret.
+ *
+ * The reader is loaded through eval/reader.mjs, which is the one file in the
+ * repository that names it, so Phase 4 replacing lib/constraints.ts wholesale
+ * changes one import and not this. If it cannot be loaded the fixture is
+ * written without the derived texts and says so.
+ */
+async function evalQueries() {
+  const authored = [];
   for (const line of readFileSync(GOLDEN_PATH, 'utf8').split(/\r?\n/)) {
     const trimmed = line.trim();
     if (trimmed === '' || trimmed.startsWith('#')) continue;
     const obj = JSON.parse(trimmed);
-    if (typeof obj.query === 'string' && obj.query.trim() !== '') out.push(obj.query);
+    if (typeof obj.query === 'string' && obj.query.trim() !== '') authored.push(obj.query);
   }
-  return out;
+
+  let derived = [];
+  try {
+    const { readForSearch } = await import('../eval/reader.mjs');
+    derived = authored.map((q) => readForSearch(q).text).filter((t) => t.trim() !== '');
+  } catch (error) {
+    process.stdout.write(
+      `  NOTE: the sentence reader did not load (${error?.code ?? 'error'}), so the fixture\n`
+        + '        carries no vectors for the --read-query pass.\n',
+    );
+  }
+
+  return { authored, derived };
 }
 
 function readFixture() {
@@ -234,8 +261,9 @@ try {
       );
       exitCode = EXIT.FIXTURE;
     } else {
-      const queries = goldenQueries();
-      process.stdout.write(`golden queries   ${queries.length}\n`);
+      const { authored, derived } = await evalQueries();
+      const queries = [...authored, ...derived];
+      process.stdout.write(`golden queries   ${authored.length} as written, ${derived.length} as read\n`);
 
       const fixture = {
         schema: 'foundit-embeddings/1',
