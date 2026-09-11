@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { cache, type ReactNode } from 'react';
 
+import { BackLink } from '@/components/BackLink';
 import { Button } from '@/components/Button';
 import { SatisfactionChip, Tag } from '@/components/Chip';
 import { Icon } from '@/components/Icon';
@@ -44,13 +45,40 @@ const load = cache(async (slug: string) => getToolPage(slug));
 
 interface ToolProps {
   params: Promise<{ slug: string }>;
+  /**
+   * `q` is the search that led here, put on the link by the result card so
+   * that the way back off this page is the list it came from. It is read and
+   * nothing else: not stored, not logged, not searched on again.
+   */
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
 export async function generateMetadata({ params }: ToolProps): Promise<Metadata> {
   const { slug } = await params;
   const tool = await load(slug);
   if (!tool) return { title: 'Not found' };
-  return { title: tool.name, description: tool.summary };
+  return {
+    title: tool.name,
+    description: tool.summary,
+    // `?q=` is somebody's sentence, and the same page arrives with a different
+    // one every time. One canonical address keeps those out of an index —
+    // /results is already `noindex` for the same reason.
+    alternates: { canonical: `/tools/${slug}` },
+  };
+}
+
+/**
+ * Where the back link on this page goes.
+ *
+ * A tool page is reached two ways: from a result, where the search is on the
+ * URL, and from the catalogue, where it is not. Back therefore means the list
+ * that was actually being read — and when there is no evidence of one on the
+ * URL, it means /browse, which is where the tool sits when nobody searched.
+ * Nothing is guessed from a referrer header.
+ */
+function backTo(query: string | null): { href: string; label: string } {
+  if (!query) return { href: '/browse', label: 'Browse problems' };
+  return { href: `/results?q=${encodeURIComponent(query)}`, label: 'All results' };
 }
 
 const DATE = new Intl.DateTimeFormat('en-GB', {
@@ -104,10 +132,14 @@ const NOT_CLAIMED: Partial<Record<ToolFlag, string>> = {
   exports_data: 'Exporting your data somewhere else',
 };
 
-export default async function ToolPage({ params }: ToolProps) {
+export default async function ToolPage({ params, searchParams }: ToolProps) {
   const { slug } = await params;
   const tool = await load(slug);
   if (!tool) notFound();
+
+  const raw = (await searchParams).q;
+  const query = (Array.isArray(raw) ? raw[0] : raw)?.trim() || null;
+  const back = backTo(query);
 
   const primary = tool.categories.find((c) => c.isPrimary) ?? tool.categories[0];
   const good = tool.flags.filter((flag) => GOOD_FOR[flag]);
@@ -117,6 +149,12 @@ export default async function ToolPage({ params }: ToolProps) {
   return (
     <div className="page">
       <SiteHeader />
+
+      {/* Back and the crumbs do two different jobs and both are drawn: back is
+          the one place this page came from (ToolDetail's sibling artboards),
+          the crumbs are where the tool sits in the catalogue whether or not
+          that is where the reader came from (ToolDetail.dc.html). */}
+      <BackLink href={back.href}>{back.label}</BackLink>
 
       <div className="shell crumbs" style={{ padding: '4px 56px 0' }}>
         <Link href="/browse">Browse problems</Link>

@@ -89,10 +89,10 @@ export function ToolCard({
   index = 0,
 }: ToolCardProps) {
   const toolHref = href ?? `/tools/${slug}`;
-  const style: CSSProperties = {
-    animationDelay: `${index * 90 + 100}ms`,
-    ...(big ? { gridColumn: 'span 2' } : {}),
-  };
+  // The two-column span is `.toolcard.big` in styles/components.css, not an
+  // inline style: inline wins over every rule in the sheet, and the one-column
+  // layout has to be able to take the span back.
+  const style: CSSProperties = { animationDelay: `${index * 90 + 100}ms` };
 
   return (
     <article className={big ? 'card hov rise toolcard big' : 'card hov rise toolcard'} style={style}>
@@ -162,7 +162,7 @@ export function ToolCard({
           ) : null}
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="toolcard-actions">
           {/* Saving is Phase 6. The control is drawn now so the card is the
               card; it announces that it is not wired up rather than lying. */}
           <Button size="sm" disabled aria-describedby={`save-later-${slug}`}>
@@ -177,7 +177,7 @@ export function ToolCard({
               person can see where they are going before they go. Our server
               never asks that address for anything. */}
           {url ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+            <div className="toolcard-out">
               <OutboundButton url={url} size="sm">
                 {big ? `Open ${name}` : 'Open'}
               </OutboundButton>

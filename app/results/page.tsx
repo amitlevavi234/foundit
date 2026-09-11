@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { after } from 'next/server';
 import { Suspense } from 'react';
 
+import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
 import { EmptyState } from '@/components/EmptyState';
 import { Mark } from '@/components/Logo';
@@ -114,6 +115,11 @@ export default async function Results({ searchParams }: ResultsProps) {
   return (
     <div className="page">
       <SiteHeader />
+
+      {/* Results sit under the search on the homepage, which is where the
+          question was asked and the only place a new one can be asked from
+          scratch. */}
+      <BackLink href="/">Home</BackLink>
 
       <main
         id="main"
@@ -446,6 +452,11 @@ async function Answer({
               name={result.name}
               slug={result.slug}
               summary={result.summary}
+              // The search travels with the link so the tool page can offer a
+              // way back to this list. It is what makes "← All results" work
+              // for somebody who opened the tool in a new tab, and it is the
+              // only thing the tool page reads off its own URL.
+              href={`/tools/${result.slug}?q=${encodeURIComponent(query)}`}
               url={result.url}
               big={i === 0}
               index={i}

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
+import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
@@ -70,11 +71,13 @@ export default async function Top({ searchParams }: TopProps) {
     <div className="page">
       <SiteHeader active="top" />
 
+      <BackLink href="/">Home</BackLink>
+
       <main
         id="main"
         className="shell"
         style={{
-          padding: '32px 56px 80px',
+          padding: '18px 56px 80px',
           display: 'flex',
           flexDirection: 'column',
           gap: 26,

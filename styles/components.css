@@ -220,6 +220,25 @@
   color: var(--c-faint);
 }
 
+/* The badge on a control whose screen is a later phase. It is the sighted
+ * reader's half of the sentence a screen reader gets from the `sr-only` line
+ * beside it, and it is why a disabled control in the header reads as "not yet"
+ * rather than "broken". */
+.soon {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-xs);
+  background: var(--c-sunk);
+  border: 1.5px solid var(--c-rule);
+  color: var(--c-faint);
+  font-size: var(--t-micro-sm);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .ghost-tall {
   height: var(--h-tap-min);
 }
@@ -682,21 +701,39 @@ dl.facts dd {
   color: var(--c-coral);
 }
 
-/* --- Footer --------------------------------------------------------------- */
+/* --- Footer ---------------------------------------------------------------
+ * The artboard's row — wordmark on the left, four links on the right — plus
+ * one line under it saying which parts of the site are not built yet. */
 .site-footer {
   border-top: var(--border);
   padding: var(--s-13) var(--page-gutter);
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--s-11);
+  flex-direction: column;
+  gap: var(--s-5);
   font-size: var(--t-meta);
   color: var(--c-muted);
   margin-top: auto;
 }
 
+.site-footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-11);
+}
+
+.site-footer-note {
+  margin: 0;
+  max-width: 76ch;
+  font-size: var(--t-micro-sm);
+  line-height: var(--lh-body);
+  color: var(--c-faint);
+}
+
 .site-footer nav {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--s-11);
 }
 
@@ -766,9 +803,15 @@ dl.facts dd {
   text-decoration: none;
 }
 
+/* The first result is drawn larger and spans two columns. The span lives here
+ * rather than in an inline style on the article so that the one-column layout
+ * below can take it back: an inline `grid-column: span 2` outranks every rule
+ * in this file, and a card spanning two of one column is a card wider than the
+ * grid. */
 .toolcard.big {
   padding: 30px var(--s-14);
   gap: var(--s-9);
+  grid-column: span 2;
 }
 
 .toolcard-head {
@@ -806,8 +849,30 @@ dl.facts dd {
   gap: var(--s-3);
 }
 
+/* The foot — the ratings on the left, what you can do on the right.
+ *
+ * Everything here wraps, and that is the whole fix for the button that used to
+ * hang out of the card. A flex item's default `min-width: auto` will not let
+ * it shrink below its own min-content width, and `.btn` sets
+ * `white-space: nowrap`, so a button's min-content width *is* its full width:
+ * on a row that cannot wrap, a footer wider than the card does not compress,
+ * it overflows — through the padding, through the 2px border and out into the
+ * gap between cards, taking the domain caption under the button with it.
+ *
+ * The artboard's footer holds one small button beside the ratings and fits in
+ * a 292px column; ours holds Save, Open and the domain the link-out decision
+ * requires beside it (docs/product-decisions.md §12), which does not. So each
+ * level is allowed to fall onto the next line instead: the actions drop below
+ * the ratings, and Open drops below Save, before anything crosses an edge.
+ *
+ * Nothing here clips: `.card` keeps `overflow: visible` on purpose, because a
+ * card that hides its overflow would have hidden this bug rather than fixed
+ * it — and the card's own 6px offset shadow is drawn outside its border box,
+ * which is the design, and which `overflow: hidden` would not have touched
+ * anyway. */
 .toolcard-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--s-5);
@@ -817,10 +882,46 @@ dl.facts dd {
 
 .toolcard-stats {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--s-4);
+  min-width: 0;
   font-size: var(--t-meta);
   color: var(--c-muted);
+}
+
+/* `margin-left: auto` rather than the parent's `justify-content`, because
+ * `space-between` puts a wrapped line's only item at its start: without this
+ * the buttons jump to the left edge the moment the footer needs two lines. */
+.toolcard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-3);
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+/* The Open button and the domain it goes to, kept together as one block so a
+ * wrap can never leave the caption behind on a line of its own. */
+.toolcard-out {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s-1);
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* A last resort for a tool whose name is longer than the card is wide — "Open
+ * Cryptomator" on a one-column phone layout. `overflow: hidden` clips the
+ * label inside the button; the button's own offset shadow is unaffected,
+ * since an element's overflow never clips its own shadow. */
+.toolcard-out .btn {
+  max-width: 100%;
+  overflow: hidden;
 }
 
 /* --- Empty state ----------------------------------------------------------
@@ -934,11 +1035,34 @@ dl.facts dd {
   margin-right: var(--s-2);
 }
 
+/* The artboard is a 1440px still, so its grid is three columns and says
+ * nothing about narrower windows. Left at three columns everywhere, a 900px
+ * window gives each card a 216px box and a 160px content width — narrower than
+ * the two buttons in its own footer — and a 420px one gives it 61px. The
+ * columns are therefore dropped before the cards get too small to hold what
+ * they hold, rather than being asked to. */
 .results-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--s-13);
   padding: var(--s-2);
+}
+
+@media (max-width: 1100px) {
+  .results-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .results-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* One column: there is no second column to span. */
+  .toolcard.big {
+    grid-column: auto;
+  }
 }
 
 /* The box at the foot of the results, and its fade over what scrolls past. */
@@ -1186,6 +1310,20 @@ dl.facts dd {
   margin-top: auto;
 }
 
+/* --- The way back ---------------------------------------------------------
+ * One row under the header, the ghost control the submit artboards draw,
+ * pushed to the start of the shell so it lines up with the page's own left
+ * edge. `margin-left: calc(var(--s-4) * -1)` cancels the ghost's own padding
+ * so the arrow, not the padding, is what sits on that edge. */
+.backrow {
+  display: flex;
+  padding-top: var(--s-3);
+}
+
+.backlink {
+  margin-left: calc(var(--s-4) * -1);
+}
+
 /* --- The tool page -------------------------------------------------------- */
 .crumbs {
   display: flex;
@@ -1225,6 +1363,21 @@ dl.facts dd {
   display: flex;
   flex-direction: column;
   gap: var(--s-6);
+}
+
+/* The aside is a fixed 340px beside a flexible column, which stops being a
+ * two-column idea somewhere around 900px: below that the column it sits next
+ * to is narrower than the panel, and the "Open" button in the aside is the one
+ * control the whole page exists for. It goes underneath instead. */
+@media (max-width: 900px) {
+  .toolpage {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-14);
+  }
+
+  .toolpage aside {
+    position: static;
+  }
 }
 
 .stars {
@@ -1340,6 +1493,17 @@ dl.facts dd {
 .btn-outbound {
   height: 56px;
   font-size: var(--t-body-lg);
+}
+
+/* The domain printed beside every link out (docs/product-decisions.md §12).
+ * It gives up its tail rather than its container's edge. */
+.outbound-domain {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--t-meta-sm);
+  color: var(--c-muted);
 }
 
 /* A single-line input inside the bordered field, for the small search box in

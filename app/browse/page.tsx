@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
+import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
 import { Icon } from '@/components/Icon';
 import { ProblemCard } from '@/components/ProblemCard';
@@ -51,11 +52,13 @@ export default async function Browse({ searchParams }: BrowseProps) {
     <div className="page">
       <SiteHeader active="browse" />
 
+      <BackLink href="/">Home</BackLink>
+
       <main
         id="main"
         className="shell"
         style={{
-          padding: '32px 56px 80px',
+          padding: '18px 56px 80px',
           display: 'flex',
           flexDirection: 'column',
           gap: 28,

@@ -60,13 +60,16 @@ export function OutboundButton({
   );
 }
 
-/** The domain caption that sits under or beside the button. */
+/**
+ * The domain caption that sits under or beside the button.
+ *
+ * Its type and colour live in `.outbound-domain` rather than in an inline
+ * style, because it also has to be told how to behave when there is not enough
+ * room for it — a caption that cannot shrink is a caption that goes over the
+ * edge of whatever is holding it.
+ */
 export function OutboundDomain({ url }: { url: string | null | undefined }) {
   const link = outboundLink(url);
   if (!link) return null;
-  return (
-    <span className="tab" style={{ fontSize: 'var(--t-meta-sm)', color: 'var(--c-muted)' }}>
-      {link.domain}
-    </span>
-  );
+  return <span className="tab outbound-domain">{link.domain}</span>;
 }

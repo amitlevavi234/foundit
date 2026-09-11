@@ -5,7 +5,7 @@ design phase. Where this disagrees with `product-spec.md`, **this file wins** �
 spec was written first, under the earlier name "Solvd", and parts of it were
 deliberately cut afterwards.
 
-Last updated: 10 September 2026.
+Last updated: 11 September 2026.
 
 ---
 
@@ -194,3 +194,45 @@ sign-in *and* the row-level security that makes an application bug not become a 
 breach. Two candidates are under research: running the Supabase stack ourselves, or
 plain Postgres with Auth.js and hand-wired row-level security. **Whichever wins, the
 authorization boundary stays inside the database.** That is not negotiable.
+
+## 14. The site chrome tells the truth about what is built (decided 11 September 2026)
+
+The header and the footer are on every screen, and seven of the nine links in them went
+to a 404: `/submit`, `/saved` and `/sign-in` from the header, `/about`, `/guidelines`,
+`/contact` and `/privacy` from the footer. Two code reviews had not found it because
+each link reads correctly on its own; the owner found it in a minute by clicking.
+
+**Controls whose screens are a later phase stay drawn, and are disabled in place.**
+Sign in and Saved are Phase 6 and Add a tool is Phase 7 (`docs/build-phases.md`). The
+artboards draw all three, and taking them out would hide a plan that is real. So they
+keep their place in the header as disabled controls — the state the design already
+specifies — with a "Soon" badge beside them and one plain sentence in the footer saying
+that signing in, saved lists and adding a tool arrive together with accounts. This is
+what the tool page already does about claiming ("Claiming opens when sign-in does"): an
+honest gap beats a convincing lie, and a control that cannot be clicked is better than
+one that can be clicked and breaks.
+
+**About, Guidelines, Contact and Privacy are real routes that say they are unwritten.**
+The alternative was removing the links until somebody writes the pages. We kept them,
+for two reasons. Privacy is a legal requirement before a real person uses Foundit, and
+a missing link is a gap nobody trips over, whereas a page that says the notice does not
+exist is a gap somebody has to answer for. And the four links are drawn in every
+artboard's footer, so removing them would put the build further from the design in
+order to hide something we would rather see.
+
+Each of those four pages says, in one panel, that it has not been written and what it
+will cover. **None of them invents policy, promises or an address.** The privacy page
+in particular claims nothing about what is collected, how long it is kept or who sees
+it: a notice guessed at from the outside is worse than none, because it stops anybody
+noticing there isn't one. All four are `noindex` — an empty page under a real title is
+not what a search for "Foundit privacy" should return.
+
+**Every screen below the homepage carries a way back.** It is a link to where the page
+sits, never `history.back()`, because a page opened from a link somebody sent has no
+history to go back to. Results, Browse and Top go to the homepage; a tool page goes
+back to the search that found it when the search is on the URL, and to Browse when it
+is not — read from the URL, never guessed from a referrer. The control is the ghost
+back link the submit artboards draw, in the same place on every screen.
+
+`tests/links.test.mjs` compares every internal link the app renders against the routes
+`app/` actually defines, so this class of defect cannot come back quietly.

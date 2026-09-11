@@ -1,4 +1,4 @@
-# Repair Docker Desktop when it refuses to start on Windows.
+﻿# Repair Docker Desktop when it refuses to start on Windows.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\fix-docker-sockets.ps1
 #
@@ -25,6 +25,12 @@
 # folders aside. Do not use "Reset to factory defaults" for this — that does
 # delete your images and containers, and it is the button Docker's own error
 # dialog offers you.
+#
+# This file is saved with a UTF-8 byte-order mark on purpose. Windows
+# PowerShell 5.1 reads a BOM-less script as the system code page, where the em
+# dashes in these messages decode to a sequence ending in a curly quote, which
+# PowerShell takes as the end of the string. The script then fails to parse at
+# all — which is what it looked like when Docker was the thing that was broken.
 
 $ErrorActionPreference = 'Stop'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
