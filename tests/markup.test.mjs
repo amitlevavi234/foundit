@@ -73,9 +73,25 @@ test('every screen that shows a tool goes through it', () => {
   }
 });
 
+/**
+ * The one file allowed to open a socket, and the address it is allowed to open
+ * it to. Everything below is written against this pair rather than against a
+ * blanket ban, because Phase 3 needed exactly one outbound call and a rule with
+ * no exception would have been deleted rather than narrowed.
+ */
+const EMBEDDINGS_FILE = 'lib/embeddings.ts';
+const EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings';
+
 test('nothing on the server asks a stranger’s address for anything', () => {
+  // One exception, named. Phase 3 embeds the sentence somebody typed, which is
+  // a request to an address written out in full in one file; a tool's own URL
+  // is still never fetched by us, and the tests below say so precisely.
   const fetchers = SOURCES.filter((path) => /(^|[^.\w])fetch\s*\(/.test(read(path))).map(rel);
-  assert.deepEqual(fetchers, [], 'no server-side fetch anywhere in the application');
+  assert.deepEqual(
+    fetchers,
+    [EMBEDDINGS_FILE],
+    `${EMBEDDINGS_FILE} is the only file that may make an outbound request`,
+  );
 
   const imageLoaders = SOURCES.filter((path) => /from ['"]next\/image['"]/.test(read(path))).map(rel);
   assert.deepEqual(
@@ -87,6 +103,129 @@ test('nothing on the server asks a stranger’s address for anything', () => {
   for (const path of SOURCES) {
     const source = read(path);
     assert.doesNotMatch(source, /favicon.*\$\{|google\.com\/s2\/favicons/i, `${rel(path)} fetches a favicon`);
+  }
+});
+
+test('that one request goes to one hardcoded address and can go nowhere else', () => {
+  const source = read(join(ROOT, 'lib', 'embeddings.ts'));
+
+  // The constant is the literal address, written out, not assembled.
+  assert.match(
+    source,
+    new RegExp(`export const EMBEDDINGS_URL = '${EMBEDDINGS_URL.replace(/[.*+?^$()|[\]\\]/g, '\\$&')}';`),
+    'EMBEDDINGS_URL must be the literal address and nothing else',
+  );
+
+  // The call site takes that identifier. Not a variable, not a parameter, not
+  // a property of something somebody supplied.
+  const calls = [...source.matchAll(/(^|[^.\w])fetch\s*\(\s*([^,\s)]+)/g)].map((m) => m[2]);
+  assert.deepEqual(calls, ['EMBEDDINGS_URL'], 'fetch must be called with the constant');
+
+  // No second address, anywhere in the file, in any form.
+  const urls = [...source.matchAll(/https?:\/\/[^\s'"`)]+/g)].map((m) => m[0]);
+  assert.deepEqual(urls, [EMBEDDINGS_URL], 'the file may contain exactly one URL');
+
+  // And no URL assembled out of pieces: a template literal is how a hardcoded
+  // address becomes a configurable one without anybody noticing.
+  for (const literal of source.match(/`[^`]*`/g) ?? []) {
+    assert.doesNotMatch(literal, /https?:|\/\/|\w+\.(com|net|org|io|ai)/i, `a template literal builds an address: ${literal}`);
+  }
+  assert.doesNotMatch(source, /process\.env\.\w*(URL|HOST|ENDPOINT|BASE)/i, 'the address is not read from the environment');
+  assert.doesNotMatch(source, /new URL\(/, 'nothing here parses or builds a URL');
+});
+
+test('and it sends the model, the length, and the capped sentence — nothing else', () => {
+  const source = read(join(ROOT, 'lib', 'embeddings.ts'));
+
+  const body = /body:\s*JSON\.stringify\(\{([\s\S]*?)\}\)/.exec(source);
+  assert.ok(body, 'the request body must be one JSON.stringify of an object literal');
+
+  const keys = [...body[1].matchAll(/^\s*([A-Za-z_$][\w$]*)\s*:/gm)].map((m) => m[1]);
+  assert.deepEqual(
+    keys.sort(),
+    ['dimensions', 'input', 'model'],
+    'three fields: the model name, the length wanted back, and the text',
+  );
+  assert.match(body[1], /model:\s*EMBEDDING_MODEL/);
+  assert.match(body[1], /dimensions:\s*EMBEDDING_DIMENSIONS/);
+  // `capped` is the input list after MAX_EMBEDDING_INPUT has been applied to
+  // every entry. The raw argument must not be what goes out.
+  assert.match(body[1], /input:\s*capped/, 'the capped text is sent, not the caller’s string');
+  assert.match(
+    source,
+    /const capped = inputs\.map\([\s\S]*?MAX_EMBEDDING_INPUT/,
+    'and `capped` must be exactly that',
+  );
+
+  // Nothing about the visitor, the request or the catalogue may travel with it.
+  for (const forbidden of ['user', 'session', 'ip', 'cookie', 'referer', 'visitor', 'device']) {
+    assert.doesNotMatch(
+      body[1],
+      new RegExp(`\\b${forbidden}`, 'i'),
+      `the request body must not carry anything ${forbidden}-shaped`,
+    );
+  }
+});
+
+test('the key is read from one variable, and never written anywhere', () => {
+  const source = read(join(ROOT, 'lib', 'embeddings.ts'));
+
+  // One name, one read, and it is the name docs/development.md and .env.local
+  // use. A second source for a secret is a second place to leak one from.
+  assert.match(source, /const KEY_VARIABLE = 'EMBEDDINGS_API_KEY';/);
+  const reads = [...source.matchAll(/process\.env\[?\.?([A-Za-z_$][\w$]*)\]?/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(reads)], ['KEY_VARIABLE'], 'the key has exactly one source');
+
+  // No console call in this file may name the key or the thing it is put in.
+  for (const call of source.match(/console\.\w+\([^)]*\)/g) ?? []) {
+    assert.doesNotMatch(call, /key|Bearer|authorization/i, `a log line names the key: ${call}`);
+  }
+
+  // And the one place the key appears in a string is the Authorization header.
+  const interpolations = (source.match(/`[^`]*\$\{key\}[^`]*`/g) ?? []).map((s) => s.trim());
+  assert.deepEqual(interpolations, ['`Bearer ${key}`'], 'the key goes in a header and nowhere else');
+});
+
+test('no client component pulls the embedder — or the key — into a browser bundle', () => {
+  // lib/embeddings.ts deliberately has no `server-only` import: eval/run.mjs
+  // and scripts/embed.mjs are plain Node and import it directly, so the
+  // harness measures the code that ships. This is what replaces that guard.
+  const clients = SOURCES.filter((path) => /^\s*['"]use client['"]/m.test(read(path)));
+  for (const path of clients) {
+    assert.doesNotMatch(
+      read(path),
+      /from ['"](@\/lib\/embeddings|.*\/embeddings)['"]/,
+      `${rel(path)} is a client component and must not import the embedder`,
+    );
+  }
+  assert.ok(!/import ['"]server-only['"]/.test(read(join(ROOT, 'lib', 'embeddings.ts'))));
+});
+
+test('no embedding column is ever selected into application memory', () => {
+  // A halfvec(512) is about a kilobyte per row. Selecting one costs egress for
+  // a value the application cannot do anything with — the distance arithmetic
+  // happens in PostgreSQL and ranks come back. The only vector that crosses the
+  // wire is the one being STORED, as a parameter.
+  const dbSources = [
+    ...SOURCES,
+    join(ROOT, 'eval', 'run.mjs'),
+    join(ROOT, 'scripts', 'embed.mjs'),
+  ];
+
+  for (const path of dbSources) {
+    const source = read(path);
+    for (const statement of source.match(/select[\s\S]{0,400}?from/gi) ?? []) {
+      assert.doesNotMatch(
+        statement,
+        /(^|[\s,.])embedding\s*(,|$|\s+as\b)/im,
+        `${rel(path)} selects an embedding column:\n${statement.slice(0, 200)}`,
+      );
+    }
+    assert.doesNotMatch(
+      source,
+      /select\s+\*\s+from\s+public\.(tool_problems|query_embeddings)/i,
+      `${rel(path)} does select * on a table with a vector column`,
+    );
   }
 });
 

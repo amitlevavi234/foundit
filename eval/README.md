@@ -2,9 +2,13 @@
 
 This is the measuring instrument. Phase 2 builds a search with no AI in it, and
 every phase after it has to beat the number this harness produces. That only
-works if the harness is trustworthy and boring, so it is: no model calls, no
-network beyond PostgreSQL, no colour codes, no randomness, no cleverness in the
-arithmetic that a reader cannot check by hand.
+works if the harness is trustworthy and boring, so it is: no colour codes, no
+randomness, no cleverness in the arithmetic that a reader cannot check by hand.
+
+Since Phase 3 it makes **one** call that is not to PostgreSQL, before any
+measurement starts, and the section [Vectors, and the one call that is not to
+Postgres](#vectors-and-the-one-call-that-is-not-to-postgres) says exactly what
+it is and why the measured pass is still read-only and still offline.
 
 ## The standing rule
 
@@ -40,12 +44,18 @@ $env:DATABASE_URL = 'postgres://user:pass@host:5432/foundit'; node eval/run.mjs
 ```
 
 `DATABASE_URL` comes from the environment and from nowhere else. Nothing is
-hardcoded, no default is guessed, no `.env` file is read, and no connection
-string or password is ever printed — every error message is passed through a
-redactor first. Set it for the one command rather than exporting it, and point
-it at a **read-only role**: the harness only ever runs `SELECT`, and it puts the
-session into read-only mode on connect to make that structural rather than a
-promise.
+hardcoded, no default is guessed, no `.env` file is read by the harness itself,
+and no connection string or password is ever printed — every error message is
+passed through a redactor first. Set it for the one command rather than
+exporting it.
+
+The harness only ever runs `SELECT` **while it is measuring**, and it puts the
+session into read-only mode before the first query to make that structural
+rather than a promise. It makes exactly one kind of write, before that, and to
+one table: the query-embedding cache. See [Vectors, and the one call that is not
+to Postgres](#vectors-and-the-one-call-that-is-not-to-postgres). If the role you
+point it at is read-only, the warm-up fails, the run says so, and the queries
+are measured text-only.
 
 It needs `public.search_tools` (from `db/migrations/0002_search.sql`) and a
 loaded catalogue. Without the function it exits 3 and says so.
@@ -234,6 +244,74 @@ semantics fails the self-test rather than passing quietly.
 
 Violations are checked across every row returned, not just the top ten. A hard
 filter that leaks at rank 17 is exactly as broken as one that leaks at rank 1.
+
+## Vectors, and the one call that is not to Postgres
+
+### What changed in Phase 3
+
+`public.search_tools` gained a fifth ranking leg: cosine distance from the
+sentence's embedding to each candidate tool's nearest problem statement
+(`db/migrations/0004_vectors.sql`). It needs a vector for the query, and a
+vector comes from a model provider, which is a network call — the thing this
+harness had none of.
+
+It is resolved by where the vector lives. Query vectors are cached in
+PostgreSQL, keyed on the normalised sentence, and `search_tools` reads that
+cache itself when no vector is passed. So the harness does not need to embed
+during a run; it needs the cache to be warm.
+
+### The warm-up
+
+Before the first query is timed, and **before the session is put into read-only
+mode**, the harness asks the database which of the sentences it is about to
+search with have no cached vector, embeds those in one batched request through
+`lib/embeddings.ts`, and stores them. Then it seals the session read-only and
+measures.
+
+```
+Foundit eval — 60 queries, metrics @10, fetching 20 rows each.
+  query vectors: 60 already cached, 0 embedded in 0 request(s), 0 prompt tokens.
+```
+
+That is the only write the harness makes anywhere, and it goes to
+`public.query_embeddings`, which has no user column, no session column and no
+foreign key to anything that has one. **It still never writes to
+`search_events`**: a benchmark must not pollute the analytics it exists to
+inform, and that rule is unchanged.
+
+### Why warming is not cheating
+
+The application's path on a cache **miss** is: search (text-only, told a vector
+is missing), embed, store, search again with the vector. The second search is
+what the visitor sees, and it is byte for byte what a cache **hit** produces —
+both are `search_tools` with the same vector. The two differ in latency and in
+nothing else.
+
+So the harness measures the cached path, which is the shipped steady state:
+every repeat of every sentence, by anybody. Three properties are worth more
+than reproducing the miss:
+
+- the measured pass stays read-only, structurally rather than by promise;
+- the latency is the latency people will actually see, not that of a
+  first-ever sentence waiting on a model provider;
+- **a run needs no API key once the cache is warm**, so CI measures the same
+  number as a laptop and calls nothing.
+
+### With no key
+
+It degrades exactly as the application does. Sentences with no cached vector
+are searched text-only, the run says how many, and the number is honestly lower
+rather than absent:
+
+```
+  query vectors: 12 already cached, 0 embedded in 0 request(s), 0 prompt tokens.
+  NOTE: 48 sentence(s) have no cached vector and EMBEDDINGS_API_KEY is not set;
+        those queries measure text-only, exactly as the application would serve them
+```
+
+The key is read from `EMBEDDINGS_API_KEY` and from nowhere else, it is never
+printed, and every failure message from the embedder carries a short reason and
+neither the key nor the text that was being embedded.
 
 ## Measuring the reader: `--read-query`
 

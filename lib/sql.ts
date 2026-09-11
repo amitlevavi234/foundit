@@ -15,6 +15,7 @@ import type {
   PricingModel,
   ProblemCard,
   SearchConstraints,
+  SearchDetailedResult,
   SearchEvent,
   ToolFlag,
   ToolPageData,
@@ -204,14 +205,25 @@ export async function runLogSearchEvent(exec: Executor, event: SearchEvent): Pro
  * $1..$5 are `search_tools`' own arguments. $6 is the window asked of it, $7
  * an optional category to narrow to — categories are not a parameter of
  * `search_tools` and cannot become one from here, so the narrowing happens in
- * this statement, over a wider window, and never in JavaScript — and $8 the
- * number of rows the screen wants.
+ * this statement, over a wider window, and never in JavaScript — $8 the
+ * number of rows the screen wants, and $9 the query vector when the caller
+ * already has one. $9 null means "read the cache", which is what makes a
+ * repeated search a single round trip.
  *
  * `q` rebuilds the any-of tsquery that 0002_search.sql retrieves with, so the
  * problem statement shown under a result is the one that actually matched the
  * sentence rather than whichever happened to be first. It goes through
  * `quote_literal` over lexemes taken from `to_tsvector`, exactly as the
  * migration does, so there is nothing in it a person could inject.
+ *
+ * The shape at the bottom — one row of `flag`, LEFT JOINed to the results —
+ * is not decoration. `embedding_missing` has to survive a search that returned
+ * NOTHING, because that is the case where fetching a vector matters most: a
+ * sentence that shares no vocabulary with the catalogue is exactly what the
+ * vector leg exists for, and a per-row flag would be absent precisely there.
+ * So the flag anchors the statement and the rows hang off it. A search with no
+ * results comes back as a single row whose tool_id is null, which
+ * `runSearchDetailed` drops.
  */
 export const SEARCH_DETAILED_SQL = `
   with q as (
@@ -229,30 +241,61 @@ export const SEARCH_DETAILED_SQL = `
         p_platforms => $3::platform[],
         p_flags     => $4::tool_flag[],
         p_languages => $5::text[],
-        p_limit     => $6::int
+        p_limit     => $6::int,
+        p_embedding => $9::halfvec
       )
+  ),
+  decorated as (
+    select r.tool_id, r.slug, r.name, r.summary, r.pricing::text as pricing,
+           r.score, r.match_source,
+           t.url, t.platforms::text[] as platforms, t.languages, t.flags::text[] as flags,
+           t.rating_avg, t.rating_count, t.like_count, t.save_count,
+           c.slug as category_slug, c.name as category_name,
+           p.statement as matched_problem, p.strength as matched_strength
+      from r
+      join public.tools t on t.id = r.tool_id
+      left join public.tool_categories tc on tc.tool_id = t.id and tc.is_primary
+      left join public.categories c on c.id = tc.category_id
+      left join lateral (
+        select tp.statement,
+               ts_rank_cd(tp.search_doc, (select tsq from q), 1) as strength
+          from public.tool_problems tp
+         where tp.tool_id = t.id
+         order by strength desc, tp.sort_order, tp.id
+         limit 1
+      ) p on true
+     where $7::text is null or c.slug = $7::citext
+     order by r.score desc, t.rating_avg desc nulls last, t.like_count desc, t.id
+     limit $8::int
+  ),
+  flag as (
+    select public.query_embedding_missing($1::text, $9::halfvec) as embedding_missing
   )
-  select r.tool_id, r.slug, r.name, r.summary, r.pricing::text as pricing,
-         r.score, r.match_source,
-         t.url, t.platforms::text[] as platforms, t.languages, t.flags::text[] as flags,
-         t.rating_avg, t.rating_count, t.like_count, t.save_count,
-         c.slug as category_slug, c.name as category_name,
-         p.statement as matched_problem, p.strength as matched_strength
-    from r
-    join public.tools t on t.id = r.tool_id
-    left join public.tool_categories tc on tc.tool_id = t.id and tc.is_primary
-    left join public.categories c on c.id = tc.category_id
-    left join lateral (
-      select tp.statement,
-             ts_rank_cd(tp.search_doc, (select tsq from q), 1) as strength
-        from public.tool_problems tp
-       where tp.tool_id = t.id
-       order by strength desc, tp.sort_order, tp.id
-       limit 1
-    ) p on true
-   where $7::text is null or c.slug = $7::citext
-   order by r.score desc, t.rating_avg desc nulls last, t.like_count desc, t.id
-   limit $8::int`;
+  select f.embedding_missing, d.*
+    from flag f
+    left join decorated d on true
+   order by d.score desc nulls last, d.rating_avg desc nulls last,
+            d.like_count desc, d.tool_id`;
+
+/**
+ * Keep the vector for this sentence, so the next person who types it costs
+ * nothing. Called after the response has gone out and never awaited.
+ *
+ * The sentence goes in raw and the function normalises it, so no caller can
+ * invent a cache key. `public.query_embeddings` has no user column, no session
+ * column and no IP column, and this statement has no argument that could carry
+ * one — the same shape, and the same reason, as `log_search_event`.
+ */
+export const STORE_QUERY_EMBEDDING_SQL = `
+  select public.store_query_embedding(
+    p_query     => $1::text,
+    p_embedding => $2::halfvec,
+    p_model     => $3::text
+  )`;
+
+/** Mark a cached vector as used, for eviction. One column, one row, no reply. */
+export const TOUCH_QUERY_EMBEDDING_SQL = `
+  select public.touch_query_embedding(p_query => $1::text)`;
 
 /** The homepage: the ranked strip, the problem cards, and the two totals. */
 export const HOME_SQL = `
@@ -554,8 +597,14 @@ function toProblemCard(row: ProblemCardRow): ProblemCard {
   };
 }
 
+/**
+ * One row of `SEARCH_DETAILED_SQL`. Every result column is nullable because a
+ * search that matched nothing still returns one row — the flag's row, with the
+ * results side of the LEFT JOIN empty.
+ */
 interface DetailRow {
-  tool_id: string | number;
+  embedding_missing: boolean | null;
+  tool_id: string | number | null;
   slug: string;
   name: string;
   summary: string | null;
@@ -589,6 +638,7 @@ export function searchDetailedParams(
   constraints: SearchConstraints = {},
   limit = 12,
   category: string | null = null,
+  embedding: string | null = null,
 ): unknown[] {
   const [q, pricing, platforms, flags, languages] = searchParams(query, constraints, limit);
   return [
@@ -600,12 +650,20 @@ export function searchDetailedParams(
     category ? CATEGORY_WINDOW : limit,
     category,
     limit,
+    embedding,
   ];
 }
 
 /**
  * The results screen's search: one round trip, the ranking still entirely
  * `search_tools`', and every column a card draws already on the row.
+ *
+ * `embedding` is the query vector when the caller already has one, as the
+ * `halfvec` literal `lib/embeddings.ts` produced. Passing null does not mean
+ * "search without vectors" — it means "look in the cache", and the returned
+ * `embeddingMissing` says whether that found anything. A caller that gets true
+ * back embeds, stores, and calls this once more with the vector; a caller that
+ * gets false has the final answer and has spent one round trip on it.
  */
 export async function runSearchDetailed(
   exec: Executor,
@@ -613,7 +671,8 @@ export async function runSearchDetailed(
   constraints: SearchConstraints = {},
   limit = 12,
   category: string | null = null,
-): Promise<ToolResultDetail[]> {
+  embedding: string | null = null,
+): Promise<SearchDetailedResult> {
   const trimmed = query.trim();
   if (trimmed.length > MAX_QUERY_LENGTH) {
     throw new QueryTooLongError(trimmed.length);
@@ -623,7 +682,7 @@ export async function runSearchDetailed(
   try {
     ({ rows } = await exec.query<DetailRow>(
       SEARCH_DETAILED_SQL,
-      searchDetailedParams(trimmed, constraints, limit, category),
+      searchDetailedParams(trimmed, constraints, limit, category, embedding),
     ));
   } catch (err) {
     if (isTooLong(err)) {
@@ -632,27 +691,55 @@ export async function runSearchDetailed(
     throw err;
   }
 
-  return rows.map((row) => ({
-    toolId: String(row.tool_id),
-    slug: row.slug,
-    name: row.name,
-    summary: row.summary,
-    pricing: row.pricing,
-    score: Number(row.score),
-    matchSource: row.match_source,
-    url: row.url,
-    platforms: row.platforms ?? [],
-    languages: row.languages ?? [],
-    flags: row.flags ?? [],
-    ratingAvg: numOrNull(row.rating_avg),
-    ratingCount: num(row.rating_count),
-    likeCount: num(row.like_count),
-    saveCount: num(row.save_count),
-    categorySlug: row.category_slug ?? null,
-    categoryName: row.category_name ?? null,
-    matchedProblem: row.matched_problem,
-    matchedStrength: num(row.matched_strength),
-  }));
+  const embeddingMissing = Boolean(rows[0]?.embedding_missing);
+  // A search that matched nothing still returns the flag's row. It carries no
+  // tool, so it is not a result.
+  const results: ToolResultDetail[] = rows
+    .filter((row) => row.tool_id !== null && row.tool_id !== undefined)
+    .map((row) => ({
+      toolId: String(row.tool_id),
+      slug: row.slug,
+      name: row.name,
+      summary: row.summary,
+      pricing: row.pricing,
+      score: Number(row.score),
+      matchSource: row.match_source,
+      url: row.url,
+      platforms: row.platforms ?? [],
+      languages: row.languages ?? [],
+      flags: row.flags ?? [],
+      ratingAvg: numOrNull(row.rating_avg),
+      ratingCount: num(row.rating_count),
+      likeCount: num(row.like_count),
+      saveCount: num(row.save_count),
+      categorySlug: row.category_slug ?? null,
+      categoryName: row.category_name ?? null,
+      matchedProblem: row.matched_problem,
+      matchedStrength: num(row.matched_strength),
+    }));
+
+  return { results, embeddingMissing };
+}
+
+/**
+ * Cache the vector for one sentence. Fire and forget: the caller must not
+ * await it, and a failure here must never turn a good search into an error.
+ *
+ * There is no argument that identifies anybody, and there is no fourth
+ * parameter to add one to.
+ */
+export async function runStoreQueryEmbedding(
+  exec: Executor,
+  query: string,
+  vector: string,
+  model: string,
+): Promise<void> {
+  await exec.query(STORE_QUERY_EMBEDDING_SQL, [query, vector, model]);
+}
+
+/** Record that a cached vector was used. Fire and forget, same as above. */
+export async function runTouchQueryEmbedding(exec: Executor, query: string): Promise<void> {
+  await exec.query(TOUCH_QUERY_EMBEDDING_SQL, [query]);
 }
 
 export async function runHome(exec: Executor, topLimit = 6, foundLimit = 3): Promise<HomeData> {

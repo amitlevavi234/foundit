@@ -21,7 +21,13 @@ import {
   toSearchConstraints,
   type ReadConstraint,
 } from '@/lib/constraints';
-import { logSearchEvent, searchToolsDetailed } from '@/lib/db';
+import {
+  logSearchEvent,
+  searchToolsDetailed,
+  storeQueryEmbedding,
+  touchQueryEmbedding,
+} from '@/lib/db';
+import { embedQuery } from '@/lib/embeddings';
 import { clarifier, matchBand, matchedProblemOf } from '@/lib/results';
 import { MAX_QUERY_LENGTH, QueryTooLongError } from '@/lib/sql';
 import type { ToolResultDetail } from '@/lib/types';
@@ -211,7 +217,7 @@ function Loading() {
           Matching against the catalogue…
         </span>
         <span className="faint" style={{ fontSize: 'var(--t-meta)' }}>
-          Read your request · ordering by text match
+          Read your request · ordering by words and meaning
         </span>
       </div>
       <SkeletonGrid />
@@ -244,15 +250,52 @@ async function Answer({
   // quietly let it through a limit the screen has already promised.
   let tooLong = query.length > MAX_QUERY_LENGTH;
 
+  /* --- the vector leg, and what it costs -------------------------------
+   *
+   * The search below runs with no vector argument, which means "look in the
+   * cache yourself". Almost always that is the whole of it: the sentence has
+   * been typed before, the database finds the vector on a primary key, the
+   * hybrid search runs, and the page is ONE round trip — which is the phase's
+   * efficiency promise and the reason the flag exists rather than a separate
+   * "is it cached?" question asked first.
+   *
+   * When it is not cached, the answer we already have is the Phase 2 answer —
+   * correct, filtered, and perfectly renderable. So the cost of a miss is one
+   * embedding call and one more search, and nothing about the failure of
+   * either is visible to the person reading the page: `embedQuery` returns
+   * null rather than throwing when the key is absent, the provider is down,
+   * the call times out or the response is malformed, and the text-only results
+   * stand.
+   *
+   * The store and the touch are both fire-and-forget, after the response.
+   */
+  let embeddingMissing = false;
+  /** True when the rows below were ranked with meaning as well as words. */
+  let usedVector = false;
   const startedAt = performance.now();
   try {
     if (!tooLong) {
-      results = await searchToolsDetailed(
-        searchText,
-        toSearchConstraints(constraints),
-        RESULT_LIMIT,
-        category,
-      );
+      const filters = toSearchConstraints(constraints);
+      let answer = await searchToolsDetailed(searchText, filters, RESULT_LIMIT, category);
+      results = answer.results;
+      embeddingMissing = answer.embeddingMissing;
+      usedVector = !embeddingMissing && searchText !== '';
+
+      if (embeddingMissing) {
+        const embedded = await embedQuery(searchText);
+        if (embedded) {
+          answer = await searchToolsDetailed(
+            searchText,
+            filters,
+            RESULT_LIMIT,
+            category,
+            embedded.vector,
+          );
+          results = answer.results;
+          usedVector = true;
+          after(() => storeQueryEmbedding(searchText, embedded.vector, embedded.model));
+        }
+      }
     }
   } catch (error) {
     if (error instanceof QueryTooLongError) {
@@ -265,6 +308,12 @@ async function Answer({
 
   if (!tooLong) {
     const top = results[0];
+
+    // A cache hit that was used. Recorded for eviction and nothing else, after
+    // the page has gone out, because search is STABLE and cannot write.
+    if (!embeddingMissing && searchText !== '') {
+      after(() => touchQueryEmbedding(searchText));
+    }
     // After the response has gone out, never before it. Nothing identifying is
     // passed, because there is nothing to pass: the event has no user field
     // and `public.search_events` has no user column.
@@ -428,10 +477,24 @@ async function Answer({
                 best rated first
               </strong>
             </>
-          ) : (
+          ) : usedVector ? (
             /* "Sorted by best match" is the same claim in smaller type. The
-               order is real and it is the database's, but what it ranks is
-               text overlap, so that is what it is called. */
+               order is real and it is the database's, and since Phase 3 it
+               ranks two different things: where the words turned up, and how
+               close the sentence is in meaning to a problem the tool lists.
+               Neither is a measure of fit, so neither is called one. */
+            <>
+              Ordered by{' '}
+              <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
+                words and meaning
+              </strong>{' '}
+              — where your words turned up and what each listing is about, not how well anything
+              fits
+            </>
+          ) : (
+            /* No vector for this sentence — the model was unreachable, or there
+               is no key. The order is the words alone, and the page says so
+               rather than claiming a leg that did not run. */
             <>
               Ordered by{' '}
               <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>

@@ -107,6 +107,32 @@ permission tests exist to catch.
 `db/apply.sh` does the same thing through `docker exec` and needs the database
 to be a container on the same machine. Keep it for that case.
 
+## Filling the embeddings
+
+```bash
+node --env-file=.env.local scripts/embed.mjs
+node --env-file=.env.local scripts/embed.mjs --dry-run   # count the work, call nothing
+```
+
+Every problem statement on a published tool gets a 512-dimension vector from
+`text-embedding-3-small`, stored as `halfvec(512)`. The job is idempotent: a
+second run embeds nothing, because a row is only work when it has never been
+embedded, when its statement changed after it was embedded, or when it was
+embedded by a model `public.embedding_model()` no longer names.
+
+It connects as `foundit_app`, like everything else this application runs, and
+writes through `public.store_problem_embedding` — a security-definer function
+that can set three columns and nothing else. A batch job has no identity and
+must not invent one by setting a request claim.
+
+`--env-file` is how the key reaches it. **`EMBEDDINGS_API_KEY` lives in
+`.env.local` and must never be echoed, printed, `cat`-ed or `source`-d.** If you
+need to know it is there, print its length.
+
+Search needs no separate warming: the query vector for a sentence is cached in
+`public.query_embeddings` the first time anybody searches for it, and the eval
+harness fills that cache for its own 60 queries before it measures.
+
 ## Running the search evaluation
 
 ```bash

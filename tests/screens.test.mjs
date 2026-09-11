@@ -44,6 +44,9 @@ function fakeExecutor(rows = []) {
 }
 
 const DETAIL_ROW = {
+  // Every row of SEARCH_DETAILED_SQL carries the flag, because the flag is the
+  // one row the statement is anchored on.
+  embedding_missing: false,
   tool_id: '11',
   slug: 'splitwise',
   name: 'Splitwise',
@@ -155,7 +158,10 @@ const TOOL_ROW = {
 
 test('the results screen is one round trip, however decorated the card is', async () => {
   const exec = fakeExecutor([DETAIL_ROW]);
-  const results = await runSearchDetailed(exec, 'split expenses with friends while travelling');
+  const { results, embeddingMissing } = await runSearchDetailed(
+    exec,
+    'split expenses with friends while travelling',
+  );
 
   assert.equal(exec.calls.length, 1, 'a search must issue exactly one query');
   assert.equal(exec.calls[0].text, SEARCH_DETAILED_SQL);
@@ -165,6 +171,40 @@ test('the results screen is one round trip, however decorated the card is', asyn
   assert.equal(results[0].categoryName, 'Money');
   assert.equal(results[0].flags[0], 'has_free_tier');
   assert.ok(results[0].matchedProblem);
+  // The vector was already cached, so this search is the whole of the page.
+  assert.equal(embeddingMissing, false);
+});
+
+test('a cached query vector is one round trip; a missing one is reported, not fetched here', async () => {
+  // The data layer never calls the embedding API. It reports that a vector is
+  // missing and the screen decides what to do about it, which is what keeps
+  // lib/embeddings.ts the only file in the codebase that opens a socket.
+  const exec = fakeExecutor([{ ...DETAIL_ROW, embedding_missing: true }]);
+  const { results, embeddingMissing } = await runSearchDetailed(exec, 'a sentence nobody typed yet');
+
+  assert.equal(exec.calls.length, 1, 'still one statement — the flag rides along');
+  assert.equal(embeddingMissing, true);
+  assert.equal(results.length, 1, 'the text-only answer is a real answer');
+  assert.equal(exec.calls[0].values[8], null, 'no vector was supplied, so the cache was consulted');
+});
+
+test('a search that matched nothing still says whether a vector is missing', async () => {
+  // The zero-result case is the one the flag matters most in: a sentence that
+  // shares no vocabulary with the catalogue is exactly what the vector leg
+  // exists for. SEARCH_DETAILED_SQL is anchored on the flag's row for this.
+  const exec = fakeExecutor([{ embedding_missing: true, tool_id: null }]);
+  const { results, embeddingMissing } = await runSearchDetailed(exec, 'something nothing matches');
+
+  assert.deepEqual(results, [], 'the flag row carries no tool, so it is not a result');
+  assert.equal(embeddingMissing, true);
+});
+
+test('a supplied vector is an argument to the same one call', async () => {
+  const exec = fakeExecutor([DETAIL_ROW]);
+  await runSearchDetailed(exec, 'expense splitter', {}, 12, null, '[0.1,0.2]');
+
+  assert.equal(exec.calls.length, 1, 'the second search is still one round trip');
+  assert.equal(exec.calls[0].values[8], '[0.1,0.2]');
 });
 
 test('the homepage is one round trip for the strip, the cards and the totals', async () => {
@@ -234,6 +274,8 @@ test('narrowing to a category widens the window rather than adding a query', asy
   assert.equal(narrowed[5], CATEGORY_WINDOW, 'narrowing cuts a full ranked list, not a short one');
   assert.equal(narrowed[6], 'money');
   assert.equal(narrowed[7], 12);
+  assert.equal(plain[8], null, 'no vector unless the caller has one');
+  assert.equal(narrowed[8], null);
 });
 
 test('constraints are arguments to the one call, never a second one', async () => {
@@ -285,10 +327,13 @@ test('the match band is a fact about where it matched, never a rescaled score', 
   assert.equal(matchBand('problem').tone, 'one');
   assert.equal(matchBand('tool').tone, 'one');
   assert.equal(matchBand('name').tone, 'name');
+  // Nothing the person typed appears in the listing at all: the quietest tone
+  // there is, and a different claim from a name that merely looks similar.
+  assert.equal(matchBand('vector').tone, 'name');
   // No sentence was typed, so there is nothing to claim about relevance.
   assert.equal(matchBand('browse'), null);
 
-  for (const source of ['both', 'problem', 'tool', 'name']) {
+  for (const source of ['both', 'problem', 'tool', 'name', 'vector']) {
     const band = matchBand(source);
     assert.ok(!/\d/.test(band.label), `"${band.label}" must not carry a number`);
     assert.ok(!band.label.includes('%'));
@@ -303,7 +348,7 @@ test('and it grades nothing: `match_source` says where, so the words say where',
   // quality nothing measured. The band may name a place and nothing else.
   const GRADED = /\b(strong|weak|good|best|poor|excellent|high|low|close|top)\b/i;
 
-  for (const source of ['both', 'problem', 'tool', 'name']) {
+  for (const source of ['both', 'problem', 'tool', 'name', 'vector']) {
     const band = matchBand(source);
     assert.doesNotMatch(band.label, GRADED, `the band label grades the result: "${band.label}"`);
     assert.doesNotMatch(band.note, GRADED, `the band note grades the result: "${band.note}"`);
@@ -313,6 +358,11 @@ test('and it grades nothing: `match_source` says where, so the words say where',
   // 'name' is the one source that says something limiting rather than
   // grading, and it is allowed to: it is a fact about what did not match.
   assert.match(matchBand('name').label, /name only/);
+
+  // Likewise 'vector': it says what did NOT match, which is the honest thing
+  // to say about a row no word of the query appears in.
+  assert.match(matchBand('vector').label, /meaning/);
+  assert.match(matchBand('vector').note, /Nothing you typed/);
 });
 
 test('a problem statement is only shown when it is the one that matched', () => {

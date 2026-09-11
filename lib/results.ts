@@ -79,6 +79,18 @@ export function matchBand(source: MatchSource): MatchBand | null {
         note: 'Only the name looks like what you typed.',
         tone: 'name',
       };
+    // The vector leg, added in db/migrations/0004_vectors.sql. Nothing the
+    // person typed appears in this listing anywhere; it is here because the
+    // sentence is close in meaning to a problem the tool says it solves. That
+    // is a weaker claim than a word actually turning up, and it gets the same
+    // quiet tone as a name-only rescue — but it is a different claim, so it
+    // gets its own words rather than being folded into one of the others.
+    case 'vector':
+      return {
+        label: 'Matched: meaning',
+        note: 'Nothing you typed appears in this listing — it was matched by meaning, not by words.',
+        tone: 'name',
+      };
     // 'browse' is not a match at all: no sentence was typed, so there is
     // nothing that turned up anywhere.
     default:

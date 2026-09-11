@@ -8,17 +8,19 @@ import {
   runLogSearchEvent,
   runSearch,
   runSearchDetailed,
+  runStoreQueryEmbedding,
   runToolPage,
   runTop,
+  runTouchQueryEmbedding,
 } from './sql';
 import type {
   BrowseData,
   HomeData,
   SearchConstraints,
+  SearchDetailedResult,
   SearchEvent,
   ToolPageData,
   ToolResult,
-  ToolResultDetail,
   TopData,
   TopRanking,
 } from './types';
@@ -142,14 +144,51 @@ export async function searchTools(
  * clarifier's answers do. `search_tools` has no category argument, so that
  * narrowing happens in SQL around it, over a wider window; nothing is filtered
  * or reordered here.
+ *
+ * `embedding` is the query vector when the caller has one. Left out, the
+ * database looks in its own cache, and the returned `embeddingMissing` says
+ * whether it found one — so a repeated search is a single round trip and a
+ * first-ever sentence costs one more plus an API call.
  */
 export async function searchToolsDetailed(
   query: string,
   constraints: SearchConstraints = {},
   limit = 12,
   category: string | null = null,
-): Promise<ToolResultDetail[]> {
-  return runSearchDetailed(getPool(), query, constraints, limit, category);
+  embedding: string | null = null,
+): Promise<SearchDetailedResult> {
+  return runSearchDetailed(getPool(), query, constraints, limit, category, embedding);
+}
+
+/**
+ * Keep the vector for a sentence, so the next person who types it costs
+ * nothing.
+ *
+ * Fire and forget, exactly like `logSearchEvent`: call it after the response
+ * has gone out and do not await it. A cache that failed to fill is a slower
+ * search later, never an error now.
+ *
+ * `public.query_embeddings` has no user column and this call has no argument
+ * that could become one.
+ */
+export function storeQueryEmbedding(query: string, vector: string, model: string): void {
+  void runStoreQueryEmbedding(getPool(), query, vector, model).catch(() => {
+    // Silent for the same reason logSearchEvent is: the only thing worth
+    // logging here is the query text, and the query text is exactly what must
+    // never appear in a log line beside a timestamp and a request.
+  });
+}
+
+/**
+ * Record that a cached vector was used, for eviction. Fire and forget.
+ *
+ * This is a separate call rather than something search does, because
+ * `search_tools` is STABLE and cannot write — and because a visitor must never
+ * wait on bookkeeping. It runs in the same `after()` block as the search-event
+ * log, once the page has gone out.
+ */
+export function touchQueryEmbedding(query: string): void {
+  void runTouchQueryEmbedding(getPool(), query).catch(() => {});
 }
 
 /** Everything the homepage draws. One round trip. */

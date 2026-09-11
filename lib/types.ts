@@ -27,10 +27,15 @@ export type ToolFlag =
   | 'accessible';
 
 /**
- * How a row was found. 'browse' means no query was given and the row is an
- * editorial default, not a relevance judgement.
+ * How a row was found.
+ *
+ * 'browse' means no query was given and the row is an editorial default, not a
+ * relevance judgement. 'vector' means nothing the person typed appears in the
+ * listing at all and it is here because its meaning is close to one of the
+ * problems the tool lists — the leg added in db/migrations/0004_vectors.sql.
+ * Like the others it is a LOCATION, not a measure of fit.
  */
-export type MatchSource = 'tool' | 'problem' | 'both' | 'name' | 'browse';
+export type MatchSource = 'tool' | 'problem' | 'both' | 'name' | 'vector' | 'browse';
 
 /**
  * Constraints stated in the query. These are a WHERE clause, not a hint: if
@@ -83,6 +88,21 @@ export interface ToolResultDetail extends ToolResult {
   matchedProblem: string | null;
   /** `ts_rank_cd` of that statement. 0 means "nothing in it matched". */
   matchedStrength: number;
+}
+
+/**
+ * What one call to the results screen's search returns: the rows, and whether
+ * the search ran without a query vector.
+ *
+ * `embeddingMissing` is the whole of what the application learns about the
+ * embedding cache — a boolean, never a vector. True means the search that just
+ * ran was the text-only one and a vector could be fetched; the caller embeds,
+ * stores and searches once more. False means either the cache had one or the
+ * caller supplied it, and this is the final answer in a single round trip.
+ */
+export interface SearchDetailedResult {
+  results: ToolResultDetail[];
+  embeddingMissing: boolean;
 }
 
 /** A category, with how many published tools sit in it. */

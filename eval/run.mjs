@@ -513,10 +513,37 @@ export function parseBaselines(markdown) {
       queries: Number.parseInt(cell('queries'), 10),
       recallAt10: Number.parseFloat(cell('recall@10')),
       ndcgAt10: ndcgValue,
+      // Whether that row was measured WITH the vector leg. A text-only number
+      // and a hybrid number are measurements of two different searches, and
+      // comparing one against the other is how a build goes red for a reason
+      // that has nothing to do with anybody's change. Empty on rows recorded
+      // before the column existed, which is handled in pickBaseline.
+      vectors: cell('vectors').toLowerCase(),
       note: cell('what changed'),
     });
   }
   return rows;
+}
+
+/**
+ * Which recorded row this run should be compared against.
+ *
+ * A run has a mode: either every sentence had a query vector, or some did not
+ * — no key, no cache, a provider that was down. Those two produce different
+ * numbers from the same code, so the gate picks the newest row recorded in the
+ * SAME mode.
+ *
+ * When nothing matches — a baselines.md written before the column existed —
+ * it falls back to the newest row and says so. Falling back rather than
+ * skipping is deliberate: a gate that quietly turns itself off is worse than
+ * one that occasionally compares the wrong pair loudly.
+ */
+export function pickBaseline(rows, vectorsUsed) {
+  if (rows.length === 0) return null;
+  const want = vectorsUsed ? 'yes' : 'no';
+  const matching = rows.filter((r) => r.vectors === want);
+  if (matching.length > 0) return { row: matching[matching.length - 1], sameMode: true };
+  return { row: rows[rows.length - 1], sameMode: false };
 }
 
 /**
@@ -678,6 +705,118 @@ const FACTS_SQL = `
          platforms::text[] as platforms, flags::text[] as flags, languages
     from public.tools
    where slug = any($1::citext[])`;
+
+/**
+ * Which of these sentences has no cached vector. One statement, not one per
+ * query: the answer is a boolean per row and the point is to find out cheaply.
+ */
+const MISSING_EMBEDDINGS_SQL = `
+  select t as text
+    from unnest($1::text[]) as t
+   where public.query_embedding_missing(t)`;
+
+/** Put the vectors where the search will find them. One statement per batch. */
+const STORE_QUERY_EMBEDDINGS_SQL = `
+  select public.store_query_embedding(x.q, x.e::halfvec, $3::text)
+    from unnest($1::text[], $2::text[]) as x(q, e)`;
+
+/**
+ * Fill the query-embedding cache for every sentence this run is about to
+ * search with, before the session is put into read-only mode.
+ *
+ * Why this exists, and why it is not cheating.
+ *
+ * The application's path on a cache MISS is: search (text-only, told that a
+ * vector is missing), embed, store, search again with the vector. The second
+ * search is the answer the visitor sees, and it is byte for byte the answer a
+ * cache HIT produces, because both are `search_tools` with the same vector.
+ * The two differ in latency and in nothing else.
+ *
+ * So the harness warms the cache and then measures the cached path. That keeps
+ * three properties that matter more than reproducing the miss:
+ *
+ *   * the measured pass stays READ ONLY, which is structural rather than a
+ *     promise, and is what stops a benchmark writing to search_events;
+ *   * the reported latency is the latency of the shipped steady state — every
+ *     repeated query — rather than of a first-ever sentence;
+ *   * a run needs no API key once the cache is warm, so CI measures the same
+ *     number as a laptop and calls nothing.
+ *
+ * With no key and a cold cache it degrades exactly as the application does:
+ * the affected queries are searched text-only, the note says how many, and the
+ * number is honestly lower rather than absent.
+ */
+async function warmQueryCache(client, texts, redact) {
+  const summary = {
+    wanted: 0,
+    cached: 0,
+    embedded: 0,
+    /** Sentences still without a vector when the warm-up finished. */
+    missing: 0,
+    requests: 0,
+    tokens: 0,
+    note: null,
+  };
+
+  const unique = [...new Set(texts.map((t) => String(t ?? '')).filter((t) => t.trim() !== ''))];
+  if (unique.length === 0) return summary;
+
+  // Dynamic, for the same reason eval/reader.mjs is: a default run must not
+  // fail to start because a module it may not need did not load.
+  let embeddings;
+  try {
+    embeddings = await import('../lib/embeddings.ts');
+  } catch (err) {
+    summary.note = `lib/embeddings.ts did not load (${redact(err?.message ?? err)}); every query measures text-only`;
+    return summary;
+  }
+
+  const normalized = [...new Set(unique.map((t) => embeddings.normalizeQuery(t)).filter((t) => t !== ''))];
+  summary.wanted = normalized.length;
+
+  const { rows } = await client.query(MISSING_EMBEDDINGS_SQL, [normalized]);
+  const missing = rows.map((r) => r.text);
+  summary.cached = normalized.length - missing.length;
+  summary.missing = missing.length;
+  if (missing.length === 0) return summary;
+
+  if (!embeddings.embeddingsConfigured()) {
+    summary.note =
+      `${missing.length} sentence(s) have no cached vector and EMBEDDINGS_API_KEY is not set; ` +
+      'those queries measure text-only, exactly as the application would serve them';
+    return summary;
+  }
+
+  for (let i = 0; i < missing.length; i += embeddings.EMBEDDINGS_BATCH_SIZE) {
+    const batch = missing.slice(i, i + embeddings.EMBEDDINGS_BATCH_SIZE);
+    let result;
+    try {
+      result = await embeddings.embedTexts(batch);
+    } catch (err) {
+      summary.note =
+        `the embedding provider failed (${redact(err?.message ?? err)}); ` +
+        `${missing.length - summary.embedded} sentence(s) measure text-only`;
+      return summary;
+    }
+    summary.requests += 1;
+    summary.tokens += result.tokens;
+    try {
+      await client.query(STORE_QUERY_EMBEDDINGS_SQL, [batch, result.vectors, result.model]);
+    } catch (err) {
+      // A read-only role, or a role without EXECUTE on the setter. That is a
+      // legitimate way to run the harness and it is not a reason to fail:
+      // report it and measure what the cache already holds.
+      summary.note =
+        `the query-embedding cache could not be written (${redact(err?.message ?? err)}); ` +
+        `${missing.length - summary.embedded} sentence(s) measure text-only`;
+      return summary;
+    }
+    summary.embedded += batch.length;
+    summary.missing -= batch.length;
+  }
+
+  return summary;
+}
 
 /**
  * Thrown to abandon a run from inside a helper. `main` opens the pool in a
@@ -940,6 +1079,8 @@ async function main(argv) {
   }
 
   const startedAt = new Date();
+  /** What the cache warm-up did, reported and put in the JSON. */
+  let warm = { wanted: 0, cached: 0, embedded: 0, requests: 0, tokens: 0, note: null };
   let perQuery = [];
   let derivedPerQuery = null;
   const allViolations = [];
@@ -949,7 +1090,6 @@ async function main(argv) {
   try {
     try {
       client = await pool.connect();
-      await client.query('set session characteristics as transaction read only');
       await client.query(`set statement_timeout = ${opts.timeout}`);
     } catch (err) {
       process.stderr.write(`ERROR: could not connect to PostgreSQL.\n  ${redact(err.message)}\n`);
@@ -965,6 +1105,29 @@ async function main(argv) {
           '  set, once as lib/constraints.ts reads it.\n',
       );
     }
+
+    // --- The vector leg's half of the search, before anything is measured ---
+    // This is the only write the harness makes anywhere, it goes to a cache
+    // with no user column, and it happens before the session is sealed
+    // read-only rather than despite it.
+    try {
+      const texts = queries.map((q) => AUTHORED_PLAN(q).text);
+      if (derivedPlan) {
+        for (const q of queries) texts.push(derivedPlan(q).text);
+      }
+      warm = await warmQueryCache(client, texts, redact);
+      process.stdout.write(
+        `  query vectors: ${warm.cached} already cached, ${warm.embedded} embedded ` +
+          `in ${warm.requests} request(s), ${warm.tokens} prompt tokens.\n`,
+      );
+      if (warm.note) process.stdout.write(`  NOTE: ${warm.note}\n`);
+    } catch (err) {
+      process.stderr.write(`ERROR warming the query-embedding cache.\n  ${redact(err.message)}\n`);
+      return EXIT.DATABASE;
+    }
+
+    // Everything from here is measurement, and measurement does not write.
+    await client.query('set session characteristics as transaction read only');
 
     // --- Run every query, sequentially ------------------------------------
     perQuery = await runPass(client, queries, opts, AUTHORED_PLAN, redact);
@@ -1017,6 +1180,17 @@ async function main(argv) {
   }
 
   // --- Report ---------------------------------------------------------------
+  /**
+   * Did every sentence this run searched with have a query vector?
+   *
+   * This is the run's MODE, and it decides which recorded baseline it may be
+   * compared against. A run with no key measures the text-only search, which
+   * is a real and useful measurement — it is what Phase 2 recorded — but it is
+   * not the same search as a run with vectors and must not be gated against
+   * one. See pickBaseline.
+   */
+  const vectorsUsed = warm.wanted > 0 && warm.missing === 0;
+
   const overall = aggregate(perQuery);
   const slices = buildSlices(perQuery);
   const worst = [...perQuery]
@@ -1071,28 +1245,41 @@ async function main(argv) {
             '          Record this run as the Phase 2 row and future runs will be checked against it.\n',
         );
       } else {
-        const latest = rows[rows.length - 1];
+        const picked = pickBaseline(rows, vectorsUsed);
+        const latest = picked.row;
         regression = checkRegression(overall.ndcgAt10, latest);
         const sign = regression.delta >= 0 ? '+' : '';
         process.stdout.write(
           '\n' +
             renderTable(
-              ['BASELINE', 'phase', 'date', 'commit', 'nDCG@10', 'now', 'delta', 'tolerance', 'verdict'],
+              ['BASELINE', 'phase', 'date', 'commit', 'vectors', 'nDCG@10', 'now', 'delta', 'tolerance', 'verdict'],
               [[
                 '',
                 latest.phase,
                 latest.date,
                 latest.commit,
+                latest.vectors || '(not recorded)',
                 n4(latest.ndcgAt10),
                 n4(overall.ndcgAt10),
                 `${sign}${n4(regression.delta)}`,
                 n4(regression.tolerance),
                 regression.regressed ? 'REGRESSION' : 'ok',
               ]],
-              ['l', 'l', 'l', 'l', 'r', 'r', 'r', 'r', 'l'],
+              ['l', 'l', 'l', 'l', 'l', 'r', 'r', 'r', 'r', 'l'],
             ) +
             '\n',
         );
+        process.stdout.write(
+          `          this run had query vectors for ${vectorsUsed ? 'every' : 'not every'} sentence, ` +
+            `so it is compared against the newest row recorded ${vectorsUsed ? 'with' : 'without'} them.\n`,
+        );
+        if (!picked.sameMode) {
+          process.stdout.write(
+            '          NOTE: no recorded row says whether it was measured with the vector leg, so\n' +
+              '          this compared against the newest row of any kind. Add a "Vectors" column to\n' +
+              '          eval/baselines.md and the gate stops comparing two different searches.\n',
+          );
+        }
         if (regression.regressed) {
           process.stdout.write(
             `\nFAIL: nDCG@10 dropped ${n4(-regression.delta)} below the recorded baseline ` +
@@ -1120,6 +1307,8 @@ async function main(argv) {
         : null,
       overall,
       slices,
+      queryVectorCache: warm,
+      vectorsUsed,
       constraintViolations: allViolations,
       regression,
       // Null unless --read-query was passed, so the shape of a default run's

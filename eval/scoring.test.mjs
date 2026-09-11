@@ -21,7 +21,7 @@
 import {
   gain, dcg, ndcg, recall, mean, percentile,
   checkConstraints, isConstrained, aggregate, buildSlices,
-  parseGolden, parseBaselines, checkRegression, renderTable,
+  parseGolden, parseBaselines, pickBaseline, checkRegression, renderTable,
   buildReport, buildViolationReport, K,
 } from './run.mjs';
 
@@ -589,6 +589,56 @@ process.stdout.write('\nbaselines.md parsing and the regression gate\n');
       '| - | - | - | - | - | - |',
       '|  |  | 2 |  |  |  |'].join('\n'),
   ).length, 0);
+}
+
+// ---------------------------------------------------------------------------
+process.stdout.write('\nthe gate compares like with like\n');
+// ---------------------------------------------------------------------------
+{
+  // A text-only run and a hybrid run are measurements of two DIFFERENT
+  // searches. Gating one against the other turns "this machine has no
+  // EMBEDDINGS_API_KEY" into "the search got worse", which is a build failing
+  // for a reason nobody changed.
+  const md = [
+    '| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 |',
+    '| - | - | - | - | - | - | - |',
+    '| 2026-09-10 | aaa1111 | 2 | no | 60 | 0.4497 | 0.4878 |',
+    '| 2026-09-11 | bbb2222 | 3 | yes | 60 | 0.6747 | 0.7019 |',
+  ].join('\n');
+  const rows = parseBaselines(md);
+
+  check('the Vectors column is read', rows[1].vectors, 'yes');
+  check('a run with vectors is gated on the hybrid row',
+    pickBaseline(rows, true).row.commit, 'bbb2222');
+  check('a run without them is gated on the text-only row',
+    pickBaseline(rows, false).row.commit, 'aaa1111');
+  check('and both are exact matches rather than a fallback',
+    pickBaseline(rows, false).sameMode, true);
+
+  // The real point: a keyless run scores about what Phase 2 scored, and that
+  // must pass rather than read as a 0.21 collapse.
+  check('a keyless run passes against the text-only row',
+    checkRegression(0.4878, pickBaseline(rows, false).row).regressed, false);
+  check('and would have FAILED against the hybrid one',
+    checkRegression(0.4878, pickBaseline(rows, true).row).regressed, true);
+
+  // A full-text regression is still caught in either mode, which is what keeps
+  // the gate worth having on a machine with no key.
+  check('a text-only regression still fails',
+    checkRegression(0.4000, pickBaseline(rows, false).row).regressed, true);
+}
+{
+  // baselines.md written before the column existed: fall back to the newest
+  // row and say so, rather than silently switching the gate off.
+  const rows = parseBaselines([
+    '| Date | Commit | Phase | Queries | recall@10 | nDCG@10 |',
+    '| - | - | - | - | - | - |',
+    '| 2026-09-10 | aaa1111 | 2 | 60 | 0.4497 | 0.4878 |',
+  ].join('\n'));
+  check('no Vectors column means no row is in either mode', rows[0].vectors, '');
+  check('so the gate falls back to the newest row', pickBaseline(rows, true).row.commit, 'aaa1111');
+  check('and says it is not comparing like with like', pickBaseline(rows, true).sameMode, false);
+  check('an empty table has nothing to pick', pickBaseline([], true), null);
 }
 
 // ---------------------------------------------------------------------------

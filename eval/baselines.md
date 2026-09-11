@@ -9,6 +9,14 @@ numbers in it and fails the run if nDCG@10 has fallen more than 0.005 beneath
 it.** Rows left blank are treated as not yet recorded and are skipped, so the
 empty Phase 2 row costs nothing until it is filled in.
 
+**The `Vectors` column decides which row a run is compared against.** Since
+Phase 3 a run has a mode: either every sentence had a query vector, or some did
+not — no `EMBEDDINGS_API_KEY`, a cold cache, a provider that was down. Those two
+produce different numbers from the same code, so the gate picks the newest row
+recorded in the same mode. A run with no key is a text-only run and is measured
+against the text-only baseline, which is the honest comparison and is why CI can
+still catch a full-text regression without a key.
+
 ## How a row gets added
 
 1. Apply the migrations, load the seed, and run `npm run eval:baseline`.
@@ -36,10 +44,10 @@ size of the set noted.
 
 ## Recorded baselines
 
-| Date | Commit | Phase | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | What changed |
-| ---- | ------ | ----- | ------- | --------- | ------- | ------- | ------ | ----------- | ------------ |
-| 2026-09-10 | 364779b | 2 | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | **WITHDRAWN — see below.** Not a baseline. |
-| 2026-09-10 | 39569ba | 2 | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
+| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | What changed |
+| ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | ------------ |
+| 2026-09-10 | 364779b | 2 | no | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | **WITHDRAWN — see below.** Not a baseline. |
+| 2026-09-10 | 39569ba | 2 | no | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
 
 ### Phase 2, by slice
 
@@ -83,7 +91,6 @@ A number nobody can trust is worse than no number, because Phase 3 would have
 spent its effort clearing a bar that was never real. The statements are being
 rewritten from each tool's own description with the golden set unopened, and
 the baseline will be re-measured under the application role.
-|  |  | 2 |  |  |  |  |  |  |  |
 
 ## Per-slice detail
 
