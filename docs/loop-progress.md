@@ -2,7 +2,7 @@
 
 Read at the start of every tick, updated before the end of it.
 
-**Current phase:** 0b — the machine (part done); 2 and 2-UI awaiting sign-off; 3 built, awaiting review
+**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed — all three awaiting Amit's sign-off; 4 next
 **Server:** `foundit-prod`, Hetzner CX23, Falkenstein, `167.233.217.138`, Ubuntu 24.04.4
 
 ## Phase 0b — the machine
@@ -98,7 +98,7 @@ Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
 | CI | done | `.github/workflows/ci.yml`; every step extracted and run locally first |
 | Production build serves CSS | done | postbuild copies `.next/static` into standalone, matching `research/10` §6.6 |
 | **Adversarial review, first pass** | done — 9 confirmed findings, all fixed in `9be71f9` | see below |
-| **Adversarial review, second pass** | **running** | the gate |
+| **Adversarial review, second pass** | done — findings fixed in `9bfd0f6`; the owner then found what both passes missed (dead chrome links, card overflow, no way back), fixed in `b30df42` and `21b8703` | the gate |
 | Owner compares screens against artboards | waiting on Amit | |
 
 ### First review, and where each finding landed
@@ -123,7 +123,7 @@ Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
 - `research/10` §6.6's Dockerfile would fail as written (`COPY public/` when there is no `public/`).
 - The standalone server binds `0.0.0.0`; safe behind Docker's 127.0.0.1 publishing, but set `HOSTNAME=127.0.0.1` on the box anyway.
 
-## Phase 3 — vectors — **reviewed, failed, fixed; awaiting re-review and sign-off**
+## Phase 3 — vectors — **reviewed, failed, fixed, supervisor re-verified; awaiting sign-off**
 
 Baseline **nDCG@10 0.7018**, recall@10 0.6747, 0 constraint violations, 0
 zero-result queries, commit `654f29d`, measured as `foundit_app`. Recorded in
