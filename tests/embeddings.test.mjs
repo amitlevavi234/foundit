@@ -44,11 +44,14 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   EmbeddingError,
+  MAX_DOCUMENT_INPUT,
   MAX_EMBEDDING_INPUT,
   embedQuery,
   embedTexts,
   embeddingsConfigured,
+  fromFloat16Base64,
   normalizeQuery,
+  toFloat16Base64,
   toVectorLiteral,
 } from '../lib/embeddings.ts';
 
@@ -201,6 +204,67 @@ test('an empty sentence is not embedded at all', async () => {
   // No key is needed to prove this: nothing is sent, so nothing can fail.
   assert.equal(await embedQuery('   '), null);
   assert.equal(await embedQuery(''), null);
+});
+
+test('a document is capped at a different number from a query, and on purpose', () => {
+  // 200 bounds what an anonymous stranger can make the server pay for.
+  // MAX_DOCUMENT_INPUT bounds what one absurd catalogue row can cost in a
+  // batch nobody is watching. Sharing one constant between the two meant a
+  // statement longer than a tweet would have been cut to its first sentence
+  // and embedded as if that were the whole of it.
+  assert.equal(MAX_EMBEDDING_INPUT, 200);
+  assert.equal(MAX_DOCUMENT_INPUT, 2000);
+  assert.notEqual(MAX_DOCUMENT_INPUT, MAX_EMBEDDING_INPUT);
+});
+
+test('the fixture round-trips a vector through float16 without changing it', () => {
+  // db/seed/embeddings.fixture.json is what lets CI run the real hybrid search
+  // with no key. It stores float16 — exactly what a halfvec column holds — so
+  // the trip out and back must be the identity, not an approximation.
+  const values = [];
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i += 1) {
+    // Deliberately awkward numbers, and both signs. i + 1 so no entry is
+    // exactly zero: negative zero is the one value this trip does not preserve
+    // bit for bit, and it is checked on its own below.
+    values.push(Math.sin(i + 1) * (i % 7 === 0 ? -1 : 1));
+  }
+  const encoded = toFloat16Base64(values);
+  assert.equal(Buffer.from(encoded, 'base64').byteLength, EMBEDDING_DIMENSIONS * 2);
+
+  const literal = fromFloat16Base64(encoded);
+  assert.match(literal, /^\[-?\d/, 'a halfvec literal, ready to hand to PostgreSQL');
+  const back = literal.slice(1, -1).split(',').map(Number);
+  assert.equal(back.length, EMBEDDING_DIMENSIONS);
+
+  // Encoding what came back must give the identical bytes: float16 is a fixed
+  // point of this round trip even though float32 is not.
+  assert.equal(toFloat16Base64(back), encoded);
+
+  // And each value is within half a float16 step of the original.
+  for (let i = 0; i < values.length; i += 1) {
+    assert.ok(
+      Math.abs(back[i] - values[i]) < 0.001,
+      `dimension ${i} moved from ${values[i]} to ${back[i]}`,
+    );
+  }
+});
+
+test('the one value the round trip does not preserve is negative zero', () => {
+  // A halfvec literal is built by joining numbers, and String(-0) is "0", so a
+  // -0 comes back as +0. Worth knowing and worth not chasing: the two are
+  // equal under every arithmetic PostgreSQL does to them, cosine distance
+  // included, so a fixture written from one and a database filled from the
+  // other rank identically.
+  const zeros = new Array(EMBEDDING_DIMENSIONS).fill(0);
+  zeros[0] = -0;
+  const back = fromFloat16Base64(toFloat16Base64(zeros)).slice(1, -1).split(',').map(Number);
+  assert.equal(back[0], 0);
+  assert.ok(Object.is(back[0], 0) && !Object.is(back[0], -0), 'it comes back as +0');
+  assert.equal(back[0] === zeros[0], true, 'and the two are equal, which is what matters');
+});
+
+test('a fixture entry of the wrong length is refused rather than padded', () => {
+  assert.throws(() => fromFloat16Base64(toFloat16Base64([1, 2, 3])), EmbeddingError);
 });
 
 test('a batch larger than the ceiling is refused before anything is read or sent', async () => {

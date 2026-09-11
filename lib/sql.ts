@@ -224,6 +224,15 @@ export async function runLogSearchEvent(exec: Executor, event: SearchEvent): Pro
  * So the flag anchors the statement and the rows hang off it. A search with no
  * results comes back as a single row whose tool_id is null, which
  * `runSearchDetailed` drops.
+ *
+ * The flag is `search_tools`' OWN answer, read off the rows it returned, not a
+ * second question put to the cache. It used to be the second question, and
+ * that was two chances to disagree: a vector stored by another request between
+ * the two reads would have made the search and the flag describe different
+ * states of the world, and the page would have embedded a sentence that was
+ * already cached. `coalesce` evaluates left to right and stops, so
+ * `query_embedding_missing` is reached only when `bool_or` had no rows to
+ * aggregate — a search that matched nothing, where there is no answer to read.
  */
 export const SEARCH_DETAILED_SQL = `
   with q as (
@@ -269,7 +278,11 @@ export const SEARCH_DETAILED_SQL = `
      limit $8::int
   ),
   flag as (
-    select public.query_embedding_missing($1::text, $9::halfvec) as embedding_missing
+    select coalesce(
+             bool_or(r.embedding_missing),
+             public.query_embedding_missing($1::text, $9::halfvec)
+           ) as embedding_missing
+      from r
   )
   select f.embedding_missing, d.*
     from flag f

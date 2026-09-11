@@ -13,9 +13,21 @@ empty Phase 2 row costs nothing until it is filled in.
 Phase 3 a run has a mode: either every sentence had a query vector, or some did
 not — no `EMBEDDINGS_API_KEY`, a cold cache, a provider that was down. Those two
 produce different numbers from the same code, so the gate picks the newest row
-recorded in the same mode. A run with no key is a text-only run and is measured
-against the text-only baseline, which is the honest comparison and is why CI can
-still catch a full-text regression without a key.
+recorded in the same mode. A run with no key and no fixture is a text-only run
+and is measured against the text-only baseline, which is the honest comparison.
+
+**A row marked WITHDRAWN is skipped**, whatever numbers are in it. The one
+below is kept because deleting it would hide what happened, not because it is a
+baseline.
+
+**CI has no key and still measures the hybrid search.**
+`db/seed/embeddings.fixture.json` holds the 504 statement vectors and the 60
+golden query vectors as float16; `scripts/embed.mjs --from-fixture` loads the
+first and `eval/run.mjs` warms the cache from the second, both with no network
+call. Without it a keyless run measured the Phase 2 number and the gate said
+nothing at all about the vector leg — setting the leg's weight to zero left CI
+green, which an adversarial review demonstrated by doing it. With it, the same
+change fails the gate by 0.18.
 
 ## How a row gets added
 
@@ -242,13 +254,16 @@ Three things that curve says:
 
 ### Known weaknesses of this number
 
-- **It is reproducible to about a ten-thousandth, not exactly.** Emptying the
-  query cache and re-fetching the same 60 embeddings moved the headline from
-  0.7019 to 0.7020. The provider's float32 output rounds into `halfvec`'s
-  float16 differently between calls, two tools swap places on a tie, and the
-  number moves in the fourth decimal. The 0.005 tolerance was chosen for ties
-  in `ts_rank` and covers this comfortably; it is worth knowing that the
-  instrument now has a floor of noise it did not have in Phase 2.
+- **It was reproducible to about a ten-thousandth, not exactly — and now it is
+  exact.** Emptying the query cache and re-fetching the same 60 embeddings
+  moved the headline from 0.7019 to 0.7020: the provider's float32 output
+  rounds into `halfvec`'s float16 differently between calls, two tools swap
+  places on a tie, and the number moves in the fourth decimal.
+  `db/seed/embeddings.fixture.json` removed that. Every run — laptop or CI, key
+  or no key — now warms the cache from the same recorded float16 vectors, so
+  the number is the same number. It settled at **0.7018**, a ten-thousandth
+  below the first recording, and the difference is that rounding and nothing
+  else.
 
 - **Every query now returns something, and some of those somethings are
   nothing much.** The vector leg ranks every eligible tool that has an

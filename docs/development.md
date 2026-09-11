@@ -67,12 +67,25 @@ load-bearing rather than tidiness:
 | --- | --- | --- | --- |
 | `DATABASE_URL` | `foundit_app` | nothing, no `BYPASSRLS` | the web app, `eval/run.mjs` |
 | `DATABASE_URL_OWNER` | `foundit_owner` | the schema | `db/apply.mjs` only |
+| `DATABASE_URL_EMBED` | `foundit_embed` | nothing, two function grants | `scripts/embed.mjs` only |
 
-**There is deliberately no fallback between them.** If the app could quietly
-reach for the owner connection when its own was missing, every row-level
-security policy in the schema would stop applying on the day someone's
-environment was misconfigured — and nothing would look broken. A missing
-variable must be a loud failure instead.
+**There is deliberately no fallback between any of them.** If the app could
+quietly reach for the owner connection when its own was missing, every
+row-level security policy in the schema would stop applying on the day
+someone's environment was misconfigured — and nothing would look broken. A
+missing variable must be a loud failure instead. Each of the three scripts also
+refuses a connection string whose *role name* is not its own, so a copy-paste
+into the wrong variable stops rather than silently working.
+
+`foundit_embed` is the newest of the three and it exists for a specific
+reason. `public.store_problem_embedding` writes a vector onto a problem
+statement; `public.query_vector_ranks` says which statement's vector is nearest
+a cached query. **A role holding both can read another visitor's cached query
+embedding out one sign bit at a time**, by planting chosen vectors and reading
+back the order — an adversarial review did exactly that, recovering 16 of 16
+sign bits as `foundit_app`. So the write half moved to a role of its own, the
+application lost it, and no role has both. `db/migrations/0005_embed_role.sql`
+has the long version; `db/test/vectors_test.sql` proves the separation.
 
 The eval harness connects as `foundit_app` for the same reason: measured as the
 owner, latency reads about four times faster than a visitor will ever see it.
@@ -111,7 +124,9 @@ to be a container on the same machine. Keep it for that case.
 
 ```bash
 node --env-file=.env.local scripts/embed.mjs
-node --env-file=.env.local scripts/embed.mjs --dry-run   # count the work, call nothing
+node --env-file=.env.local scripts/embed.mjs --dry-run        # count the work, call nothing
+node --env-file=.env.local scripts/embed.mjs --from-fixture   # load the recorded vectors, call nothing
+node --env-file=.env.local scripts/embed.mjs --write-fixture  # re-record them (costs one set of API calls)
 ```
 
 Every problem statement on a published tool gets a 512-dimension vector from
@@ -120,10 +135,21 @@ second run embeds nothing, because a row is only work when it has never been
 embedded, when its statement changed after it was embedded, or when it was
 embedded by a model `public.embedding_model()` no longer names.
 
-It connects as `foundit_app`, like everything else this application runs, and
-writes through `public.store_problem_embedding` — a security-definer function
-that can set three columns and nothing else. A batch job has no identity and
-must not invent one by setting a request claim.
+It connects as **`foundit_embed`**, from `DATABASE_URL_EMBED`, and refuses any
+other role. It reads its queue through `public.problem_embedding_work` and
+writes through `public.store_problem_embedding` — two security-definer
+functions, and the only two things that role may call. A batch job has no
+identity and must not invent one by setting a request claim.
+
+`db/seed/embeddings.fixture.json` is the recorded output of one `--write-fixture`
+run: the catalogue's statement vectors keyed by the SHA-256 of the statement,
+and the golden set's query vectors keyed by the normalised query. `--from-fixture`
+loads them with no network call, and `eval/run.mjs` warms the query cache from
+the same file when no key is set. **That is how CI runs the real hybrid search
+with no key and no spend** — without it, a keyless run measures the Phase 2
+search and gates nothing about the vector leg. An entry whose statement no
+longer hashes to its key is skipped and counted out loud, so a stale fixture
+degrades noisily rather than silently.
 
 `--env-file` is how the key reaches it. **`EMBEDDINGS_API_KEY` lives in
 `.env.local` and must never be echoed, printed, `cat`-ed or `source`-d.** If you

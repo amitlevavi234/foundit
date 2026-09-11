@@ -284,15 +284,32 @@ async function Answer({
       if (embeddingMissing) {
         const embedded = await embedQuery(searchText);
         if (embedded) {
-          answer = await searchToolsDetailed(
-            searchText,
-            filters,
-            RESULT_LIMIT,
-            category,
-            embedded.vector,
-          );
-          results = answer.results;
-          usedVector = true;
+          // The second search can fail on its own — a timeout, a dropped
+          // connection, the pool exhausted — and if it does, the text-only
+          // answer already in `results` is a perfectly good page. Losing it and
+          // showing an error instead would be the vector leg taking the search
+          // down, which is the one thing this phase promised it would not do.
+          try {
+            answer = await searchToolsDetailed(
+              searchText,
+              filters,
+              RESULT_LIMIT,
+              category,
+              embedded.vector,
+            );
+            results = answer.results;
+            usedVector = true;
+          } catch (error) {
+            if (error instanceof QueryTooLongError) throw error;
+            // The reason, and nothing else. No query text: this is the endpoint
+            // that collects health, money and relationship trouble, and a log
+            // line already carries a timestamp and a request.
+            console.error(
+              `the search with a query vector failed (${
+                (error as { code?: string } | null)?.code ?? 'unknown'
+              }); the text-only results were served instead`,
+            );
+          }
           after(() => storeQueryEmbedding(searchText, embedded.vector, embedded.model));
         }
       }

@@ -274,3 +274,29 @@ stack one per line on a phone.
 `tests/markup.test.mjs` holds all thirteen to the same three rules — the route exists, it
 renders `UnwrittenPage`, and it is `noindex` — so one of them cannot quietly grow policy
 nobody agreed to.
+
+## 15. The typed sentence now leaves our server (added 11 September 2026)
+
+Phase 3 sends the sentence somebody types to **OpenAI**, at
+`https://api.openai.com/v1/embeddings`, to turn it into a vector. Nothing else
+goes with it — not who asked, not their address, not what the catalogue holds.
+One call, one hardcoded URL, from one file (`lib/embeddings.ts`), and the
+vector is cached so the same sentence is sent once rather than once per person.
+
+This is a change of kind, not of degree, and it has one consequence that is not
+optional:
+
+**The privacy notice must name the provider and the transfer before a real
+person uses Foundit.** `research/13-required-pages-and-notices.md` §6.3 already
+says so — a sub-processor who receives the content of a search is a
+sub-processor who has to be named, and for an EU visitor the transfer needs its
+basis stated. `/privacy` is currently an `UnwrittenPage` that deliberately
+claims nothing (§14), which is the honest state while nobody is using the site;
+it is not the honest state on the day one person does.
+
+The rest of §12's distinction still holds and is worth restating beside this
+one: **the browser opening a link is not our server fetching one.** We still
+never fetch a URL a maker submitted. What changed is that we now send *the
+visitor's own words* to a third party, which is a different fact about a
+different piece of data, and it belongs on the privacy page rather than in a
+footnote about outbound links.

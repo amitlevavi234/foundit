@@ -33,7 +33,7 @@
 // ===========================================================================
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
@@ -73,6 +73,8 @@ const EVAL_DIR = path.join(ROOT, 'eval');
 const GOLDEN_PATH = path.join(EVAL_DIR, 'golden.jsonl');
 const BASELINES_PATH = path.join(EVAL_DIR, 'baselines.md');
 const RESULTS_DIR = path.join(EVAL_DIR, 'results');
+/** The recorded vectors that let a keyless run measure the real hybrid search. */
+const FIXTURE_PATH = path.join(ROOT, 'db', 'seed', 'embeddings.fixture.json');
 
 export const EXIT = {
   OK: 0,
@@ -506,6 +508,15 @@ export function parseBaselines(markdown) {
     const ndcgValue = Number.parseFloat(cell('ndcg@10'));
     if (!Number.isFinite(ndcgValue)) continue; // template / not yet recorded
 
+    // A row marked WITHDRAWN is not a baseline. eval/baselines.md already
+    // holds one — a Phase 2 number measured against a corpus written to be
+    // found, through a connection that bypassed row-level security — and it is
+    // kept because deleting it would hide what happened. It sits ABOVE the row
+    // that replaced it, so today it is harmless; the day somebody withdraws the
+    // newest row, this is what stops the gate quietly adopting a number the
+    // file says in bold is not one.
+    if (cells.some((c) => /withdrawn/i.test(c))) continue;
+
     rows.push({
       date: cell('date') || '(no date)',
       commit: cell('commit') || '(no commit)',
@@ -746,10 +757,42 @@ const STORE_QUERY_EMBEDDINGS_SQL = `
  * the affected queries are searched text-only, the note says how many, and the
  * number is honestly lower rather than absent.
  */
+/**
+ * The recorded query vectors, or an empty map.
+ *
+ * db/seed/embeddings.fixture.json is what makes a keyless run measure the REAL
+ * hybrid search. Without it, a run with no key measures the Phase 2 search —
+ * which is a legitimate number, and is exactly why it gates nothing about the
+ * vector leg: set the leg's weight to zero and a keyless CI stays green. An
+ * adversarial review made that point by doing it.
+ *
+ * It is read before the API is, so a laptop with a key and a runner without
+ * one produce the same number from the same recorded vectors rather than two
+ * numbers a ten-thousandth apart.
+ */
+function fixtureQueryVectors(embeddings) {
+  try {
+    const parsed = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
+    if (parsed?.schema !== 'foundit-embeddings/1') return {};
+    const out = {};
+    for (const [key, encoded] of Object.entries(parsed.queries ?? {})) {
+      out[key] = embeddings.fromFloat16Base64(encoded);
+    }
+    return out;
+  } catch {
+    // No fixture, or one this version cannot read. Not an error: the API path
+    // below still works, and a run with neither says so and measures
+    // text-only.
+    return {};
+  }
+}
+
 async function warmQueryCache(client, texts, redact) {
   const summary = {
     wanted: 0,
     cached: 0,
+    /** Loaded from db/seed/embeddings.fixture.json — no network, no spend. */
+    fromFixture: 0,
     embedded: 0,
     /** Sentences still without a vector when the warm-up finished. */
     missing: 0,
@@ -775,15 +818,38 @@ async function warmQueryCache(client, texts, redact) {
   summary.wanted = normalized.length;
 
   const { rows } = await client.query(MISSING_EMBEDDINGS_SQL, [normalized]);
-  const missing = rows.map((r) => r.text);
+  let missing = rows.map((r) => r.text);
   summary.cached = normalized.length - missing.length;
   summary.missing = missing.length;
   if (missing.length === 0) return summary;
 
+  // --- the recorded vectors first: free, offline, and the same everywhere ---
+  const recorded = fixtureQueryVectors(embeddings);
+  const have = missing.filter((t) => recorded[t] !== undefined);
+  if (have.length > 0) {
+    try {
+      await client.query(STORE_QUERY_EMBEDDINGS_SQL, [
+        have,
+        have.map((t) => recorded[t]),
+        // The fixture records the model it was written from; a mismatch is
+        // refused by store_query_embedding rather than mixed in.
+        JSON.parse(readFileSync(FIXTURE_PATH, 'utf8')).model,
+      ]);
+      summary.fromFixture = have.length;
+      summary.missing -= have.length;
+      missing = missing.filter((t) => recorded[t] === undefined);
+    } catch (err) {
+      summary.note = `the fixture could not be loaded (${redact(err?.message ?? err)})`;
+      missing = missing.filter((t) => recorded[t] === undefined);
+    }
+  }
+  if (missing.length === 0) return summary;
+
   if (!embeddings.embeddingsConfigured()) {
     summary.note =
-      `${missing.length} sentence(s) have no cached vector and EMBEDDINGS_API_KEY is not set; ` +
-      'those queries measure text-only, exactly as the application would serve them';
+      `${missing.length} sentence(s) are neither cached nor in the fixture, and ` +
+      'EMBEDDINGS_API_KEY is not set; those queries measure text-only, exactly as the ' +
+      'application would serve them';
     return summary;
   }
 
@@ -1117,8 +1183,8 @@ async function main(argv) {
       }
       warm = await warmQueryCache(client, texts, redact);
       process.stdout.write(
-        `  query vectors: ${warm.cached} already cached, ${warm.embedded} embedded ` +
-          `in ${warm.requests} request(s), ${warm.tokens} prompt tokens.\n`,
+        `  query vectors: ${warm.cached} already cached, ${warm.fromFixture} from the fixture, ` +
+          `${warm.embedded} embedded in ${warm.requests} request(s), ${warm.tokens} prompt tokens.\n`,
       );
       if (warm.note) process.stdout.write(`  NOTE: ${warm.note}\n`);
     } catch (err) {

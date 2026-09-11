@@ -151,9 +151,17 @@ test('and it sends the model, the length, and the capped sentence — nothing el
   // `capped` is the input list after MAX_EMBEDDING_INPUT has been applied to
   // every entry. The raw argument must not be what goes out.
   assert.match(body[1], /input:\s*capped/, 'the capped text is sent, not the caller’s string');
+  // `capped` is the inputs with a character ceiling applied to every one. The
+  // ceiling defaults to the QUERY cap — an anonymous endpoint's ceiling — and
+  // a caller may raise it only to the separate document cap.
   assert.match(
     source,
-    /const capped = inputs\.map\([\s\S]*?MAX_EMBEDDING_INPUT/,
+    /const limit = options\.cap \?\? MAX_EMBEDDING_INPUT;/,
+    'the default ceiling is the query cap, so a caller that forgets gets the strict one',
+  );
+  assert.match(
+    source,
+    /const capped = inputs\.map\([\s\S]*?slice\(0, limit\)/,
     'and `capped` must be exactly that',
   );
 
@@ -199,6 +207,32 @@ test('no client component pulls the embedder — or the key — into a browser b
     );
   }
   assert.ok(!/import ['"]server-only['"]/.test(read(join(ROOT, 'lib', 'embeddings.ts'))));
+});
+
+test('the application never reaches for the embedding job’s write', () => {
+  // public.store_problem_embedding writes a vector onto a problem statement.
+  // public.query_vector_ranks says which statement's vector is nearest a
+  // cached query. A role holding both reads the query cache out one sign bit
+  // at a time — an adversarial review recovered 16 of 16 as foundit_app — so
+  // 0005_embed_role.sql revoked the first from the application role and gave
+  // it to foundit_embed alone. The database refuses the call; this stops the
+  // call being written in the first place, in the half of the codebase that
+  // connects as foundit_app.
+  //
+  // scripts/embed.mjs is deliberately not in SOURCES: it is the job, it
+  // connects as foundit_embed, and it is the one thing that may say this.
+  for (const path of SOURCES) {
+    assert.doesNotMatch(
+      read(path),
+      /store_problem_embedding|problem_embedding_work/,
+      `${rel(path)} calls a function that belongs to foundit_embed alone`,
+    );
+  }
+
+  // And the connection string for that role appears nowhere in the
+  // application either — same rule as DATABASE_URL_OWNER.
+  const leaks = SOURCES.filter((path) => read(path).includes('DATABASE_URL_EMBED')).map(rel);
+  assert.deepEqual(leaks, [], 'the application connects as foundit_app and never as the embedder');
 });
 
 test('no embedding column is ever selected into application memory', () => {

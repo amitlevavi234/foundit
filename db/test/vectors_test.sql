@@ -294,6 +294,53 @@ begin
 end
 $$;
 
+-- --- the two guards 0005 added to the setter ------------------------------
+do $$
+begin
+  perform pg_temp.be(null);
+
+  -- A query over the cap is REFUSED, not truncated. normalize_query caps at
+  -- 200 with left(), so two sentences sharing a 200-character prefix would
+  -- otherwise normalise to the same key and the second would be served the
+  -- first one's vector, silently, for as long as the row lived.
+  begin
+    perform public.store_query_embedding(repeat('a', 201), pg_temp.unit(3),
+                                         public.embedding_model());
+    perform pg_temp.fail('a 201-character query was cached; two sentences sharing a '
+                      || '200-character prefix would share a vector');
+  exception when string_data_right_truncation then null;
+  end;
+
+  -- A zero vector has no direction: cosine distance to it is NaN, the ordering
+  -- collapses to the tie break, and the search looks like it is working while
+  -- returning the catalogue in id order. Cached, that is served to everybody
+  -- who types the same sentence until the row ages out.
+  begin
+    perform public.store_query_embedding(
+      'a sentence with no direction',
+      ('[' || repeat('0,', 511) || '0]')::halfvec(512),
+      public.embedding_model());
+    perform pg_temp.fail('a zero vector was cached');
+  exception when invalid_parameter_value then null;
+  end;
+end
+$$;
+
+-- Neither refusal left anything behind, and the 200-character one in
+-- particular must not have written a truncated key.
+reset role;
+do $$
+declare n integer;
+begin
+  select count(*) into n from public.query_embeddings
+   where query_norm = repeat('a', 200) or query_norm = 'a sentence with no direction';
+  if n > 0 then
+    perform pg_temp.fail(n || ' row(s) were cached by a call that was supposed to raise');
+  end if;
+end
+$$;
+set role foundit_app;
+
 -- ===========================================================================
 -- 3. THE ONE THAT MATTERS MOST.
 --
@@ -484,19 +531,32 @@ end
 $$;
 
 -- ===========================================================================
--- 6. The embedding job's write, as the job makes it.
+-- 6. THE ORACLE, AND THE TWO ROLES THAT CLOSE IT.
 --
---    foundit_app cannot update tool_problems — the policy from 0001 requires
---    the caller to own the listing and a batch job has no identity — so the
---    definer function is the only door, and it may set three columns and no
---    others.
+--    0004 gave foundit_app EXECUTE on store_problem_embedding. Row-level
+--    security refuses that write directly — tool_problems_write requires the
+--    caller to own the listing — and the definer function handed back exactly
+--    what the policy had refused, over every row in the table.
+--
+--    That is a READ hole, not a write one. query_vector_ranks will rank any
+--    candidate set against the vector cached for any sentence and return the
+--    ORDER. Plant a chosen vector on one statement and its negation on
+--    another, ask for the ranking, and the answer is one bit of the cached
+--    vector. An adversarial review recovered 16 of 16 sign bits of somebody
+--    else's search this way, holding no grant on query_embeddings at all.
+--
+--    0005 split the two powers between two roles. This section proves the
+--    split from both sides, because a separation that only holds in one
+--    direction is not one.
 -- ===========================================================================
+
+-- --- foundit_app has the READ half and must not have the WRITE half --------
 do $$
-declare v_id bigint; v_statement text; r record;
+declare v_id bigint;
 begin
   perform pg_temp.be(null);
 
-  select tp.id, tp.statement into v_id, v_statement
+  select tp.id into v_id
     from public.tool_problems tp
     join public.tools t on t.id = tp.tool_id and t.status = 'published'
    order by tp.id
@@ -505,27 +565,154 @@ begin
     perform pg_temp.fail('the seed has no published problem statements to embed');
   end if;
 
+  -- Directly: refused by the policy, which affects zero rows rather than
+  -- raising, so the row count is the test.
   begin
     update public.tool_problems set embedding = pg_temp.unit(9) where id = v_id;
-    -- An UPDATE refused by a policy affects zero rows rather than raising, so
-    -- the row count is the test.
     if found then
       perform pg_temp.fail('foundit_app wrote an embedding straight onto tool_problems');
     end if;
   exception when insufficient_privilege then null;
   end;
 
-  if not public.store_problem_embedding(v_id, pg_temp.unit(9), public.embedding_model()) then
-    perform pg_temp.fail('store_problem_embedding did not write the row it was given');
+  -- Through the definer function: refused by the absence of EXECUTE. THIS IS
+  -- THE FIX. If it ever passes again, the application role can plant vectors
+  -- and read the query cache out one sign bit at a time.
+  begin
+    perform public.store_problem_embedding(v_id, pg_temp.unit(9), public.embedding_model());
+    perform pg_temp.fail('foundit_app can execute store_problem_embedding: the role that can '
+                      || 'ask which vector is nearest a cached query can now also plant the '
+                      || 'vectors it asks about, which reads the cache out one bit at a time');
+  exception when insufficient_privilege then null;
+  end;
+
+  -- And it cannot read the queue either, which is foundit_embed's alone.
+  begin
+    perform count(*) from public.problem_embedding_work();
+    perform pg_temp.fail('foundit_app can read the embedding job''s work queue');
+  exception when insufficient_privilege then null;
+  end;
+end
+$$;
+
+reset role;
+
+-- --- foundit_embed has the WRITE half and must not have the READ half ------
+set role foundit_embed;
+
+do $$
+declare n integer;
+begin
+  -- No table it could read. Not the statements it embeds, not the cache, not
+  -- the search log, not the catalogue.
+  begin
+    select count(*) into n from public.tool_problems;
+    perform pg_temp.fail('foundit_embed read ' || n || ' row(s) from tool_problems directly');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    select count(*) into n from public.query_embeddings;
+    perform pg_temp.fail('foundit_embed read the query cache');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    select count(*) into n from public.search_events;
+    perform pg_temp.fail('foundit_embed read the search log');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    select count(*) into n from public.tools;
+    perform pg_temp.fail('foundit_embed read the catalogue');
+  exception when insufficient_privilege then null;
+  end;
+
+  -- And no function that could read a cached vector or write one.
+  begin
+    perform count(*) from public.search_tools('split expenses with friends');
+    perform pg_temp.fail('foundit_embed can search, which is the other half of the oracle');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    perform count(*) from public.query_vector_ranks(
+      'split expenses with friends', null, array[1]::bigint[], 10);
+    perform pg_temp.fail('foundit_embed can rank against a cached query vector');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    perform public.store_query_embedding('a sentence', pg_temp.unit(1), public.embedding_model());
+    perform pg_temp.fail('foundit_embed can write to the query cache');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    perform public.query_embedding_missing('a sentence');
+    perform pg_temp.fail('foundit_embed can probe the query cache');
+  exception when insufficient_privilege then null;
+  end;
+end
+$$;
+
+-- --- and the job's own two functions still work ---------------------------
+-- The queue is callable, and it hands back the two columns the job uses and
+-- no third. An empty queue is the ordinary state of a development database
+-- whose embeddings are filled, so the count is not asserted — being able to
+-- ask at all is.
+do $$
+declare n integer; bad text;
+begin
+  select count(*) into n from public.problem_embedding_work();
+  if n is null then
+    perform pg_temp.fail('problem_embedding_work returned null');
   end if;
 
-  -- It cannot be used to rewrite what a tool says it solves.
-  select statement, embedding_model into r from public.tool_problems where id = v_id;
-  if r.statement is distinct from v_statement then
-    perform pg_temp.fail('store_problem_embedding changed the statement');
+  select string_agg(a.attname, ', ') into bad
+    from pg_proc p
+    cross join lateral unnest(p.proargnames) with ordinality as a(attname, ord)
+   where p.oid = 'public.problem_embedding_work(int)'::regprocedure
+     and a.attname not in ('p_limit', 'id', 'statement');
+  if bad is not null then
+    perform pg_temp.fail('problem_embedding_work returns more than the id and the statement: '
+                      || bad);
   end if;
-  if r.embedding_model is distinct from public.embedding_model() then
-    perform pg_temp.fail('store_problem_embedding did not record the model');
+end
+$$;
+
+-- The write itself. The row is chosen by the owner beforehand, so the test
+-- does not depend on the queue being non-empty.
+reset role;
+
+-- The id travels in a session setting rather than a temporary table, because
+-- foundit_embed holds no privilege on any table — including one this suite
+-- made — and current_setting is readable by anybody.
+do $$
+declare v_id bigint; v_statement text;
+begin
+  select tp.id, tp.statement into v_id, v_statement
+    from public.tool_problems tp
+    join public.tools t on t.id = tp.tool_id and t.status = 'published'
+   order by tp.id
+   limit 1;
+  if v_id is null then
+    perform pg_temp.fail('the seed has no published problem statements to embed');
+  end if;
+  perform set_config('foundit.test_problem_id', v_id::text, true);
+  perform set_config('foundit.test_problem_statement', v_statement, true);
+end
+$$;
+
+set role foundit_embed;
+
+do $$
+declare v_id bigint := current_setting('foundit.test_problem_id')::bigint;
+begin
+
+  if not public.store_problem_embedding(v_id, pg_temp.unit(9), public.embedding_model()) then
+    perform pg_temp.fail('store_problem_embedding did not write the row it was given');
   end if;
 
   -- A row that no longer exists is reported rather than counted as done.
@@ -540,6 +727,28 @@ begin
   end;
 end
 $$;
+
+reset role;
+
+-- It cannot be used to rewrite what a tool says it solves, and it recorded the
+-- model it used.
+do $$
+declare r record;
+begin
+  select tp.statement, tp.embedding_model, t.slug into r
+    from public.tool_problems tp
+    join public.tools t on t.id = tp.tool_id
+   where tp.id = current_setting('foundit.test_problem_id')::bigint;
+  if r.statement is distinct from current_setting('foundit.test_problem_statement') then
+    perform pg_temp.fail('store_problem_embedding changed the statement it was embedding');
+  end if;
+  if r.embedding_model is distinct from public.embedding_model() then
+    perform pg_temp.fail('store_problem_embedding did not record the model');
+  end if;
+end
+$$;
+
+set role foundit_app;
 
 -- After the job has run, embedded_at is not behind updated_at — which is what
 -- makes a second run of scripts/embed.mjs embed nothing.

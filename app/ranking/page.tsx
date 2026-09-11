@@ -44,8 +44,8 @@ export default function Ranking() {
         It will end with the honest part: what the score cannot tell you, how much of the field is
         missing, that no tool here has been tested by us, and how a maker gets a listing about their
         own product corrected. None of that can be written yet — the ordering on the results page
-        today is text match, which the results page says out loud, and the fit score itself is not
-        built.
+        today is words and meaning together, which the results page says out loud on every search,
+        and the fit score itself is not built.
       </p>
     </UnwrittenPage>
   );

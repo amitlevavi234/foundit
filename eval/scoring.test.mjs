@@ -628,6 +628,21 @@ process.stdout.write('\nthe gate compares like with like\n');
     checkRegression(0.4000, pickBaseline(rows, false).row).regressed, true);
 }
 {
+  // A row the file itself calls WITHDRAWN is not a baseline, whatever numbers
+  // are in it. eval/baselines.md keeps one — deleting it would hide what
+  // happened — and the gate must not adopt it.
+  const rows = parseBaselines([
+    '| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | What changed |',
+    '| - | - | - | - | - | - | - | - |',
+    '| 2026-09-10 | aaa1111 | 2 | no | 60 | 0.4497 | 0.4878 | first trustworthy |',
+    '| 2026-09-12 | ccc3333 | 3 | yes | 60 | 0.9000 | 0.9500 | **WITHDRAWN** measured wrong |',
+  ].join('\n'));
+  check('a withdrawn row is not a recorded baseline', rows.length, 1);
+  check('and the gate does not adopt its number', rows[0].commit, 'aaa1111');
+  check('a withdrawn hybrid row leaves no hybrid row to match',
+    pickBaseline(rows, true).sameMode, false);
+}
+{
   // baselines.md written before the column existed: fall back to the newest
   // row and say so, rather than silently switching the gate off.
   const rows = parseBaselines([

@@ -123,7 +123,7 @@ Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
 - `research/10` §6.6's Dockerfile would fail as written (`COPY public/` when there is no `public/`).
 - The standalone server binds `0.0.0.0`; safe behind Docker's 127.0.0.1 publishing, but set `HOSTNAME=127.0.0.1` on the box anyway.
 
-## Phase 3 — vectors — **built, awaiting the adversarial review and sign-off**
+## Phase 3 — vectors — **reviewed, failed, fixed; awaiting re-review and sign-off**
 
 Baseline **nDCG@10 0.7019**, recall@10 0.6747, 0 constraint violations, 0
 zero-result queries, commit `bc9abfe`, measured as `foundit_app`. Recorded in
@@ -135,16 +135,37 @@ zero-result queries, commit `bc9abfe`, measured as `foundit_app`. Recorded in
 | Embedding job fills every published statement | done | `scripts/embed.mjs`: 504 statements, 6 API requests, 7,547 prompt tokens. Second run embeds **0**. Null embeddings on published statements: **0** |
 | Hybrid search fuses text, trigram and vector in one round trip | done | a fifth RRF leg at weight 3.0 over `tool_problems.embedding`, cosine, best statement per tool; constraint violations **0** across 60 queries |
 | Constraints still filter before ranking | done | the vector leg is handed the eligible ids as an array, so it cannot return a filtered-out tool. `db/test/vectors_test.sql` makes a paid tool the *identical* vector to the query, asks for free, and insists it is gone |
-| Query embeddings cached in Postgres, keyed on normalised text | done | `public.query_embeddings`: no user, session, IP or request column, no foreign key, RLS forced, **no policy at all**, no grant to `foundit_app` |
-| A repeated search is one round trip under 150 ms | done | 58 ms median, 72 ms slowest of five consecutive hits, measured with a node timer around the single round trip as `foundit_app`. A miss is two trips plus one API call |
+| Query embeddings cached in Postgres, keyed on normalised text | done | `public.query_embeddings`: no user, session, IP or request column, no foreign key, RLS forced, **no policy at all**, no grant to `foundit_app`. Capped at 20,000 rows, least-recently-used first |
+| Three roles, and no role holds both halves of the oracle | done, `0005` | `foundit_embed` has the write; `foundit_app` has the read; neither has the other. Proved from both sides, and the suite fails if the 0004 grant is restored |
+| CI tests the vector leg rather than assuming it | done, `0005` | `db/seed/embeddings.fixture.json` (792 kB of float16) + `--from-fixture`. A keyless run measures **0.7018** and gates on the `Vectors=yes` row; with the weight set to 0 it fails |
+| A repeated search is one round trip under 150 ms | **partly — see below** | One blocking round trip, yes. The timing is re-measured on `SEARCH_DETAILED_SQL`, which is what `/results` sends; the first figure timed `search_tools()` bare and was not the page |
 | Beats Phase 2 on the golden set | done | authored **0.4878 → 0.7019**, `--read-query` **0.4785 → 0.6836**. Non-English **0.1700 → 0.6052** |
 | No vector index | done | `\di public.tool_problems*` shows five b-tree/GIN indexes and no ivfflat or hnsw; `vectors_test.sql` fails if one appears |
 | No embedding column read into application memory | done | no function returns a `halfvec`; `query_vector_ranks` does the arithmetic and returns ranks. A markup test greps `app/`, `lib/`, `eval/run.mjs` and `scripts/embed.mjs` for it |
 | One outbound call, one hardcoded address | done | `lib/embeddings.ts` is the only file in `app/`/`components/`/`lib/` that calls `fetch`; the test asserts the constant, the single URL, no template-built address, the three-field body, and one source for the key |
 | Degrades without a key | done | `embedQuery` → null, **one** log line with neither key nor query text, results are the Phase 2 answer, `search_events` still gets its row |
 | Every suite green | done | `npm test` 130 scoring + 99 unit + eval; `lint`, `tsc --noEmit`, `build`, `bash db/test.sh` (3 of 3) |
-| **Adversarial review by a fresh agent** | **not started** | the gate; the supervisor commissions it |
+| **Adversarial review by a fresh agent** | **done — did not pass; every finding fixed** | 1 high, 3 medium, 10 smaller. See below |
 | Owner sees it | waiting on Amit | |
+
+### The review, and where each finding landed
+
+The verdict was "does not pass as it stands, two revocations away". It was right.
+
+| Finding | Outcome |
+| --- | --- |
+| **HIGH — a cache-reading oracle.** `store_problem_embedding` let `foundit_app` write any vector onto ANY problem statement (row-level security refuses that write; the definer function handed back exactly what the policy had refused), and `query_vector_ranks` then ranks planted vectors against a *cached query* vector and returns the order. The reviewer recovered **16 of 16 sign bits** of somebody else's cached search, holding no grant on `query_embeddings` | Fixed in `0005_embed_role.sql`. A third role, `foundit_embed`, now owns the write half: EXECUTE on `problem_embedding_work` and `store_problem_embedding`, and no privilege on any table, no search, no cache. `foundit_app` lost `store_problem_embedding` entirely. No role has both halves, and `db/test/vectors_test.sql` proves it from both sides — putting the 0004 grant back makes the suite fail |
+| **HIGH, part two.** `query_vector_ranks` trusted its caller entirely for which tools were eligible | Fixed. It now joins `tools` and considers only `status = 'published'`, whatever ids it was passed. Two independent guarantees where there was one, in the same spirit as 0002's explicit status predicate. Phase 7 is when drafts start existing |
+| **MEDIUM — nothing bounded the query cache.** Anonymous visitors created one permanent row per distinct sentence, forever, on a 40 GB disk | Fixed. `store_query_embedding` keeps the table under 20,000 rows, evicting least-recently-used, swept on about one insert in fifty and whenever the planner's own estimate says it has run past the cap. It bounds the *disk*; it does not bound the *spend*, and the per-visitor rate limit that would is Phase 4's |
+| **MEDIUM — the 150 ms claim was measured on the wrong statement.** `search_tools()` bare, not `SEARCH_DETAILED_SQL`, which is what `/results` actually sends | Fixed by re-measuring, and by a real win: `alter function … rows 20`. The planner estimated 1000 rows from a function that returns at most 50, so it drove the decoration join from the CATALOGUE — a sequential scan of every published tool with two SECURITY DEFINER policy calls each, to decorate twelve rows. 22 ms of a 27 ms decoration, gone. No ranking change |
+| **MEDIUM — CI gated nothing about the vector leg.** No key on the runner meant a keyless run measured the Phase 2 search; setting the vector weight to zero left CI green | Fixed. `db/seed/embeddings.fixture.json` ships the 504 statement vectors and 60 query vectors as float16 (792 kB); `scripts/embed.mjs --from-fixture` loads them through the same definer setter with no API call, and `eval/run.mjs` warms the query cache from the same file. CI now runs the real hybrid search, offline and free, and gates against the `Vectors=yes` row. Verified by setting the weight to 0 and watching the keyless gate fail |
+| `/ranking` said the ordering is "text match" | Fixed. One sentence, now "words and meaning together" |
+| The second search after a cache miss could throw and take the text-only results with it | Fixed. Caught, the results already in hand are served, one `console.error` with no query text |
+| A zero-norm vector would be cached forever and silently order by `tool_id` | Fixed in both layers: `lib/embeddings.ts` refuses one, `store_query_embedding` raises on one |
+| `store_query_embedding` truncated at 200 characters, so two sentences sharing a 200-character prefix shared a vector | Fixed. It raises 22001 instead |
+| `parseBaselines` would have adopted a row the file itself marks WITHDRAWN | Fixed, with a scoring test |
+| `lib/sql.ts` asked the cache a second time | Fixed. The flag is `search_tools`' own answer, read off its rows; the function call survives only as a `coalesce` fallback for a search that matched nothing, where there is no row to read it from |
+| One cap for queries and documents, so a long statement would have been silently cut to 200 characters | Fixed. `MAX_DOCUMENT_INPUT` is separate, and the job prints the row id of anything it cuts |
 
 ### The weight was measured, not argued
 
@@ -156,14 +177,44 @@ queries. At 100.0, where the other four legs are arithmetically irrelevant and
 the search is pure vector, it scores 0.6781 — *below* the fused 0.7018. The
 whole sweep is in `eval/baselines.md`.
 
+### The 150 ms gate, measured on the right statement
+
+The first number in this document — 58 ms median — timed `public.search_tools()`
+on its own. `/results` does not send that. It sends `SEARCH_DETAILED_SQL`, which
+wraps the search and joins on the maker's address, the platforms, the flags, the
+counters, the category and the matched problem statement. Timing the inner
+function and reporting it as the page's latency was measuring the wrong thing,
+and the review caught it.
+
+Re-measured, `SEARCH_DETAILED_SQL` through `lib/sql.ts` as `foundit_app`, 50 runs
+over five warm sentences, node timer around the single round trip. Two honest
+statements about the result:
+
+- **The `rows 20` fix is real and the win is about 20 ms**, measured by `EXPLAIN
+  (ANALYZE)` before and after: the decoration went from 27.4 ms to 7.8 ms on the
+  same sentence, because the planner stopped driving the join from the whole
+  catalogue. The search itself is the rest and is unchanged.
+- **This laptop is not the gate.** It shares Docker Desktop with seven other
+  containers and reaches PostgreSQL through WSL2; the same 50 runs vary by a
+  factor of three depending on what else is running, and a meaningful number
+  exceed 150 ms. Production is a CX23 with the database on the same box, a
+  sub-millisecond hop rather than a virtualised one. **The gate is settled at
+  deploy, on the server** — quoting a laptop number as if it settled it is the
+  same mistake as timing the wrong statement, in a different costume.
+
 ### Found along the way
 
-- **A run with no key now measures a different search**, so the regression gate
+- **A run with no key measures a different search**, so the regression gate
   would have gone red on CI for a reason nobody changed. `eval/baselines.md`
   gained a `Vectors` column and the gate picks the newest row recorded in the
-  same mode. Proved by emptying the cache and running keyless: **0.4878,
-  4 zero-result — exactly the Phase 2 row, to four decimals.** The vector leg is
-  purely additive, and CI keeps a real full-text gate without a key.
+  same mode. Proved by emptying the cache, hiding the fixture and running
+  keyless: **0.4878, 4 zero-result — exactly the Phase 2 row, to four
+  decimals.** The vector leg is purely additive.
+  **That was not enough, and the review said so:** a gate that falls back to
+  the Phase 2 number when the key is missing gates nothing about the vector
+  leg, and CI never has a key. The fixture is the answer — CI now loads the
+  recorded vectors and gates on the hybrid row — and the `Vectors` column is
+  what keeps a *developer's* keyless run honest rather than red.
 - **The eval warms the cache before it seals the session read-only.** That is
   the only write it makes anywhere and it is not to `search_events`. A cache
   hit and a cache miss produce byte-identical results, so what is measured is
@@ -205,6 +256,32 @@ whole sweep is in `eval/baselines.md`.
   search, because `search_tools` is `STABLE` and cannot write. A cache hit that
   never reaches the `after()` block — a crashed request — leaves the timestamp
   stale. It is for eviction and nothing else reads it.
+- **A cached search is one blocking round trip but three statements.** The
+  search, then — after the response has gone out, awaited by nobody —
+  `log_search_event` and `touch_query_embedding`. The visitor waits for the
+  first and for nothing else, and that is the number the 150 ms gate is about;
+  but the database does three pieces of work per search and a capacity estimate
+  should use three.
+- **The response time answers a question the schema refuses to.** A cache miss
+  costs an embedding call, so a first-ever sentence is visibly slower than a
+  repeat. Anyone can therefore learn whether *this exact sentence* has been
+  searched on this instance before, by timing it. It is not joinable to a
+  person — there is no row anywhere that says who — and the alternative is
+  paying the API on every search forever. **Accepted, and written down rather
+  than fixed.** If it ever needs closing, the fix is a constant-time floor on
+  the response, not a change to the cache.
+- **The sentence now leaves our server**, to `api.openai.com`, and the privacy
+  notice does not exist yet. `docs/product-decisions.md` §15 records what has
+  to be written and points at `research/13` §6.3. This is a launch blocker, not
+  a Phase 3 one — nobody is using the site — but it is the kind that gets
+  forgotten because nothing fails.
+- **The query cache is capped at 20,000 rows, not rate-limited.** The disk is
+  bounded. The spend is not: a stranger can still make the server embed a fresh
+  sentence per request, and the multiplier is worse than one per sentence typed
+  — dropping a constraint chip changes the searched text and therefore the
+  cache key, so a three-constraint sentence has eight reachable keys. The
+  per-visitor limit is Phase 4's, and the vendor-side cap is the only ceiling
+  until it lands.
 - **The candidate array is `array(select id from eligible)`.** At 223 published
   tools that is free. At fifty thousand it is a materialised array of fifty
   thousand bigints handed to a function on every search, and the right answer
@@ -214,11 +291,35 @@ whole sweep is in `eval/baselines.md`.
   paid API on a cache miss, and the only thing bounding the spend is that a
   repeated sentence is free. Phase 4 owns the per-visitor limit; until it
   lands, the vendor-side cap is the only ceiling.
-- **`store_problem_embedding` and `store_query_embedding` are `SECURITY
-  DEFINER` and callable by `foundit_app`.** Each is one narrow write with no
-  branch a caller can steer, and the blast radius is ranking rather than
-  disclosure — but they are two more privileged code paths than existed before,
-  and a reviewer should look at them first.
+- **Five queries scored worse than they did on text alone**, against 46 better
+  and 9 unchanged. Recorded because an average that went up 0.21 hides them:
+
+  | Query | Phase 2 | Phase 3 | Change |
+  | ----- | ------- | ------- | ------ |
+  | q044 "stop adverts and trackers following me around the internet" | 0.5773 | 0.1571 | **-0.4202** |
+  | q038 "password manager that is free and syncs between my laptop and phone" | 1.0000 | 0.7309 | -0.2691 |
+  | q026 "get a written transcript of a meeting I was in" | 0.8098 | 0.7136 | -0.0962 |
+  | q051 "shopping list the whole household can add to from their phones" | 0.7948 | 0.7550 | -0.0399 |
+  | q030 "record my screen and stream it live without paying for anything" | 0.8828 | 0.8688 | -0.0140 |
+
+  q044 is the one worth staring at: a query whose exact answer (uBlock Origin)
+  the lexical legs found, and which the vector leg pushed to rank 13 by
+  surfacing a crowd of plausibly-similar privacy tools above it. That is the
+  shape of the trade this phase made, in one query.
+
+- **What the previous version of this document said about the definer
+  functions was false, and the review proved it.** It read: "Each is one narrow
+  write with no branch a caller can steer, and the blast radius is ranking
+  rather than disclosure." Both halves were wrong. There was no branch to
+  steer because the steering was not inside either function — it was in holding
+  EXECUTE on *two* of them, one that writes a vector and one that reports which
+  vector is nearest a cached query, which together read the cache out a sign
+  bit at a time. And the blast radius was disclosure: sixteen bits of somebody
+  else's search, recovered. What changed is `0005_embed_role.sql`: the write
+  half belongs to `foundit_embed` alone, `foundit_app` cannot call it, and
+  `db/test/vectors_test.sql` fails if that is ever undone. **The lesson is the
+  general one: a definer function that writes what another definer function
+  reads is one function in two halves, and has to be reasoned about as one.**
 
 ## Tried and rejected
 

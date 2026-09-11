@@ -264,14 +264,32 @@ during a run; it needs the cache to be warm.
 
 Before the first query is timed, and **before the session is put into read-only
 mode**, the harness asks the database which of the sentences it is about to
-search with have no cached vector, embeds those in one batched request through
-`lib/embeddings.ts`, and stores them. Then it seals the session read-only and
-measures.
+search with have no cached vector, fills those it can from
+`db/seed/embeddings.fixture.json`, embeds whatever is left in one batched
+request through `lib/embeddings.ts`, and stores them. Then it seals the session
+read-only and measures.
 
 ```
 Foundit eval — 60 queries, metrics @10, fetching 20 rows each.
-  query vectors: 60 already cached, 0 embedded in 0 request(s), 0 prompt tokens.
+  query vectors: 0 already cached, 60 from the fixture, 0 embedded in 0 request(s), 0 prompt tokens.
 ```
+
+**The fixture comes first, on purpose.** It holds the recorded float16 vectors
+for all 60 golden sentences — exactly what a `halfvec` column stores — so a
+laptop with a key and a runner without one warm the cache from the same numbers
+and produce the same score. Before it existed, re-fetching the same 60
+embeddings moved the headline by 0.0001, because the provider's float32 output
+rounds into float16 differently between calls and two tools swap places on a
+tie.
+
+It is also the only reason the gate means anything on CI. There is no key
+there, and there must not be; without recorded vectors a keyless run measured
+the Phase 2 text-only search, so **setting the vector leg's weight to zero left
+CI green** — an adversarial review made the point by doing it. With the fixture
+loaded, the same change fails the gate by 0.18.
+
+`scripts/embed.mjs --write-fixture` re-records it, from a freshly seeded
+database, and costs one set of API calls.
 
 That is the only write the harness makes anywhere, and it goes to
 `public.query_embeddings`, which has no user column, no session column and no
@@ -297,17 +315,23 @@ than reproducing the miss:
 - **a run needs no API key once the cache is warm**, so CI measures the same
   number as a laptop and calls nothing.
 
-### With no key
+### With no key and no fixture
 
-It degrades exactly as the application does. Sentences with no cached vector
-are searched text-only, the run says how many, and the number is honestly lower
-rather than absent:
+It degrades exactly as the application does. Sentences with no vector from
+either source are searched text-only, the run says how many, and the number is
+honestly lower rather than absent:
 
 ```
-  query vectors: 12 already cached, 0 embedded in 0 request(s), 0 prompt tokens.
-  NOTE: 48 sentence(s) have no cached vector and EMBEDDINGS_API_KEY is not set;
-        those queries measure text-only, exactly as the application would serve them
+  query vectors: 0 already cached, 0 from the fixture, 0 embedded in 0 request(s), 0 prompt tokens.
+  NOTE: 60 sentence(s) are neither cached nor in the fixture, and EMBEDDINGS_API_KEY
+        is not set; those queries measure text-only, exactly as the application
+        would serve them
 ```
+
+Measured: **0.4878, 4 zero-result — the Phase 2 row to four decimals.** The
+vector leg is purely additive, and `--baseline` compares that run against the
+text-only row rather than the hybrid one, so a developer with no key gets a
+real full-text gate instead of a red build.
 
 The key is read from `EMBEDDINGS_API_KEY` and from nowhere else, it is never
 printed, and every failure message from the embedder carries a short reason and

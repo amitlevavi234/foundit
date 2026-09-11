@@ -56,10 +56,31 @@ export const EMBEDDING_MODEL = 'text-embedding-3-small';
 export const EMBEDDING_DIMENSIONS = 512;
 
 /**
- * The cap on anything sent, in characters. The same 200 the search box, the
- * search function and `search_events` all use, so there is one number.
+ * The cap on a QUERY, in characters. The same 200 the search box, the search
+ * function and `search_events` all use, so there is one number.
+ *
+ * This is a ceiling on what a stranger can make the server pay for, which is
+ * why it is small and why the database raises rather than truncates when it is
+ * exceeded — see `public.store_query_embedding`.
  */
 export const MAX_EMBEDDING_INPUT = 200;
+
+/**
+ * The cap on a DOCUMENT — a problem statement — in characters.
+ *
+ * Deliberately a different number from the query cap, and deliberately not the
+ * same constant. A query cap exists to bound an anonymous endpoint; a document
+ * cap exists to stop one absurd row costing a fortune in a batch nobody is
+ * watching. Applying 200 to both meant a statement longer than a tweet would
+ * have been silently cut to its first sentence and embedded as if that were
+ * the whole of it — invisible, because `tool_problems.statement` is capped at
+ * 200 by a CHECK constraint today and nothing would have tripped it.
+ *
+ * `scripts/embed.mjs` prints the row id of anything this truncates, so the day
+ * that constraint is relaxed the job says so rather than quietly embedding a
+ * prefix.
+ */
+export const MAX_DOCUMENT_INPUT = 2_000;
 
 /** How long a search will wait for a vector before giving up and going on. */
 export const EMBEDDINGS_TIMEOUT_MS = 4_000;
@@ -124,6 +145,16 @@ export interface EmbeddingBatch {
   model: string;
   /** Prompt tokens the provider billed for this request. */
   tokens: number;
+  /** Indices of inputs that were longer than the cap and were cut. */
+  truncated: number[];
+}
+
+export interface EmbedOptions {
+  /**
+   * Characters to cap each input at. Defaults to the QUERY cap, because the
+   * default caller is a search; the embedding job passes MAX_DOCUMENT_INPUT.
+   */
+  cap?: number;
 }
 
 /** Raised by `embedTexts`. Carries a short reason and never the inputs. */
@@ -150,8 +181,14 @@ interface EmbeddingResponse {
  * Throws `EmbeddingError` on anything that is not a well-formed 2xx response
  * with one vector of the expected length per input.
  */
-export async function embedTexts(inputs: readonly string[]): Promise<EmbeddingBatch> {
-  if (inputs.length === 0) return { vectors: [], model: EMBEDDING_MODEL, tokens: 0 };
+export async function embedTexts(
+  inputs: readonly string[],
+  options: EmbedOptions = {},
+): Promise<EmbeddingBatch> {
+  const limit = options.cap ?? MAX_EMBEDDING_INPUT;
+  if (inputs.length === 0) {
+    return { vectors: [], model: EMBEDDING_MODEL, tokens: 0, truncated: [] };
+  }
   if (inputs.length > EMBEDDINGS_BATCH_SIZE) {
     throw new EmbeddingError(`batch of ${inputs.length} exceeds ${EMBEDDINGS_BATCH_SIZE}`);
   }
@@ -161,9 +198,14 @@ export async function embedTexts(inputs: readonly string[]): Promise<EmbeddingBa
     throw new EmbeddingError(`${KEY_VARIABLE} is not set`);
   }
 
-  const capped = inputs.map((text) =>
-    Array.from(String(text ?? '')).slice(0, MAX_EMBEDDING_INPUT).join(''),
-  );
+  // Code points, not UTF-16 units: PostgreSQL's length() counts characters,
+  // and slicing an astral pair in half would send a lone surrogate.
+  const truncated: number[] = [];
+  const capped = inputs.map((text, i) => {
+    const points = Array.from(String(text ?? ''));
+    if (points.length > limit) truncated.push(i);
+    return points.slice(0, limit).join('');
+  });
 
   // AbortController rather than AbortSignal.timeout so the timer is cleared on
   // the success path too: a pending timer keeps a short-lived process alive,
@@ -228,6 +270,14 @@ export async function embedTexts(inputs: readonly string[]): Promise<EmbeddingBa
     if (values.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
       throw new EmbeddingError(`vector ${i} contains something that is not a number`);
     }
+    // A zero vector has no direction, so cosine distance to it is undefined —
+    // PostgreSQL returns NaN and the ordering silently collapses to the tie
+    // break, which is tool_id. That looks like a working search returning the
+    // catalogue in id order, and it would be cached and served for as long as
+    // the row lived. Refuse it here and again in store_query_embedding.
+    if (!values.some((v) => v !== 0)) {
+      throw new EmbeddingError(`vector ${i} is all zeros, which has no direction`);
+    }
     // The provider documents that `index` identifies the input, so the order
     // is taken from it rather than assumed.
     const at = typeof item.index === 'number' ? item.index : i;
@@ -255,7 +305,55 @@ export async function embedTexts(inputs: readonly string[]): Promise<EmbeddingBa
     vectors,
     model: EMBEDDING_MODEL,
     tokens: Number(payload.usage?.prompt_tokens ?? payload.usage?.total_tokens ?? 0),
+    truncated,
   };
+}
+
+/* ===========================================================================
+ * The offline fixture.
+ *
+ * CI has no EMBEDDINGS_API_KEY and must not have one: the search endpoint is
+ * the thing an attacker aims at and a key on a public runner is a key that
+ * leaks. But a run with no vectors measures the Phase 2 search, so gating on it
+ * proves nothing about the vector leg — set the leg's weight to zero and a
+ * keyless CI stays green.
+ *
+ * So the vectors ship. `scripts/embed.mjs --write-fixture` embeds the
+ * catalogue's statements and the golden set's queries once and records them;
+ * `--from-fixture` loads them through the same setter functions with no
+ * network call at all, and eval/run.mjs warms the query cache from the same
+ * file. CI then runs the real hybrid search, offline and free.
+ *
+ * Stored as base64 of IEEE float16, because that is exactly what a halfvec
+ * column holds: the round trip through the fixture is lossless, and 564
+ * vectors come to about 770 kB rather than the 2.3 MB the same numbers would
+ * take as decimal text.
+ * ======================================================================== */
+
+/** 512 float16s, base64. Exactly what `halfvec(512)` stores. */
+export function toFloat16Base64(values: readonly number[]): string {
+  const half = new Float16Array(values.length);
+  for (let i = 0; i < values.length; i += 1) half[i] = values[i] ?? 0;
+  return Buffer.from(half.buffer, half.byteOffset, half.byteLength).toString('base64');
+}
+
+/**
+ * Back to a `halfvec` literal.
+ *
+ * Every float16 is exactly representable as a double, and PostgreSQL rounds
+ * the literal back to the nearest float16, so this is the identical vector and
+ * not an approximation of one.
+ */
+export function fromFloat16Base64(encoded: string): string {
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.byteLength !== EMBEDDING_DIMENSIONS * 2) {
+    throw new EmbeddingError(
+      `fixture vector is ${bytes.byteLength} bytes, expected ${EMBEDDING_DIMENSIONS * 2}`,
+    );
+  }
+  const copy = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(copy).set(bytes);
+  return toVectorLiteral(Array.from(new Float16Array(copy)));
 }
 
 export interface QueryEmbedding {

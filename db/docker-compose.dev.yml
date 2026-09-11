@@ -7,7 +7,7 @@
 # named volume. That is deliberate: `docker compose down -v` deletes named
 # volumes permanently, and it is a command people run casually.
 #
-# Two roles live in here, and the difference between them is the point:
+# Three roles live in here, and the differences between them are the point:
 #
 #   foundit_owner  owns the schema and runs migrations. Superuser in this
 #                  container, which means BYPASSRLS, which means every
@@ -18,8 +18,14 @@
 #                  gets its grants from db/migrations/0001_init.sql and
 #                  0002_search.sql and nothing else — this file only gives it
 #                  a password so it can log in at all.
+#   foundit_embed  what scripts/embed.mjs connects as, and nothing else. Two
+#                  function grants, no table grant, no search. It exists
+#                  because the role that can WRITE a vector onto a problem
+#                  statement must not be the role that can ask which vector is
+#                  nearest a cached query: together those two read the query
+#                  cache out one sign bit at a time. See 0005_embed_role.sql.
 #
-# Both passwords are throwaway literals on purpose, and that is the only kind
+# All three passwords are throwaway literals on purpose, and that is the only kind
 # of password that ever belongs in a tracked file: this database holds
 # invented seed data, listens on 127.0.0.1 only, and can be deleted at any
 # time. The server's credentials are generated on the server and live in a
@@ -43,10 +49,15 @@ configs:
     #
     # If your ./db/.data already exists, this file will not run — Postgres
     # only executes /docker-entrypoint-initdb.d on first initialisation. Set
-    # the password on the running container instead:
+    # the passwords on the running container instead:
     #
     #   docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
-    #     -c "alter role foundit_app login password 'local_development_only_app'"
+    #     -c "alter role foundit_app login password 'local_development_only_app'" \
+    #     -c "alter role foundit_embed login password 'local_development_only_embed'"
+    #
+    # foundit_embed is created by 0005_embed_role.sql, also without a password,
+    # and for the same reason: a migration is a tracked file that runs on the
+    # production host, so it must never set one.
     content: |
       do $$
       begin
@@ -54,6 +65,12 @@ configs:
           alter role foundit_app login noinherit password 'local_development_only_app';
         else
           create role foundit_app login noinherit password 'local_development_only_app';
+        end if;
+
+        if exists (select 1 from pg_roles where rolname = 'foundit_embed') then
+          alter role foundit_embed login noinherit password 'local_development_only_embed';
+        else
+          create role foundit_embed login noinherit password 'local_development_only_embed';
         end if;
       end
       $$;
