@@ -59,9 +59,20 @@ catalogue is worth policing.
 
 ## 4. Reviews
 
-- Ratings and reviews belong to whoever wrote them. **Nobody can edit or delete
-  someone else's review** — not the listing's maintainer, not us. A maintainer can
-  reply to a review.
+- Ratings and reviews belong to whoever wrote them. **Nobody can edit someone
+  else's review** — not the listing's maintainer, not us. A maintainer can reply to
+  a review.
+- **Only an admin can remove someone else's review** (decided by the owner,
+  11 September 2026). Removing is not editing: the text is never changed, it is
+  taken down whole. A listing's maintainer cannot remove a review, however unfair
+  they think it is; they report it like anyone else. This replaces the earlier
+  rule that not even we could delete one, which left no way to take down an
+  illegal or abusive review — and the EU Digital Services Act (Arts 16–17,
+  `research/13` §2.1) requires exactly that route, plus telling the author why.
+  So when removal is built (Phase 6/7) it comes with: the reason recorded, the
+  author told, and the removal visible in the operator dashboard.
+- Reports of a review or a listing come in through the contact and report pages
+  (`/contact`, `/report`) and reach the team by email (§5).
 - Deleting your own account removes your own reviews.
 
 ## 5. Publishing and moderation
