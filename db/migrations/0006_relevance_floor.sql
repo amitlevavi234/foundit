@@ -25,6 +25,22 @@
 --   3. NAME.     Its name is a close trigram match for what was typed — the
 --                half-remembered "notin…" case the fuzzy leg exists for.
 --
+-- TWO CLAIMS IN THIS FILE WERE FALSE WHEN IT WAS WRITTEN, and 0007 corrects
+-- both. They are left in place below rather than quietly edited, because an
+-- applied migration is a record of what was run:
+--
+--   * "NO DISTANCE LEAVES THE DATABASE" (point B). foundit_app held SELECT on
+--     tool_problems.embedding and could read all 504 vectors and compute any
+--     distance it liked. 0007 takes the column away with a column-level grant.
+--   * The "notin…" case (point 3) did NOT work at the 0.50 this file ships:
+--     "notin" against Notion is 0.44 and "signel" against Signal is 0.40, so
+--     the leg failed on the example it exists for. 0007 lowers it to 0.40.
+--
+-- The absolute gate below was also replaced in 0007, after a review measured
+-- it against 25 negatives it had written first: it refused 40% of those where
+-- it refused 87% of the file it was tuned on. eval/baselines.md has the whole
+-- frontier.
+--
 -- Everything without evidence is dropped HERE, inside search_tools_impl, after
 -- the constraints have filtered and before the limit. One statement, one
 -- round trip, nothing filtered in JavaScript. The survivors keep exactly the

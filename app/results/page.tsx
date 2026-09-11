@@ -275,6 +275,8 @@ async function Answer({
   let embeddingMissing = false;
   /** True when the rows below were ranked with meaning as well as words. */
   let usedVector = false;
+  /** Nothing was left to rank on, so there is no "search" to loosen. */
+  const browseOnly = searchText === '';
   const startedAt = performance.now();
   try {
     if (!tooLong) {
@@ -376,14 +378,49 @@ async function Answer({
   }
 
   if (results.length === 0) {
-    return <Nothing query={query} constraints={constraints} dropped={dropped} />;
+    // Two things the page cannot say honestly without asking one more
+    // question, and it is cheap to ask on the path that is already empty.
+    //
+    //   With a category chosen, "Foundit doesn't have a tool for that" is
+    //   simply false: it may have several, in another corner of the
+    //   catalogue. The page says what it narrowed to and offers to widen.
+    //
+    //   With constraints stated, offering to drop one is only worth anything
+    //   if dropping them would turn something up. One search, one row, no
+    //   category — and if that comes back empty too, the sentence has no
+    //   answer here and the offer would be a wild goose chase.
+    let loosenWouldHelp = false;
+    if (!category && constraints.length > 0 && !browseOnly) {
+      try {
+        const unconstrained = await searchToolsDetailed(searchText, {}, 1, null);
+        loosenWouldHelp = unconstrained.results.length > 0;
+      } catch (error) {
+        if (error instanceof QueryTooLongError) throw error;
+        // The offer is a courtesy; a failure here must not take the page down.
+        console.error(
+          `the unconstrained check failed (${
+            (error as { code?: string } | null)?.code ?? 'unknown'
+          }); the empty page was drawn without it`,
+        );
+      }
+    }
+
+    return (
+      <Nothing
+        query={query}
+        constraints={constraints}
+        dropped={dropped}
+        category={category}
+        loosenWouldHelp={loosenWouldHelp}
+      />
+    );
   }
 
   // Nothing was left to search on: `search_tools` read the empty query as
   // browse, so every row here is the catalogue's own editorial order with the
   // constraints applied, and match_source says 'browse' on all of them. The
   // cards already draw no band; the heading must not claim one either.
-  const browse = searchText === '';
+  const browse = browseOnly;
 
   // The relevance floor ran: the sentence had a vector, so every row below
   // cleared it (db/migrations/0006_relevance_floor.sql, point D). With no
@@ -630,17 +667,51 @@ function Nothing({
   query,
   constraints,
   dropped,
+  category = null,
+  loosenWouldHelp = false,
 }: {
   query: string;
   constraints: ReadConstraint[];
   dropped: string[];
+  category?: string | null;
+  loosenWouldHelp?: boolean;
 }) {
   const stated = constraints.map((c) => c.label.toLowerCase());
+
+  // Narrowed to one corner of the catalogue and found nothing there. The
+  // catalogue as a whole may answer this perfectly well — the person asked to
+  // look in one part of it — so this page says that and nothing more.
+  if (category) {
+    return (
+      <EmptyState
+        title="Nothing in that part of the catalogue."
+        actions={
+          <>
+            <Link
+              href={href({ q: query, drop: dropped, skip: true })}
+              className="btn btn-coral"
+              style={{ textDecoration: 'none' }}
+            >
+              Show everything
+            </Link>
+            <Link href="/browse" className="btn btn-sm" style={{ textDecoration: 'none' }}>
+              Browse problems
+            </Link>
+          </>
+        }
+      >
+        <p style={{ margin: 0 }}>
+          You narrowed this search to one part of the catalogue and nothing there matches. The
+          rest of the catalogue has not been ruled out — show everything to see what does.
+        </p>
+      </EmptyState>
+    );
+  }
 
   return (
     <EmptyState
       title="Foundit doesn’t have a tool for that yet."
-      loosen={constraints.map((c) => ({
+      loosen={(loosenWouldHelp ? constraints : []).map((c) => ({
         label: `Drop ${c.label.toLowerCase()}`,
         // A loosened search is its own URL. The artboard puts a count behind
         // each of these ("· 3 tools"); counting them would mean one more
@@ -660,7 +731,7 @@ function Nothing({
         </>
       }
     >
-      {stated.length > 0 ? (
+      {stated.length > 0 && loosenWouldHelp ? (
         <>
           <p style={{ margin: 0 }}>
             Nothing in the catalogue comes close to this with every constraint applied:{' '}
@@ -678,6 +749,13 @@ function Nothing({
           <p style={{ margin: 0 }}>
             Nothing in the catalogue comes close to what you described, so there is nothing here
             to show you — rather than a page of tools that don’t fit.
+            {stated.length > 0 ? (
+              <>
+                {' '}
+                Dropping <strong>{stated.join(', ')}</strong> would not help: the same search
+                without any constraint at all comes back empty too.
+              </>
+            ) : null}
           </p>
           <p style={{ margin: '12px 0 0' }}>
             Two ways forward: browse the problems people have already solved here, or describe it

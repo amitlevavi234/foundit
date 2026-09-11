@@ -24,8 +24,10 @@ import {
   parseGolden, parseBaselines, pickBaseline, checkRegression, renderTable,
   buildReport, buildViolationReport, K,
   parseNegatives, aggregateNegatives, parseCountOf, checkZeroResultRegression,
-  checkNegativesRegression, buildNegativesReport,
+  checkNegativesRegression, buildNegativesReport, checkHeldOutRegression,
+  checkPerturbationGate, perturbedQueries, buildPerturbationReport,
 } from './run.mjs';
+import { perturbations, transposeMiddle } from './perturb.mjs';
 
 let passed = 0;
 const failures = [];
@@ -755,6 +757,110 @@ process.stdout.write('\nthe negatives: sentences whose right answer is an empty 
   check('negatives not run against a row that gates them FAILS', missing.regressed, true);
   check('and says they were not run', missing.missing, true);
   check('a row that records no negatives gates nothing', checkNegativesRegression({ empty: 0, queries: 30 }, rows[0]), null);
+}
+
+// ---------------------------------------------------------------------------
+process.stdout.write('\nthe held-out negatives, and reading a file nobody wrote for us\n');
+// ---------------------------------------------------------------------------
+{
+  // eval/negatives.review.jsonl was written by a reviewer, in their own shape:
+  // "q" rather than "query", and a "nonen" kind the first file never used. It
+  // is read as it is; editing a held-out file to suit the parser would be
+  // editing the measurement.
+  const { queries, errors } = parseNegatives(
+    '{"id":"far-01","kind":"far","q":"I need a divorce lawyer who speaks Russian"}\n' +
+      '{"id":"nonen-he","kind":"nonen","q":"אני מחפש שיעורי נהיגה זולים בחיפה"}',
+  );
+  checkDeep('no errors reading the reviewer’s format', errors, []);
+  check('"q" is read as the query', queries[0].query, 'I need a divorce lawyer who speaks Russian');
+  check('and "nonen" is a kind', queries[1].kind, 'nonen');
+  check('a negative still may not carry judgements',
+    parseNegatives('{"id":"x","q":"y","relevant":{"splitwise":3}}').errors.length, 1);
+}
+
+// ---------------------------------------------------------------------------
+process.stdout.write('\nthe perturbation gate\n');
+// ---------------------------------------------------------------------------
+{
+  const variants = perturbations('split the bill');
+  checkDeep('four variants, in a fixed order',
+    variants.map((v) => v.label), ['full stop', 'question mark', 'please', 'transposed']);
+  check('the full stop', variants[0].text, 'split the bill.');
+  check('the question mark', variants[1].text, 'split the bill?');
+  check('the please', variants[2].text, 'split the bill please');
+  // "split the bill" is 14 characters; the middle pair is index 7/8 ("h"/"e").
+  check('one transposed letter, deterministically', variants[3].text, 'split teh bill');
+  check('transposing is stable', transposeMiddle('split the bill'), transposeMiddle('split the bill'));
+  check('a sentence too short to disturb comes back unchanged', transposeMiddle('ab'), 'ab');
+  // A variant identical to the original is dropped rather than searched twice.
+  check('spaces are never swapped into each other', transposeMiddle('a  b'), 'a  b');
+
+  const expanded = perturbedQueries([
+    { id: 'q001', query: 'split the bill', lang: 'en', constraints: { pricing: ['free'] }, relevant: { splitwise: 3 } },
+  ]);
+  check('four variants per golden query', expanded.length, 4);
+  check('each keeps the judgements', expanded[0].relevant.splitwise, 3);
+  checkDeep('and the constraints', expanded[0].constraints, { pricing: ['free'] });
+  check('ids say which variant', expanded[3].id, 'q001/transposed');
+  check('and which query they came from', expanded[3].base, 'q001');
+
+  const mk = (id, n) => ({ query: { id, base: id.split('/')[0], variant: id.split('/')[1] }, results: Array(n).fill({}), latencyMs: 1 });
+  const report = buildPerturbationReport([mk('q052/full stop', 0), mk('q052/please', 0), mk('q001/full stop', 3)]);
+  check('the report counts the empties', /came back EMPTY\s+2/.test(report), true);
+  check('and names the query and its variants', report.includes('q052  empty under: full stop, please'), true);
+  check('the perturbation report carries no ANSI escapes', hasControlCodes(report), false);
+
+  // Zero is the gate when the floor is running: a full stop must not decide
+  // whether a question has an answer.
+  check('one empty variant fails with vectors', checkPerturbationGate(1, {}, true).regressed, true);
+  check('none passes', checkPerturbationGate(0, {}, true).regressed, false);
+  // Without vectors there is no floor, so the count is Phase 2's and is gated
+  // against whatever the row recorded.
+  check('text-only is judged against the recorded row',
+    checkPerturbationGate(9, { perturbedEmpty: { count: 9, total: 240 } }, false).regressed, false);
+  check('and fails when it grows',
+    checkPerturbationGate(10, { perturbedEmpty: { count: 9, total: 240 } }, false).regressed, true);
+  check('a text-only run with nothing recorded gates nothing',
+    checkPerturbationGate(9, {}, false), null);
+}
+
+// ---------------------------------------------------------------------------
+process.stdout.write('\na gate that cannot read its baseline must fail, not pass\n');
+// ---------------------------------------------------------------------------
+{
+  // The whole failure mode: parseCountOf used to return null — "this row does
+  // not gate that" — for anything it could not read, so a typo in the table
+  // switched a gate off in silence.
+  let threw = false;
+  try { parseCountOf('twenty-six of thirty', 'the Negatives empty column'); } catch (err) {
+    threw = /Negatives empty/.test(err.message);
+  }
+  check('an unreadable cell throws, naming the column', threw, true);
+  let threwTotal = false;
+  try { parseCountOf('31 of 30'); } catch { threwTotal = true; }
+  check('a count larger than its total throws', threwTotal, true);
+  checkDeep('bold markers are tolerated', parseCountOf('**0 of 240**'), { count: 0, total: 240 });
+  checkDeep('and a slash is a share too', parseCountOf('26/30'), { count: 26, total: 30 });
+
+  const rows = parseBaselines([
+    '| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Zero-result | Negatives empty | Held-out empty | Perturbed empty | What changed |',
+    '| - | - | - | - | - | - | - | - | - | - | - | - |',
+    '| 2026-09-11 | aaa1111 | 3 | yes | 60 | 0.67 | 0.70 | 0 of 60 | 26 of 30 | 10 of 25 | 0 of 240 | the floor |',
+    '| 2026-09-12 | bbb2222 | 3 | yes | 60 | 0.73 | 0.76 | 0 of 60 | 10 of 30 | 10 of 25 | 0 of 240 | summaries; the row above was NOT withdrawn |',
+  ].join('\n'));
+  check('both rows are read', rows.length, 2);
+  check('the Held-out column is read', rows[1].heldOutEmpty.count, 10);
+  check('the Perturbed column is read', rows[1].perturbedEmpty.total, 240);
+  // "withdrawn" in a note about another row used to withdraw THIS row, because
+  // every cell was searched for the word.
+  check('a row is not withdrawn by talking about withdrawal', rows[1].commit, 'bbb2222');
+
+  check('the held-out gate reads its own column',
+    checkHeldOutRegression({ empty: 10, queries: 25 }, rows[1]).regressed, false);
+  check('and fails when fewer come back empty',
+    checkHeldOutRegression({ empty: 9, queries: 25 }, rows[1]).regressed, true);
+  check('the negatives gate reads its own, separately',
+    checkNegativesRegression({ empty: 10, queries: 30 }, rows[1]).regressed, false);
 }
 
 // ---------------------------------------------------------------------------

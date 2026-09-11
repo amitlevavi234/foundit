@@ -410,9 +410,14 @@ begin
                       || 'ranking signal bypassed a hard constraint');
   end if;
 
-  -- And the free one is still there, so the filter narrowed rather than emptied.
+  -- And the free one is still there, so the filter narrowed rather than
+  -- emptied. Two stems, not one: the free tool's only evidence is that its
+  -- listing carries every term of the sentence, and since 0007 a sentence with
+  -- a single stem does not count for that — "zzqqxx" alone is the same shape
+  -- of match as "file" or "app", which would open every page. Its vector
+  -- points elsewhere (unit(4) against a unit(3) query) on purpose.
   select count(*) into n
-    from public.search_tools('zzqqxx',
+    from public.search_tools('zzqqxx free',
            p_pricing   => array['free']::pricing_model[],
            p_limit     => 50,
            p_embedding => pg_temp.unit(3)) s
@@ -549,6 +554,43 @@ $$;
 --    split from both sides, because a separation that only holds in one
 --    direction is not one.
 -- ===========================================================================
+
+-- --- and foundit_app cannot read the vectors themselves (0007) -------------
+-- 0006 promised in capitals that no distance leaves the database while
+-- foundit_app could `select embedding from tool_problems` and compute every
+-- distance it liked. Column privileges closed that; this is the check that it
+-- stays closed, on both tables, without taking the rest of either away.
+set role foundit_app;
+do $$
+declare n integer;
+begin
+  perform pg_temp.be(null);
+
+  begin
+    select count(*) into n from public.tool_problems where embedding is not null;
+    perform pg_temp.fail('foundit_app read tool_problems.embedding: it can compute the '
+                      || 'distances query_vector_ranks exists to keep inside the database');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    select count(*) into n from public.tools where embedding is not null;
+    perform pg_temp.fail('foundit_app read tools.embedding');
+  exception when insufficient_privilege then null;
+  end;
+
+  -- But everything the application actually draws is still readable, or the
+  -- revoke above took the site down instead of a privilege.
+  select count(*) into n from public.tool_problems tp where tp.statement is not null;
+  if n = 0 then
+    perform pg_temp.fail('foundit_app cannot read tool_problems.statement any more');
+  end if;
+  select count(*) into n from public.tools t where t.summary is not null and t.url is not null;
+  if n = 0 then
+    perform pg_temp.fail('foundit_app cannot read the columns a tool page draws');
+  end if;
+end
+$$;
 
 -- --- foundit_app has the READ half and must not have the WRITE half --------
 do $$
@@ -748,14 +790,13 @@ begin
 end
 $$;
 
-set role foundit_app;
-
 -- After the job has run, embedded_at is not behind updated_at — which is what
--- makes a second run of scripts/embed.mjs embed nothing.
+-- makes a second run of scripts/embed.mjs embed nothing. Asked as the OWNER:
+-- since 0007 the application role cannot read an embedding column at all, and
+-- this question is about one.
 do $$
 declare n integer;
 begin
-  perform pg_temp.be(null);
   select count(*) into n
     from public.tool_problems tp
     join public.tools t on t.id = tp.tool_id and t.status = 'published'
@@ -764,10 +805,15 @@ begin
     perform pg_temp.fail(n || ' embedded statement(s) are already stale the moment they are '
                       || 'written, so the job would never converge');
   end if;
+
+  select count(*) into n
+    from public.tools t
+   where t.status = 'published' and t.embedding is not null and t.embedded_at < t.updated_at;
+  if n > 0 then
+    perform pg_temp.fail(n || ' embedded summary/summaries are stale the moment they are written');
+  end if;
 end
 $$;
-
-reset role;
 
 -- ===========================================================================
 -- 7. THE RELEVANCE FLOOR (0006), AND WHAT IT MUST NEVER DO.
@@ -790,8 +836,17 @@ begin
   if r.result_min is null or r.result_min <= 0 then
     perform pg_temp.fail('relevance_floor() has no per-result floor');
   end if;
-  if r.gate_latin < r.result_min or r.gate_non_latin < r.result_min then
-    perform pg_temp.fail('a gate is below the per-result floor, so the gate does nothing');
+  if r.gate_min < r.result_min then
+    perform pg_temp.fail('the gate is below the per-result floor, so the gate does nothing');
+  end if;
+  if r.name_min is null or r.name_min <= 0 or r.name_min > 1 then
+    perform pg_temp.fail('relevance_floor() has no sensible name threshold');
+  end if;
+  -- One stem is not evidence. "file", "app", "notes" each match a large part
+  -- of the catalogue, and an all-terms match on one of them would open every
+  -- page the floor exists to close.
+  if r.min_all_terms_stems < 2 then
+    perform pg_temp.fail('a one-stem all-terms match counts as evidence');
   end if;
 
   -- INPUT arguments only: proargnames also lists a table function's result
@@ -837,11 +892,10 @@ $$;
 do $$
 declare v_paid bigint; v_near bigint; v_w real;
 begin
-  -- Halfway between the per-result floor and the Latin gate: close enough to
-  -- show beside something clearly close, not close enough to be the page on
-  -- its own. Read from the function, so this test follows the thresholds
-  -- wherever a later migration moves them.
-  select (f.result_min + f.gate_latin) / 2 into v_w from public.relevance_floor() f;
+  -- Half the per-result floor: a tool that is somewhat close in meaning and
+  -- not close enough to show. Read from the function, so this test follows the
+  -- thresholds wherever a later migration moves them.
+  select f.result_min / 2 into v_w from public.relevance_floor() f;
 
   -- A paid tool with EVERY kind of evidence for 'zzfloor lantern': its name is
   -- what will be typed, its statement carries every term, and its vector is the
@@ -874,15 +928,16 @@ declare n integer; v_slugs text;
 begin
   perform pg_temp.be(null);
 
-  -- Premise: unconstrained, the paid tool is there, and the moderately close
-  -- free one comes along beside it. If either is missing the checks below
-  -- would pass for the wrong reason.
+  -- Premise: unconstrained, the paid tool is there — it is the query vector
+  -- itself — and the half-close free one is NOT, because being on a page that
+  -- has an answer is not the same as being one. If the first is missing the
+  -- checks below would pass for the wrong reason.
   select string_agg(s.slug::text, ',' order by s.slug) into v_slugs
     from public.search_tools('zzfloor lantern', p_limit => 50,
                              p_embedding => pg_temp.unit(6)) s
    where s.slug::text in ('zz-floor-paid', 'zz-floor-near');
-  if v_slugs is distinct from 'zz-floor-near,zz-floor-paid' then
-    perform pg_temp.fail('premise: unconstrained, expected both test tools, got '
+  if v_slugs is distinct from 'zz-floor-paid' then
+    perform pg_temp.fail('premise: unconstrained, expected only zz-floor-paid, got '
                       || coalesce(v_slugs, '(neither)'));
   end if;
 
@@ -898,11 +953,11 @@ begin
     perform pg_temp.fail('the relevance floor surfaced a paid tool for a query that said free');
   end if;
 
-  -- And the gate is asked of the FILTERED set. With the paid tool filtered out
-  -- nothing eligible is clearly close, so the moderately close free tool —
-  -- which shares no word and no name with the sentence — has no evidence of
-  -- its own and must not appear. A floor judged over the whole catalogue
-  -- would let the excluded tool vouch for it.
+  -- And the half-close free tool is still not shown with the paid one gone:
+  -- it shares no word and no name with the sentence, and its similarity is
+  -- below the per-result floor, so it has no evidence of its own. A floor that
+  -- let an excluded tool vouch for it, or that shrugged once the page was
+  -- otherwise empty, would surface it here.
   select count(*) into n
     from public.search_tools('zzfloor lantern',
            p_pricing   => array['free']::pricing_model[],
@@ -910,7 +965,54 @@ begin
            p_embedding => pg_temp.unit(6)) s
    where s.slug::text = 'zz-floor-near';
   if n > 0 then
-    perform pg_temp.fail('a tool the constraints removed made the gate pass for another tool');
+    perform pg_temp.fail('a tool below the per-result floor was shown to fill an empty page');
+  end if;
+end
+$$;
+
+-- --- the two lexical hatches, tightened by 0007 ---------------------------
+do $$
+declare n integer;
+begin
+  perform pg_temp.be(null);
+
+  -- ONE STEM IS NOT EVIDENCE. "glows" matches every term of a sentence with
+  -- one term, and the vector points elsewhere, so nothing here is evidence and
+  -- the tool must not appear.
+  select count(*) into n
+    from public.search_tools('glows', p_limit => 50, p_embedding => pg_temp.unit(500)) s
+   where s.slug::text = 'zz-floor-paid';
+  if n > 0 then
+    perform pg_temp.fail('a one-stem all-terms match opened the page: "file" and "app" would too');
+  end if;
+
+  -- Two stems, both present in the listing: that IS evidence, and the same
+  -- tool comes back with the same orthogonal vector. Without this the check
+  -- above would pass if the all-terms hatch were simply broken.
+  select count(*) into n
+    from public.search_tools('zzfloor glows', p_limit => 50, p_embedding => pg_temp.unit(500)) s
+   where s.slug::text = 'zz-floor-paid';
+  if n <> 1 then
+    perform pg_temp.fail('an all-terms match on two stems is not evidence, so the hatch is shut');
+  end if;
+
+  -- THE HALF-REMEMBERED NAME, which is what the trigram leg is for. At the
+  -- 0.50 this project shipped first, the leg's own cited example failed:
+  -- "notin" against Notion is 0.44 and "signel" against Signal is 0.40.
+  if similarity('Notion', 'notin') > 0.50 or similarity('Signal', 'signel') > 0.50 then
+    perform pg_temp.fail('the trigram examples changed; re-derive the name threshold');
+  end if;
+  if similarity('Signal', 'signel') < (select f.name_min from public.relevance_floor() f) then
+    perform pg_temp.fail('the name threshold is above the case the fuzzy leg exists for');
+  end if;
+
+  -- And behaviourally: a mistyped name finds the tool with a vector that
+  -- points nowhere near it.
+  select count(*) into n
+    from public.search_tools('zzfloor lantren', p_limit => 50, p_embedding => pg_temp.unit(500)) s
+   where s.slug::text = 'zz-floor-paid';
+  if n <> 1 then
+    perform pg_temp.fail('a mistyped name no longer finds its tool');
   end if;
 end
 $$;

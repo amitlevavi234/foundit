@@ -7,38 +7,51 @@
 //   node --env-file=.env.local scripts/embed.mjs --from-fixture
 //   node --env-file=.env.local scripts/embed.mjs --write-fixture
 //
-// Fills public.tool_problems.embedding for every problem statement on a
-// published tool, using the model public.embedding_model() names, and does
-// nothing at all on a second run because nothing changed.
+// Fills the two embedding columns this database has — every published tool's
+// summary (public.tools.embedding, added in 0007) and every problem statement
+// on a published tool (public.tool_problems.embedding) — using the model
+// public.embedding_model() names, and does nothing at all on a second run
+// because nothing changed.
 //
-// Five things about it are deliberate:
+// Six things about it are deliberate:
 //
 //   1. IT CONNECTS AS foundit_embed, from DATABASE_URL_EMBED, and refuses any
 //      other role by name. Not foundit_app, and certainly not the owner.
 //      db/migrations/0005_embed_role.sql explains why this is a role of its
-//      own: the power to WRITE a vector onto a problem statement and the
-//      power to ask which vector is nearest a cached query, held together,
-//      read the query cache out one sign bit at a time. The application has
-//      the second. This job has the first. Nothing has both.
+//      own: the power to WRITE a vector and the power to ask which vector is
+//      nearest a cached query, held together, read the query cache out one
+//      sign bit at a time. The application has the second. This job has the
+//      first. Nothing has both.
 //
-//   2. IT TOUCHES NO TABLE. foundit_embed holds no grant on tool_problems, on
-//      tools, on query_embeddings or on search_events. The queue comes from
-//      public.problem_embedding_work and the write goes through
-//      public.store_problem_embedding, and those two functions plus
+//   2. IT TOUCHES NO TABLE. foundit_embed holds no grant on tools, on
+//      tool_problems, on query_embeddings or on search_events. The two queues
+//      come from public.problem_embedding_work and public.tool_embedding_work,
+//      the writes go through public.store_problem_embedding and
+//      public.store_tool_embedding, and the fixture is written from
+//      public.embedding_corpus. Those five functions plus
 //      public.embedding_model() are the whole of what this role may call.
 //
 //   3. THE WORK PREDICATE LIVES IN THE DATABASE, not here, so the job and the
-//      index that serves it cannot drift apart. A row is work when it has
-//      never been embedded, when its statement changed after it was embedded,
-//      or when it was embedded by a model this database no longer uses.
+//      indexes that serve it cannot drift apart. A row is work when it has
+//      never been embedded, when its text changed after it was embedded, or
+//      when it was embedded by a model this database no longer uses.
 //
-//   4. THE DOCUMENT CAP IS NOT THE QUERY CAP. A query is capped at 200
-//      characters because it comes from an anonymous endpoint; a statement is
-//      capped at MAX_DOCUMENT_INPUT because the only risk there is one absurd
-//      row costing a fortune in a batch nobody is watching. Anything this cuts
-//      is printed with its row id rather than silently embedded as a prefix.
+//   4. THE DOCUMENT CAP IS NOT THE QUERY CAP, and a document that hits it is
+//      never recorded. A query is capped at 200 characters because it comes
+//      from an anonymous endpoint; a document is capped at MAX_DOCUMENT_INPUT
+//      because one absurd row should not cost a fortune in a batch nobody is
+//      watching. The ordinary job prints the id of anything it cuts;
+//      --write-fixture REFUSES to record it, because a fixture entry is keyed
+//      by the hash of the full text and would hand every later run the vector
+//      of a prefix under the name of the whole.
 //
-//   5. NOTHING IT PRINTS IS SENSITIVE. Counts, token usage and row ids. Never
+//   5. THE FIXTURE IS WRITTEN FROM THE CORPUS, NOT THE QUEUE. The queue lists
+//      what is outstanding, so on a filled database it is empty — and the
+//      guard that used to notice that only worked when there was no fixture
+//      yet. public.embedding_corpus() lists every text whether or not it is
+//      embedded, so a fixture can be written or extended from any database.
+//
+//   6. NOTHING IT PRINTS IS SENSITIVE. Counts, token usage and row ids. Never
 //      the key, never a connection string, never a statement.
 //
 // Exit codes: 0 done (including "nothing to do"), 1 configuration, 2 the
@@ -61,13 +74,26 @@ import {
   normalizeQuery,
   toFloat16Base64,
 } from '../lib/embeddings.ts';
+import { perturbedTexts } from '../eval/perturb.mjs';
 
 const EXIT = { OK: 0, CONFIG: 1, PROVIDER: 2, DATABASE: 3, FIXTURE: 4 };
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURE_PATH = join(ROOT, 'db', 'seed', 'embeddings.fixture.json');
-const GOLDEN_PATH = join(ROOT, 'eval', 'golden.jsonl');
-const NEGATIVES_PATH = join(ROOT, 'eval', 'negatives.jsonl');
+
+/**
+ * Every file of sentences the eval searches with. All three are required: a
+ * missing one is a smaller fixture and a keyless run that measures a different
+ * thing, which is precisely the failure the fixture exists to prevent.
+ */
+const SENTENCE_FILES = [
+  join(ROOT, 'eval', 'golden.jsonl'),
+  join(ROOT, 'eval', 'negatives.jsonl'),
+  join(ROOT, 'eval', 'negatives.review.jsonl'),
+];
+
+/** The fixture format. Bumped in 0007, when tool summaries joined it. */
+const FIXTURE_SCHEMA = 'foundit-embeddings/2';
 
 /** The role this job runs as, and the only one it will accept. */
 const ROLE = 'foundit_embed';
@@ -106,14 +132,13 @@ if (!databaseUrl || databaseUrl.trim() === '') {
 
 // The role is checked by name, not hoped for. A connection string pasted into
 // the wrong variable would otherwise work perfectly and quietly hand this job
-// the application's privileges — which is the exact pairing 0005 exists to
-// keep apart.
+// the application's privileges — which is the exact pairing 0005 keeps apart.
 try {
   const user = decodeURIComponent(new URL(databaseUrl).username);
   if (user !== ROLE) {
     process.stderr.write(
       `${URL_VARIABLE} connects as "${user}". The embedding job runs as ${ROLE}, which\n`
-        + 'holds two function grants and no table privilege of any kind.\n'
+        + 'holds five function grants and no table privilege of any kind.\n'
         + 'See db/migrations/0005_embed_role.sql for why this is not interchangeable.\n',
     );
     process.exit(EXIT.CONFIG);
@@ -133,52 +158,80 @@ if (needsApi && !embeddingsConfigured()) {
   process.exit(EXIT.CONFIG);
 }
 
-// Every statement this job sends. One read, one write, both function calls.
+// Every statement this job sends. Two reads, two writes, one corpus — all of
+// them function calls, because this role may not touch a table.
 const MODEL_SQL = 'select public.embedding_model() as model';
+const PROBLEM_WORK_SQL = 'select id, statement as body from public.problem_embedding_work()';
+const TOOL_WORK_SQL = 'select id, summary as body from public.tool_embedding_work()';
+const CORPUS_SQL = 'select kind, id, body from public.embedding_corpus()';
 
-const WORK_SQL = 'select id, statement from public.problem_embedding_work()';
-
-// One round trip per batch rather than one per statement: the ids and the
-// vectors go over as two arrays and unnest pairs them up.
-const STORE_SQL = `
+// One round trip per batch rather than one per row: the ids and the vectors go
+// over as two arrays and unnest pairs them up.
+const STORE_PROBLEM_SQL = `
   select count(*) filter (where public.store_problem_embedding(x.id, x.embedding::halfvec, $3::text))
            as stored
     from unnest($1::bigint[], $2::text[]) as x(id, embedding)`;
 
-/** sha256 of a statement, hex. The fixture's key, and its staleness check. */
+const STORE_TOOL_SQL = `
+  select count(*) filter (where public.store_tool_embedding(x.id, x.embedding::halfvec, $3::text))
+           as stored
+    from unnest($1::bigint[], $2::text[]) as x(id, embedding)`;
+
+/** sha256 of a text, hex. The fixture's key, and its staleness check. */
 const digest = (text) => createHash('sha256').update(String(text), 'utf8').digest('hex');
 
+/** Which map in the fixture a corpus row belongs in. */
+const mapFor = (fixture, kind) => (kind === 'tool' ? fixture.tools : fixture.statements);
+
 /**
- * The sentences eval/run.mjs will search with, for --write-fixture. Ids and
- * grades are not read.
+ * Every sentence eval/run.mjs will search with, for --write-fixture.
  *
- * TWO texts per golden entry, not one. The default pass searches the sentence
- * as written; `--read-query` searches what lib/constraints.ts leaves once the
- * constraint phrases are taken out, and that is a different string with a
- * different cache key. A fixture holding only the first makes a keyless
- * `--read-query` run measure a derived slice that is half text-only — which is
- * not wrong, exactly, but it is a number nobody can interpret.
+ * Four kinds, and all four have to be here or a keyless run measures
+ * something different from a run with a key:
  *
- * The reader is loaded through eval/reader.mjs, which is the one file in the
- * repository that names it, so Phase 4 replacing lib/constraints.ts wholesale
- * changes one import and not this. If it cannot be loaded the fixture is
- * written without the derived texts and says so.
+ *   the golden set as written           the default pass
+ *   the negatives, both files           the relevance floor's other half
+ *   every sentence as lib/constraints.ts reads it   the --read-query pass
+ *   four mechanical variants of each golden query   the perturbation gate
+ *
+ * The reader is reached through eval/reader.mjs, the one file in the
+ * repository that names lib/constraints.ts, so Phase 4 replacing it wholesale
+ * changes an import and not this. If it cannot be loaded the fixture is
+ * written without the derived sentences and says so loudly.
  */
-async function evalQueries() {
-  // The golden set and the negatives (eval/negatives.jsonl): sentences with a
-  // known right answer, and sentences with a known right answer of "nothing".
-  // Both are searched by eval/run.mjs, so both need their vectors recorded
-  // here, or a keyless run measures the relevance floor on half its evidence.
+async function evalSentences() {
   const authored = [];
-  for (const file of [GOLDEN_PATH, NEGATIVES_PATH]) {
-    if (!existsSync(file)) continue;
+  for (const file of SENTENCE_FILES) {
+    if (!existsSync(file)) {
+      process.stderr.write(
+        `\n${file.slice(ROOT.length + 1)} is missing.\n`
+          + 'Every sentence the eval searches with has to be in the fixture, or a keyless\n'
+          + 'run measures a different search from a run with a key. Restore the file, or\n'
+          + 'remove it from SENTENCE_FILES on purpose.\n',
+      );
+      process.exit(EXIT.FIXTURE);
+    }
     for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
       const trimmed = line.trim();
       if (trimmed === '' || trimmed.startsWith('#')) continue;
       const obj = JSON.parse(trimmed);
-      if (typeof obj.query === 'string' && obj.query.trim() !== '') authored.push(obj.query);
+      // The golden set and eval/negatives.jsonl say "query"; the held-out
+      // review set says "q". Both are read; neither file is edited.
+      const text = typeof obj.query === 'string' ? obj.query : obj.q;
+      if (typeof text === 'string' && text.trim() !== '') authored.push(text);
     }
   }
+
+  // Perturbations are of the golden set only: they measure whether a real
+  // question survives being typed slightly differently.
+  const golden = [];
+  for (const line of readFileSync(SENTENCE_FILES[0], 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    const obj = JSON.parse(trimmed);
+    if (typeof obj.query === 'string' && obj.query.trim() !== '') golden.push(obj.query);
+  }
+  const perturbed = perturbedTexts(golden);
 
   let derived = [];
   try {
@@ -191,24 +244,39 @@ async function evalQueries() {
     );
   }
 
-  return { authored, derived };
+  return { authored, derived, perturbed };
 }
 
-function readFixture() {
+function readFixture({ required = true } = {}) {
+  if (!existsSync(FIXTURE_PATH)) {
+    if (!required) return null;
+    process.stderr.write(
+      `could not read ${FIXTURE_PATH.slice(ROOT.length + 1)}\n`
+        + 'Run `scripts/embed.mjs --write-fixture` with a key to record it.\n',
+    );
+    process.exit(EXIT.FIXTURE);
+  }
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
   } catch (error) {
     process.stderr.write(
-      `could not read ${FIXTURE_PATH.slice(ROOT.length + 1)}: ${error.code ?? 'error'}\n`
-        + 'Run `scripts/embed.mjs --write-fixture` with a key to record it.\n',
+      `could not read ${FIXTURE_PATH.slice(ROOT.length + 1)}: ${error.code ?? 'error'}\n`,
     );
     process.exit(EXIT.FIXTURE);
   }
-  if (parsed?.schema !== 'foundit-embeddings/1') {
-    process.stderr.write(`the fixture's schema is ${parsed?.schema ?? '(missing)'}, not foundit-embeddings/1\n`);
+  if (parsed?.schema !== FIXTURE_SCHEMA) {
+    process.stderr.write(
+      `the fixture's schema is ${parsed?.schema ?? '(missing)'}, not ${FIXTURE_SCHEMA}.\n`
+        + 'A fixture recorded before 0007 has no tool-summary vectors, so loading it would\n'
+        + 'leave half the vector leg empty and the measurement would be of neither search.\n'
+        + 'Re-record it: scripts/embed.mjs --write-fixture.\n',
+    );
     process.exit(EXIT.FIXTURE);
   }
+  parsed.statements ??= {};
+  parsed.tools ??= {};
+  parsed.queries ??= {};
   return parsed;
 }
 
@@ -236,15 +304,59 @@ try {
   process.exit(EXIT.DATABASE);
 }
 
+/** Embed a list of texts and write them back through one definer setter. */
+async function fill(rows, storeSql, label) {
+  let embedded = 0;
+  let tokens = 0;
+  let requests = 0;
+
+  for (let i = 0; i < rows.length; i += EMBEDDINGS_BATCH_SIZE) {
+    const batch = rows.slice(i, i + EMBEDDINGS_BATCH_SIZE);
+    const result = await embedTexts(batch.map((row) => row.body), { cap: MAX_DOCUMENT_INPUT });
+    requests += 1;
+    tokens += result.tokens;
+
+    // Anything the document cap cut is named, with its row id, rather than
+    // embedded as a prefix of itself and forgotten.
+    for (const n of result.truncated) {
+      process.stdout.write(
+        `  WARNING: ${label} ${batch[n].id} is longer than ${MAX_DOCUMENT_INPUT} characters `
+          + 'and was cut before embedding\n',
+      );
+    }
+
+    const { rows: out } = await client.query(storeSql, [
+      batch.map((row) => row.id),
+      result.vectors,
+      result.model,
+    ]);
+    const stored = Number(out[0].stored);
+    embedded += stored;
+
+    if (stored !== batch.length) {
+      process.stdout.write(
+        `  batch ${requests}: ${stored} of ${batch.length} ${label} rows written — `
+          + 'a row disappeared while the batch was in flight\n',
+      );
+    } else {
+      process.stdout.write(`  batch ${requests}: ${stored} ${label}s\n`);
+    }
+  }
+
+  return { embedded, tokens, requests };
+}
+
 try {
   const { rows: modelRows } = await client.query(MODEL_SQL);
   const model = modelRows[0].model;
 
-  const { rows: work } = await client.query(WORK_SQL);
+  const { rows: problemWork } = await client.query(PROBLEM_WORK_SQL);
+  const { rows: toolWork } = await client.query(TOOL_WORK_SQL);
 
   process.stdout.write(`role             ${(await client.query('select current_user')).rows[0].current_user}\n`);
   process.stdout.write(`model            ${model}\n`);
-  process.stdout.write(`statements to do ${work.length}\n`);
+  process.stdout.write(`statements to do ${problemWork.length}\n`);
+  process.stdout.write(`summaries to do  ${toolWork.length}\n`);
 
   // --- writing the fixture is its own job -----------------------------------
   if (writeFixture) {
@@ -253,26 +365,11 @@ try {
     // the exception. The fixture is embedded fresh from the same text the
     // database holds, which is the same vector by construction.
     //
-    // TWO MODES, decided by whether a fixture already exists.
-    //
-    //   Recording  (no fixture yet) — every outstanding statement and every
-    //              eval sentence. The queue is the only thing this role can
-    //              read, and it lists what is OUTSTANDING, so a first
-    //              recording is made from a freshly seeded database, where
-    //              everything is outstanding, and never from a filled one.
-    //
-    //   Extending  (a fixture exists) — only what it does not hold yet: an
-    //              eval sentence that was added (the negatives were), or an
-    //              outstanding statement whose hash it has never seen. What is
-    //              already recorded is NEVER re-fetched. Re-fetching the same
-    //              text returns a float32 vector that rounds into float16
-    //              differently, two tools swap on a tie, and the baseline moves
-    //              in the fourth decimal for a reason nobody changed — which is
-    //              the one thing this file exists to stop.
-    //
-    // Identical statements on two different tools collapse to one entry,
-    // because the key is the hash of the text.
-    const existing = existsSync(FIXTURE_PATH) ? readFixture() : null;
+    // Extending, never re-recording. A vector already in the file is left
+    // exactly as it is: re-fetching the same text returns float32 that rounds
+    // into float16 differently, two tools swap on a tie, and the headline
+    // moves in the fourth decimal for a reason nobody changed.
+    const existing = readFixture({ required: false });
     if (existing && existing.model !== model) {
       process.stderr.write(
         `\nthe fixture was recorded from ${existing.model} and this database uses ${model}.\n`
@@ -281,71 +378,71 @@ try {
       );
       exitCode = EXIT.FIXTURE;
     } else {
-      const statements = new Map();
-      for (const row of work) {
-        if (!existing || existing.statements?.[digest(row.statement)] === undefined) {
-          statements.set(row.statement, null);
+      const fixture = existing ?? {
+        schema: FIXTURE_SCHEMA,
+        model,
+        dimensions: 512,
+        recorded: new Date().toISOString().slice(0, 10),
+        // Keyed by the sha256 of the text: a statement or summary that is
+        // later rewritten no longer hashes to its entry, so --from-fixture
+        // skips it and says so rather than loading the vector of text that no
+        // longer exists.
+        statements: {},
+        tools: {},
+        // Keyed by the normalised query, which is the query cache's own key.
+        queries: {},
+      };
+
+      const { rows: corpus } = await client.query(CORPUS_SQL);
+      const missing = corpus.filter((row) => mapFor(fixture, row.kind)[digest(row.body)] === undefined);
+
+      const { authored, derived, perturbed } = await evalSentences();
+      const keys = [
+        ...new Set(
+          [...authored, ...derived, ...perturbed].map((q) => normalizeQuery(q)).filter((q) => q !== ''),
+        ),
+      ].filter((key) => fixture.queries[key] === undefined);
+
+      process.stdout.write(`mode             ${existing ? 'extending the existing fixture' : 'recording a new fixture'}\n`);
+      process.stdout.write(`corpus           ${corpus.length} texts (${missing.length} not yet recorded)\n`);
+      process.stdout.write(`eval sentences   ${authored.length} as written, ${derived.length} as read, ${perturbed.length} perturbed\n`);
+      process.stdout.write(`  new sentences  ${keys.length}\n`);
+
+      let requests = 0;
+      let tokens = 0;
+      let refused = 0;
+
+      // The vectors come back as halfvec literals; the fixture stores float16
+      // bytes, which is what a halfvec column actually holds.
+      const pack = (literal) => toFloat16Base64(literal.slice(1, -1).split(',').map(Number));
+
+      for (let i = 0; i < missing.length && exitCode === EXIT.OK; i += EMBEDDINGS_BATCH_SIZE) {
+        const batch = missing.slice(i, i + EMBEDDINGS_BATCH_SIZE);
+        const result = await embedTexts(batch.map((row) => row.body), { cap: MAX_DOCUMENT_INPUT });
+        requests += 1;
+        tokens += result.tokens;
+
+        // A truncated document must never be recorded: the entry would be keyed
+        // by the hash of the whole text and hold the vector of a prefix, and
+        // every later --from-fixture run would load it as if it were the whole.
+        if (result.truncated.length > 0) {
+          for (const n of result.truncated) {
+            process.stderr.write(
+              `  REFUSED: ${batch[n].kind} ${batch[n].id} is longer than ${MAX_DOCUMENT_INPUT} `
+                + 'characters, so its vector would be of a prefix under the name of the whole\n',
+            );
+            refused += 1;
+          }
+          exitCode = EXIT.FIXTURE;
+          break;
         }
+
+        batch.forEach((row, n) => {
+          mapFor(fixture, row.kind)[digest(row.body)] = pack(result.vectors[n]);
+        });
       }
 
-      if (!existing && statements.size === 0) {
-        process.stderr.write(
-          '\nThere is no outstanding work and no fixture, so there is nothing to record from.\n'
-            + 'A first fixture is written from a database whose embeddings are NOT yet filled:\n'
-            + '  node db/apply.mjs --fresh --seed && node --env-file=.env.local \\\n'
-            + '    scripts/embed.mjs --write-fixture\n',
-        );
-        exitCode = EXIT.FIXTURE;
-      } else {
-        const { authored, derived } = await evalQueries();
-        process.stdout.write(`eval sentences   ${authored.length} as written, ${derived.length} as read\n`);
-
-        const fixture = existing ?? {
-          schema: 'foundit-embeddings/1',
-          model,
-          dimensions: 512,
-          recorded: new Date().toISOString().slice(0, 10),
-          // Keyed by the sha256 of the statement: a statement that is later
-          // rewritten no longer hashes to its entry, so --from-fixture skips
-          // it and says how many it skipped rather than loading a vector of
-          // text that no longer exists.
-          statements: {},
-          // Keyed by the normalised query, which is exactly the query cache's
-          // own key.
-          queries: {},
-        };
-        fixture.statements ??= {};
-        fixture.queries ??= {};
-
-        const keys = [
-          ...new Set(
-            [...authored, ...derived].map((q) => normalizeQuery(q)).filter((q) => q !== ''),
-          ),
-        ].filter((key) => fixture.queries[key] === undefined);
-
-        process.stdout.write(`mode             ${existing ? 'extending the existing fixture' : 'recording a new fixture'}\n`);
-        process.stdout.write(`  new statements ${statements.size}\n`);
-        process.stdout.write(`  new sentences  ${keys.length}\n`);
-
-        let requests = 0;
-        let tokens = 0;
-
-        // The vectors come back as halfvec literals; the fixture stores
-        // float16 bytes, which is what a halfvec column actually holds, and is
-        // a third of the size as text.
-        const pack = (literal) => toFloat16Base64(literal.slice(1, -1).split(',').map(Number));
-
-        const texts = [...statements.keys()];
-        for (let i = 0; i < texts.length; i += EMBEDDINGS_BATCH_SIZE) {
-          const batch = texts.slice(i, i + EMBEDDINGS_BATCH_SIZE);
-          const result = await embedTexts(batch, { cap: MAX_DOCUMENT_INPUT });
-          requests += 1;
-          tokens += result.tokens;
-          batch.forEach((text, n) => {
-            fixture.statements[digest(text)] = pack(result.vectors[n]);
-          });
-        }
-
+      if (exitCode === EXIT.OK) {
         for (let i = 0; i < keys.length; i += EMBEDDINGS_BATCH_SIZE) {
           const batch = keys.slice(i, i + EMBEDDINGS_BATCH_SIZE);
           const result = await embedTexts(batch);
@@ -357,21 +454,24 @@ try {
         }
 
         if (requests === 0) {
-          process.stdout.write('\nnothing to add   the fixture already holds every sentence and statement\n');
+          process.stdout.write('\nnothing to add   the fixture already holds every text and sentence\n');
         } else {
           if (existing) fixture.extended = new Date().toISOString().slice(0, 10);
           writeFileSync(FIXTURE_PATH, `${JSON.stringify(fixture)}\n`, 'utf8');
           const bytes = readFileSync(FIXTURE_PATH).byteLength;
           process.stdout.write(`\nwrote            db/seed/embeddings.fixture.json\n`);
           process.stdout.write(`  statements     ${Object.keys(fixture.statements).length}\n`);
+          process.stdout.write(`  tools          ${Object.keys(fixture.tools).length}\n`);
           process.stdout.write(`  queries        ${Object.keys(fixture.queries).length}\n`);
           process.stdout.write(`  size           ${(bytes / 1024).toFixed(0)} kB\n`);
           process.stdout.write(`  api requests   ${requests}\n`);
           process.stdout.write(`  prompt tokens  ${tokens}\n`);
         }
+      } else {
+        process.stderr.write(`\nnothing was written: ${refused} text(s) are too long to record.\n`);
       }
     }
-  } else if (work.length === 0) {
+  } else if (problemWork.length === 0 && toolWork.length === 0) {
     process.stdout.write('embedded         0 (nothing has changed)\n');
   } else if (dryRun) {
     process.stdout.write('embedded         0 (--dry-run: no request made, nothing written)\n');
@@ -388,28 +488,34 @@ try {
       let embedded = 0;
       let skipped = 0;
 
-      for (let i = 0; i < work.length; i += EMBEDDINGS_BATCH_SIZE) {
-        const batch = work.slice(i, i + EMBEDDINGS_BATCH_SIZE);
-        const ids = [];
-        const vectors = [];
-        for (const row of batch) {
-          const recorded = fixture.statements[digest(row.statement)];
-          if (recorded === undefined) {
-            skipped += 1;
-            continue;
+      for (const [rows, storeSql, kind, label] of [
+        [problemWork, STORE_PROBLEM_SQL, 'problem', 'statement'],
+        [toolWork, STORE_TOOL_SQL, 'tool', 'summary'],
+      ]) {
+        for (let i = 0; i < rows.length; i += EMBEDDINGS_BATCH_SIZE) {
+          const batch = rows.slice(i, i + EMBEDDINGS_BATCH_SIZE);
+          const ids = [];
+          const vectors = [];
+          for (const row of batch) {
+            const recorded = mapFor(fixture, kind)[digest(row.body)];
+            if (recorded === undefined) {
+              skipped += 1;
+              continue;
+            }
+            ids.push(row.id);
+            vectors.push(fromFloat16Base64(recorded));
           }
-          ids.push(row.id);
-          vectors.push(fromFloat16Base64(recorded));
+          if (ids.length === 0) continue;
+          const { rows: out } = await client.query(storeSql, [ids, vectors, fixture.model]);
+          embedded += Number(out[0].stored);
+          process.stdout.write(`  ${label}: ${Number(out[0].stored)} loaded\n`);
         }
-        if (ids.length === 0) continue;
-        const { rows } = await client.query(STORE_SQL, [ids, vectors, fixture.model]);
-        embedded += Number(rows[0].stored);
       }
 
       process.stdout.write(`embedded         ${embedded} (from the fixture; no request made)\n`);
       if (skipped > 0) {
         process.stdout.write(
-          `SKIPPED          ${skipped} statement(s) are not in the fixture, or have been\n`
+          `SKIPPED          ${skipped} text(s) are not in the fixture, or have been\n`
             + '                 rewritten since it was recorded. They have no vector and will\n'
             + '                 not be found by the vector leg. Re-record with --write-fixture.\n',
         );
@@ -417,55 +523,21 @@ try {
     }
   } else {
     // --- the ordinary job ---------------------------------------------------
-    let embedded = 0;
-    let tokens = 0;
-    let requests = 0;
+    const statements = await fill(problemWork, STORE_PROBLEM_SQL, 'statement');
+    const summaries = await fill(toolWork, STORE_TOOL_SQL, 'summary');
 
-    for (let i = 0; i < work.length; i += EMBEDDINGS_BATCH_SIZE) {
-      const batch = work.slice(i, i + EMBEDDINGS_BATCH_SIZE);
-      const result = await embedTexts(
-        batch.map((row) => row.statement),
-        { cap: MAX_DOCUMENT_INPUT },
-      );
-      requests += 1;
-      tokens += result.tokens;
-
-      // Anything the document cap cut is named, with its row id, rather than
-      // embedded as a prefix of itself and forgotten.
-      for (const n of result.truncated) {
-        process.stdout.write(
-          `  WARNING: statement ${batch[n].id} is longer than ${MAX_DOCUMENT_INPUT} characters `
-            + 'and was cut before embedding\n',
-        );
-      }
-
-      const { rows } = await client.query(STORE_SQL, [
-        batch.map((row) => row.id),
-        result.vectors,
-        result.model,
-      ]);
-      const stored = Number(rows[0].stored);
-      embedded += stored;
-
-      if (stored !== batch.length) {
-        process.stdout.write(
-          `  batch ${requests}: ${stored} of ${batch.length} rows written — `
-            + 'a statement disappeared while the batch was in flight\n',
-        );
-      } else {
-        process.stdout.write(`  batch ${requests}: ${stored} statements\n`);
-      }
-    }
-
-    process.stdout.write(`embedded         ${embedded}\n`);
-    process.stdout.write(`api requests     ${requests}\n`);
-    process.stdout.write(`prompt tokens    ${tokens}\n`);
+    process.stdout.write(`embedded         ${statements.embedded} statements, ${summaries.embedded} summaries\n`);
+    process.stdout.write(`api requests     ${statements.requests + summaries.requests}\n`);
+    process.stdout.write(`prompt tokens    ${statements.tokens + summaries.tokens}\n`);
   }
 
-  // The queue is the only thing this role can read, so "how much is left" is
+  // The queues are the only thing this role can read, so "how much is left" is
   // asked the same way "what is left" was.
-  const { rows: remaining } = await client.query(WORK_SQL);
-  process.stdout.write(`still to do      ${remaining.length} (published statements)\n`);
+  const { rows: remainingProblems } = await client.query(PROBLEM_WORK_SQL);
+  const { rows: remainingTools } = await client.query(TOOL_WORK_SQL);
+  process.stdout.write(
+    `still to do      ${remainingProblems.length} statement(s), ${remainingTools.length} summary/summaries\n`,
+  );
 } catch (error) {
   if (error instanceof EmbeddingError) {
     // The reason and nothing else: EmbeddingError is built to carry no key, no

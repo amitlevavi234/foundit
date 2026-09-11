@@ -217,16 +217,32 @@ export function touchQueryEmbedding(query: string): void {
  *      served to the next visitor. Search is NOT cached here: it has its own
  *      cache (the query vector) and its own rules.
  *
- *   2. A STRANGER CANNOT GROW THE CACHE. The cache key includes the
- *      arguments, and `?in=` and `/tools/<slug>` come straight off the URL.
- *      Unbounded, a script could write one entry per invented string, which is
- *      the disk-filling bug 0005 fixed in the query cache. So a category is
- *      cached only when it is one the (cached) category list contains, and a
- *      tool page only when a published tool exists: an unknown one is asked
- *      of the database directly, exactly as before, and stored nowhere.
+ *   2. A STRANGER CANNOT GROW THE CACHE WITH INVENTED KEYS. The cache key
+ *      includes the arguments, and `?in=` and `/tools/<slug>` come straight
+ *      off the URL. Unbounded, a script could write one entry per invented
+ *      string, which is the disk-filling bug 0005 fixed in the query cache. So
+ *      a category is cached only when it is one the (cached) category list
+ *      contains, and a tool page only when a published tool exists: an unknown
+ *      one is asked of the database directly and stored nowhere.
+ *
+ *      That claim was too strong when it was first written here, and the
+ *      correction is the reason for `lower()` below. Slugs are `citext` in the
+ *      database, so `/tools/Splitwise`, `/tools/SPLITWISE` and 223 other
+ *      spellings are all the SAME published tool — each of which would have
+ *      been a separate cache entry, and `?in=MONEY` would have missed the
+ *      guard's exact-match check and gone to the database on every request.
+ *      Both keys are folded to lower case first, which is what makes the
+ *      sentence true rather than nearly true.
  *
  *   3. STILL ONE ROUND TRIP. A cache miss runs the same single statement it
  *      always did; nothing here adds a query to a page.
+ *
+ * WHAT HAS TO CHANGE WHEN SOMETHING STARTS WRITING. Nothing in the application
+ * writes to the catalogue yet, so a minute of staleness is the whole story.
+ * The first things that do — an admin taking down a review (product-decisions
+ * §4), a maker editing a listing or adding one (Phase 7) — must call
+ * `revalidateTag('catalogue')` in the same action, or a removed review stays
+ * on the tool page for up to a minute after somebody was told it was gone.
  * ======================================================================== */
 
 /** How long a catalogue page's data may be served before it is refreshed. */
@@ -279,12 +295,16 @@ export async function getBrowse(
   limit = 12,
 ): Promise<BrowseData> {
   if (category === null) return browseCached(null, limit);
+  // `slug` is citext: the database matches case-insensitively, so the key and
+  // the guard must too, or "Money" is a second cache entry for the same page
+  // and "MONEY" slips past the guard onto the uncached path on every request.
+  const key = category.toLowerCase();
   const all = await browseCached(null, limit);
-  if (!all.categories.some((c) => c.slug === category)) {
+  if (!all.categories.some((c) => c.slug.toLowerCase() === key)) {
     // Not a category this catalogue has: answered, never stored.
     return runBrowse(getPool(), category, limit);
   }
-  return browseCached(category, limit);
+  return browseCached(key, limit);
 }
 
 /** Everything /top draws, ranked by a real counter. One round trip on a miss. */
@@ -294,11 +314,12 @@ export async function getTop(
   limit = 25,
 ): Promise<TopData> {
   if (category === null) return topCached(null, ranking, limit);
+  const key = category.toLowerCase();
   const all = await topCached(null, ranking, limit);
-  if (!all.categories.some((c) => c.slug === category)) {
+  if (!all.categories.some((c) => c.slug.toLowerCase() === key)) {
     return runTop(getPool(), category, ranking, limit);
   }
-  return topCached(category, ranking, limit);
+  return topCached(key, ranking, limit);
 }
 
 /**
@@ -308,7 +329,10 @@ export async function getTop(
  */
 export async function getToolPage(slug: string, reviewLimit = 10): Promise<ToolPageData | null> {
   try {
-    return await toolCached(slug, reviewLimit);
+    // Lower-cased for the same reason as the category above: `tools.slug` is
+    // citext, so every casing of a real slug is the same page and must not be
+    // a cache entry of its own.
+    return await toolCached(slug.toLowerCase(), reviewLimit);
   } catch (error) {
     if ((error as { code?: unknown } | null)?.code === NOT_PUBLISHED) return null;
     if ((error as { message?: unknown } | null)?.message === NOT_PUBLISHED) return null;

@@ -42,6 +42,8 @@
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
+
+import { perturbations } from './perturb.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
@@ -81,8 +83,14 @@ const EVAL_DIR = path.join(ROOT, 'eval');
 const GOLDEN_PATH = path.join(EVAL_DIR, 'golden.jsonl');
 /** Sentences with no right answer but "nothing". Never merged into the golden set. */
 const NEGATIVES_PATH = path.join(EVAL_DIR, 'negatives.jsonl');
-/** A negative is either far from anything the catalogue does, or a near miss. */
-export const NEGATIVE_KINDS = ['far', 'near'];
+/** The held-out negatives: written by a reviewer, never tuned against. */
+const HELD_OUT_PATH = path.join(EVAL_DIR, 'negatives.review.jsonl');
+/**
+ * A negative is far from anything the catalogue does, a near miss, or
+ * non-English. The held-out file uses the third; both files are read exactly
+ * as their authors wrote them and neither is ever edited here.
+ */
+export const NEGATIVE_KINDS = ['far', 'near', 'nonen'];
 const BASELINES_PATH = path.join(EVAL_DIR, 'baselines.md');
 const RESULTS_DIR = path.join(EVAL_DIR, 'results');
 /** The recorded vectors that let a keyless run measure the real hybrid search. */
@@ -505,8 +513,11 @@ export function parseNegatives(text) {
       return;
     }
     seenIds.add(obj.id);
-    if (typeof obj.query !== 'string' || obj.query.trim() === '') {
-      errors.push(`line ${lineNo} (${obj.id}): missing "query"`);
+    // "query" in eval/negatives.jsonl, "q" in the held-out review file. Both
+    // are read; neither file is rewritten to suit this parser.
+    const text = typeof obj.query === 'string' ? obj.query : obj.q;
+    if (typeof text !== 'string' || text.trim() === '') {
+      errors.push(`line ${lineNo} (${obj.id}): missing "query" (or "q")`);
       return;
     }
     if (
@@ -554,7 +565,7 @@ export function parseNegatives(text) {
 
     queries.push({
       id: obj.id,
-      query: obj.query,
+      query: text,
       lang: typeof obj.lang === 'string' && obj.lang ? obj.lang : 'en',
       note: typeof obj.note === 'string' ? obj.note : '',
       kind,
@@ -604,11 +615,32 @@ export function aggregateNegatives(entries) {
 // Baselines
 // ===========================================================================
 
-/** `"26 of 30"` -> {count: 26, total: 30}; `"3"` -> {count: 3, total: null}; else null. */
-export function parseCountOf(cell) {
-  const m = /^\s*(\d+)(?:\s*of\s*(\d+))?/i.exec(String(cell ?? ''));
-  if (!m) return null;
-  return { count: Number(m[1]), total: m[2] === undefined ? null : Number(m[2]) };
+/**
+ * `"26 of 30"` -> {count: 26, total: 30}. `"**0 of 240**"` is the same thing
+ * with markdown in it. An empty cell is null — that column gates nothing.
+ *
+ * Anything else THROWS. A gate whose input it cannot read must not quietly
+ * become no gate: the previous version returned null for "twenty-six of
+ * thirty", for "26 / 30", and for a typo, and null means "this row does not
+ * gate that", so a mistake in the table silently switched the gate off. The
+ * only two readings are a number and nothing.
+ */
+export function parseCountOf(cell, column = 'a count') {
+  const text = String(cell ?? '').replace(/\*/g, '').trim();
+  if (text === '' || text === '-' || text === '—') return null;
+  const m = /^(\d+)\s*(?:of|\/)\s*(\d+)$/i.exec(text) ?? /^(\d+)$/.exec(text);
+  if (!m) {
+    throw new Error(
+      `${column} reads ${JSON.stringify(String(cell))}, which is not "N of M", "N/M" or a number. ` +
+        'Fix the row in eval/baselines.md: a gate that cannot read its own baseline must fail, not pass.',
+    );
+  }
+  const count = Number(m[1]);
+  const total = m[2] === undefined ? null : Number(m[2]);
+  if (total !== null && (total === 0 || count > total)) {
+    throw new Error(`${column} reads ${JSON.stringify(String(cell))}, which is not a share of anything.`);
+  }
+  return { count, total };
 }
 
 /**
@@ -670,11 +702,16 @@ export function parseBaselines(markdown) {
     // A row marked WITHDRAWN is not a baseline. eval/baselines.md already
     // holds one — a Phase 2 number measured against a corpus written to be
     // found, through a connection that bypassed row-level security — and it is
-    // kept because deleting it would hide what happened. It sits ABOVE the row
-    // that replaced it, so today it is harmless; the day somebody withdraws the
-    // newest row, this is what stops the gate quietly adopting a number the
-    // file says in bold is not one.
-    if (cells.some((c) => /withdrawn/i.test(c))) continue;
+    // kept because deleting it would hide what happened.
+    //
+    // Only the status cell and the commit cell are read for that word, and
+    // only where a marker belongs: at the START of the note, as
+    // "**WITHDRAWN — …**". Reading every cell, anywhere in it, meant a later
+    // row could withdraw ITSELF by describing what happened to an earlier one
+    // ("the row above was withdrawn because…"), which would delete a perfectly
+    // good baseline and quietly gate against an older number.
+    const WITHDRAWN = /^[*_\s]*withdrawn\b/i;
+    if ([cell('what changed'), cell('commit')].some((c) => WITHDRAWN.test(c))) continue;
 
     rows.push({
       date: cell('date') || '(no date)',
@@ -692,8 +729,10 @@ export function parseBaselines(markdown) {
       // Two gates besides nDCG, both read off the same row. Blank on rows
       // recorded before the relevance floor, and a blank gate is skipped
       // rather than invented.
-      zeroResult: parseCountOf(cell('zero-result')),
-      negativesEmpty: parseCountOf(cell('negatives empty')),
+      zeroResult: parseCountOf(cell('zero-result'), 'the Zero-result column'),
+      negativesEmpty: parseCountOf(cell('negatives empty'), 'the Negatives empty column'),
+      heldOutEmpty: parseCountOf(cell('held-out empty'), 'the Held-out empty column'),
+      perturbedEmpty: parseCountOf(cell('perturbed empty'), 'the Perturbed empty column'),
       note: cell('what changed'),
     });
   }
@@ -767,7 +806,40 @@ export function checkZeroResultRegression(currentZero, baseline) {
  * prevent.
  */
 export function checkNegativesRegression(current, baseline) {
-  const recorded = baseline?.negativesEmpty;
+  return checkEmptyRateRegression(current, baseline?.negativesEmpty);
+}
+
+/** The same gate, against the held-out file's own recorded share. */
+export function checkHeldOutRegression(current, baseline) {
+  return checkEmptyRateRegression(current, baseline?.heldOutEmpty);
+}
+
+/**
+ * Every golden query is also searched four ways it might have been typed — a
+ * full stop, a question mark, a "please", one transposed letter. None of them
+ * may empty a page.
+ *
+ * Zero is the gate, not "no worse than recorded": a floor that depends on
+ * punctuation is not a floor, and the first version of this one sat a
+ * thousandth above a golden query's best match. Without a vector there is no
+ * floor at all, so the count is whatever Phase 2's retrieval does and the
+ * recorded row is what it is compared against.
+ */
+export function checkPerturbationGate(currentEmpty, baseline, vectorsUsed) {
+  if (vectorsUsed) {
+    return { regressed: currentEmpty > 0, current: currentEmpty, allowed: 0, recorded: null };
+  }
+  const recorded = baseline?.perturbedEmpty;
+  if (!recorded) return null;
+  return {
+    regressed: currentEmpty > recorded.count,
+    current: currentEmpty,
+    allowed: recorded.count,
+    recorded,
+  };
+}
+
+function checkEmptyRateRegression(current, recorded) {
   if (!recorded || !recorded.total) return null;
   const recordedRate = recorded.count / recorded.total;
   if (!current) {
@@ -865,6 +937,8 @@ function parseArgs(argv) {
     baselinesExplicit: false,
     negatives: NEGATIVES_PATH,
     negativesExplicit: false,
+    heldOut: HELD_OUT_PATH,
+    heldOutExplicit: false,
     readQuery: false,
     help: false,
   };
@@ -886,6 +960,10 @@ function parseArgs(argv) {
     else if (arg.startsWith('--negatives=')) {
       opts.negatives = path.resolve(process.cwd(), arg.slice(12));
       opts.negativesExplicit = true;
+    }
+    else if (arg.startsWith('--held-out=')) {
+      opts.heldOut = path.resolve(process.cwd(), arg.slice(11));
+      opts.heldOutExplicit = true;
     }
     else return { error: `unknown argument: ${arg}` , opts };
   }
@@ -913,6 +991,9 @@ const USAGE = `Foundit search evaluation harness
   --negatives=PATH  sentences the catalogue cannot answer, whose right answer is
                   an empty page (default eval/negatives.jsonl). --baseline gates
                   the share that come back empty.
+  --held-out=PATH   a second negatives file nobody tuned against
+                  (default eval/negatives.review.jsonl). Reported separately and
+                  gated separately: it is the honest number.
   --read-query    also run every query through lib/constraints.ts — derived
                   constraints, residual text — and print both slices and the
                   divergence between them. Off by default; changes nothing
@@ -990,10 +1071,23 @@ const STORE_QUERY_EMBEDDINGS_SQL = `
  * one produce the same number from the same recorded vectors rather than two
  * numbers a ten-thousandth apart.
  */
+/** The fixture format this harness reads. Bumped in 0007 with tool summaries. */
+const FIXTURE_SCHEMA = 'foundit-embeddings/2';
+
 function fixtureQueryVectors(embeddings) {
   try {
     const parsed = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
-    if (parsed?.schema !== 'foundit-embeddings/1') return {};
+    if (parsed?.schema !== FIXTURE_SCHEMA) {
+      // Loudly, not silently: a fixture this harness cannot read means every
+      // sentence goes to the API on a laptop and NONE is warmed on CI, where
+      // the run would quietly measure the text-only search instead.
+      process.stdout.write(
+        `  NOTE: db/seed/embeddings.fixture.json is ${parsed?.schema ?? '(no schema)'}, ` +
+          `not ${FIXTURE_SCHEMA}; no sentence can be warmed from it.\n` +
+          '        Re-record it: scripts/embed.mjs --write-fixture.\n',
+      );
+      return {};
+    }
     const out = {};
     for (const [key, encoded] of Object.entries(parsed.queries ?? {})) {
       out[key] = embeddings.fromFloat16Base64(encoded);
@@ -1054,6 +1148,7 @@ async function warmQueryCache(client, texts, redact) {
         // The fixture records the model it was written from; a mismatch is
         // refused by store_query_embedding rather than mixed in.
         JSON.parse(readFileSync(FIXTURE_PATH, 'utf8')).model,
+
       ]);
       summary.fromFixture = have.length;
       summary.missing -= have.length;
@@ -1131,6 +1226,25 @@ class EvalExit extends Error {
  * in either direction. `--read-query` and DERIVED plans exist because of that.
  */
 const AUTHORED_PLAN = (q) => ({ text: q.query, constraints: q.constraints });
+
+/**
+ * Every golden query, four ways it might have been typed instead.
+ *
+ * The judgements and the constraints travel with each variant: the same
+ * question, differently typed, has the same right answers. What the harness
+ * does with them is count the ones that come back EMPTY — a variant that
+ * merely reorders is not interesting, and a variant that empties a page means
+ * the floor is measuring the punctuation.
+ */
+export function perturbedQueries(queries) {
+  const out = [];
+  for (const q of queries) {
+    for (const variant of perturbations(q.query)) {
+      out.push({ ...q, id: `${q.id}/${variant.label}`, base: q.id, variant: variant.label, query: variant.text });
+    }
+  }
+  return out;
+}
 
 /**
  * Run every golden query once under one plan and return the raw results.
@@ -1333,6 +1447,27 @@ async function main(argv) {
     return EXIT.USAGE;
   }
 
+  // --- The held-out negatives --------------------------------------------
+  // A second file, written by a reviewer who had not read the first, and never
+  // tuned against. It is the only number here that says anything about
+  // sentences nobody anticipated.
+  let heldOut = [];
+  if (existsSync(opts.heldOut)) {
+    const parsed = parseNegatives(await readFile(opts.heldOut, 'utf8'));
+    if (parsed.errors.length > 0) {
+      process.stderr.write(`ERROR: ${parsed.errors.length} problem(s) in ${opts.heldOut}:\n`);
+      for (const e of parsed.errors) process.stderr.write(`  ${e}\n`);
+      return EXIT.USAGE;
+    }
+    heldOut = parsed.queries;
+  } else if (opts.heldOutExplicit) {
+    process.stderr.write(`ERROR: --held-out=${opts.heldOut} does not exist.\n`);
+    return EXIT.USAGE;
+  }
+
+  // --- The perturbations --------------------------------------------------
+  const perturbed = perturbedQueries(queries);
+
   // --- Connect -----------------------------------------------------------
   let pg;
   try {
@@ -1389,6 +1524,9 @@ async function main(argv) {
   /** The negatives, as written and (with --read-query) as read. Null when not run. */
   let negPerQuery = null;
   let derivedNegPerQuery = null;
+  /** The held-out negatives, and the golden set's mechanical variants. */
+  let heldPerQuery = null;
+  let perturbedPerQuery = null;
   const allViolations = [];
   const derivedViolations = [];
   let client;
@@ -1417,9 +1555,11 @@ async function main(argv) {
     // with no user column, and it happens before the session is sealed
     // read-only rather than despite it.
     try {
-      const texts = [...queries, ...negatives].map((q) => AUTHORED_PLAN(q).text);
+      const texts = [...queries, ...negatives, ...heldOut, ...perturbed].map(
+        (q) => AUTHORED_PLAN(q).text,
+      );
       if (derivedPlan) {
-        for (const q of [...queries, ...negatives]) texts.push(derivedPlan(q).text);
+        for (const q of [...queries, ...negatives, ...heldOut]) texts.push(derivedPlan(q).text);
       }
       warm = await warmQueryCache(client, texts, redact);
       process.stdout.write(
@@ -1449,14 +1589,28 @@ async function main(argv) {
         derivedNegPerQuery = await runPass(client, negatives, opts, derivedPlan, redact);
       }
     }
+    if (heldOut.length > 0) {
+      heldPerQuery = await runPass(client, heldOut, opts, AUTHORED_PLAN, redact);
+    }
+    // 240 more searches, and the only thing read off them is whether each came
+    // back empty.
+    if (perturbed.length > 0) {
+      perturbedPerQuery = await runPass(client, perturbed, opts, AUTHORED_PLAN, redact);
+    }
 
     // --- One lookup for the ground truth about every returned tool --------
     // Every pass is covered by the one lookup: a slug is a slug, and the
     // facts about it do not depend on which query brought it back.
     const returnedSlugs = [
       ...new Set(
-        [...perQuery, ...(derivedPerQuery ?? []), ...(negPerQuery ?? []), ...(derivedNegPerQuery ?? [])]
-          .flatMap((r) => r.results.map((x) => x.slug)),
+        [
+          ...perQuery,
+          ...(derivedPerQuery ?? []),
+          ...(negPerQuery ?? []),
+          ...(derivedNegPerQuery ?? []),
+          ...(heldPerQuery ?? []),
+          ...(perturbedPerQuery ?? []),
+        ].flatMap((r) => r.results.map((x) => x.slug)),
       ),
     ];
     const factsBySlug = new Map();
@@ -1488,7 +1642,7 @@ async function main(argv) {
     // A negative that leaks is a quality failure. A negative that leaks a tool
     // its own constraints excluded is a WHERE clause leaking, and fails the run
     // exactly as a golden query would.
-    for (const entry of negPerQuery ?? []) {
+    for (const entry of [...(negPerQuery ?? []), ...(heldPerQuery ?? []), ...(perturbedPerQuery ?? [])]) {
       allViolations.push(
         ...checkConstraints({ id: entry.query.id, constraints: entry.constraints }, entry.results, factsBySlug),
       );
@@ -1546,6 +1700,28 @@ async function main(argv) {
     process.stdout.write(`\nNEGATIVES: ${path.relative(ROOT, opts.negatives).split(path.sep).join('/')} not found — not measured.\n`);
   }
 
+  const heldOverall = heldPerQuery ? aggregateNegatives(heldPerQuery) : null;
+  if (heldOverall) {
+    process.stdout.write(
+      `${buildNegativesReport({
+        overall: heldOverall,
+        perQuery: heldPerQuery,
+        title: 'HELD OUT: negatives nobody tuned against',
+        note:
+          'Written by a reviewer who had not read eval/negatives.jsonl. This is the\n' +
+          'number that says whether the floor generalises; the other one says whether\n' +
+          'it fits the file it was chosen on.',
+      })}\n`,
+    );
+  } else {
+    process.stdout.write(`\nHELD OUT: ${path.relative(ROOT, opts.heldOut).split(path.sep).join('/')} not found — not measured.\n`);
+  }
+
+  const perturbedEmpty = (perturbedPerQuery ?? []).filter((e) => e.results.length === 0).length;
+  if (perturbedPerQuery) {
+    process.stdout.write(`${buildPerturbationReport(perturbedPerQuery)}\n`);
+  }
+
   // --- Hard failures --------------------------------------------------------
   let exitCode = EXIT.OK;
 
@@ -1578,7 +1754,16 @@ async function main(argv) {
       }
       process.stdout.write(`\nBASELINE: ${opts.baselines} not found — nothing to compare against.\n`);
     } else {
-      const rows = parseBaselines(await readFile(opts.baselines, 'utf8'));
+      let rows;
+      try {
+        rows = parseBaselines(await readFile(opts.baselines, 'utf8'));
+      } catch (err) {
+        // An unreadable gate is not a passed gate.
+        process.stderr.write(
+          `\nERROR in ${path.relative(ROOT, opts.baselines).split(path.sep).join('/')}: ${err.message}\n`,
+        );
+        return EXIT.USAGE;
+      }
       if (rows.length === 0) {
         process.stdout.write(
           `\nBASELINE: no baseline recorded yet in ${path.relative(ROOT, opts.baselines).split(path.sep).join('/')}.\n` +
@@ -1650,25 +1835,45 @@ async function main(argv) {
           }
         }
 
-        const neg = checkNegativesRegression(negOverall, latest);
-        if (neg) {
-          const pctOf = (r) => `${(r * 100).toFixed(1)}%`;
+        const pctOf = (r) => `${(r * 100).toFixed(1)}%`;
+        for (const [label, check, file] of [
+          ['negatives answered with nothing', checkNegativesRegression(negOverall, latest), 'eval/negatives.jsonl'],
+          ['held-out answered with nothing ', checkHeldOutRegression(heldOverall, latest), 'eval/negatives.review.jsonl'],
+        ]) {
+          if (!check) continue;
           process.stdout.write(
-            neg.missing
-              ? '          negatives answered with nothing: NOT MEASURED' +
-                  ` (recorded ${neg.recorded.count} of ${neg.recorded.total}) — REGRESSION\n`
-              : `          negatives answered with nothing: ${neg.current.empty} of ${neg.current.queries}` +
-                  ` (${pctOf(neg.rate)}) now, ${neg.recorded.count} of ${neg.recorded.total}` +
-                  ` (${pctOf(neg.recordedRate)}) recorded — ${neg.regressed ? 'REGRESSION' : 'ok'}\n`,
+            check.missing
+              ? `          ${label}: NOT MEASURED` +
+                  ` (recorded ${check.recorded.count} of ${check.recorded.total}) — REGRESSION\n`
+              : `          ${label}: ${check.current.empty} of ${check.current.queries}` +
+                  ` (${pctOf(check.rate)}) now, ${check.recorded.count} of ${check.recorded.total}` +
+                  ` (${pctOf(check.recordedRate)}) recorded — ${check.regressed ? 'REGRESSION' : 'ok'}\n`,
           );
-          if (neg.regressed) {
+          if (check.regressed) {
             process.stdout.write(
-              neg.missing
-                ? '\nFAIL: the recorded baseline gates the negatives and none were run.\n' +
+              check.missing
+                ? `\nFAIL: the recorded baseline gates ${file} and it was not run.\n` +
                     'A gate that turns itself off when its file goes missing is not a gate.\n'
-                : '\nFAIL: fewer of the negatives came back empty than the recorded baseline.\n' +
+                : `\nFAIL: fewer of ${file} came back empty than the recorded baseline.\n` +
                     'Sentences the catalogue cannot answer are being answered with tools again.\n' +
-                    'Do not edit eval/negatives.jsonl to make this pass.\n',
+                    `Do not edit ${file} to make this pass.\n`,
+            );
+            if (exitCode === EXIT.OK) exitCode = EXIT.REGRESSION;
+          }
+        }
+
+        const perturbation = checkPerturbationGate(perturbedEmpty, latest, vectorsUsed);
+        if (perturbation) {
+          process.stdout.write(
+            `          perturbed golden queries empty: ${perturbation.current}` +
+              `, allowed ${perturbation.allowed} — ${perturbation.regressed ? 'REGRESSION' : 'ok'}\n`,
+          );
+          if (perturbation.regressed) {
+            process.stdout.write(
+              '\nFAIL: a golden query comes back empty when it is typed slightly differently.\n' +
+                'A full stop, a question mark, a "please" or one transposed letter must not\n' +
+                'decide whether a question has an answer. The floor is too close to the\n' +
+                'sentences it is judging.\n',
             );
             if (exitCode === EXIT.OK) exitCode = EXIT.REGRESSION;
           }
@@ -1696,6 +1901,26 @@ async function main(argv) {
       vectorsUsed,
       constraintViolations: allViolations,
       regression,
+      heldOut: heldOverall
+        ? {
+            path: path.relative(ROOT, opts.heldOut).split(path.sep).join('/'),
+            overall: heldOverall,
+            queries: heldPerQuery.map((e) => ({
+              id: e.query.id,
+              query: e.query.query,
+              kind: e.query.kind,
+              resultCount: e.results.length,
+              returned: e.results.slice(0, 5).map((r) => ({ rank: r.rank, slug: r.slug })),
+            })),
+          }
+        : null,
+      perturbation: perturbedPerQuery
+        ? {
+            variants: perturbedPerQuery.length,
+            empty: perturbedEmpty,
+            emptyIds: perturbedPerQuery.filter((e) => e.results.length === 0).map((e) => e.query.id),
+          }
+        : null,
       // Null when eval/negatives.jsonl was not run.
       negatives: negOverall
         ? {
@@ -2038,13 +2263,21 @@ export function buildReaderReport(cmp) {
  * answer came back empty, beside the golden numbers so the trade is on one
  * screen, and every one that leaked with what it leaked.
  */
-export function buildNegativesReport({ overall, perQuery, derived = null, golden = null }) {
+export function buildNegativesReport({
+  overall,
+  perQuery,
+  derived = null,
+  golden = null,
+  title = 'The negatives: sentences the catalogue cannot answer',
+  note = null,
+}) {
   const out = [];
   const pctOf = (r) => `${(r * 100).toFixed(1)}%`;
   out.push('');
-  out.push('=== The negatives: sentences the catalogue cannot answer ====================');
+  out.push(`=== ${title} ${'='.repeat(Math.max(0, 74 - title.length))}`);
   out.push('Right answer: an empty page. Every row returned here is a tool shown to');
   out.push('somebody whose problem nothing in the catalogue solves.');
+  if (note) out.push(note);
   out.push('');
   const rows = [
     [
@@ -2093,6 +2326,43 @@ export function buildNegativesReport({ overall, perQuery, derived = null, golden
     for (const e of leaked) {
       out.push(`  ${e.query.id}  ${e.query.kind.padEnd(4)}  ${e.query.lang.padEnd(3)}  n=${String(e.results.length).padStart(2)}  ${e.query.query}`);
       out.push(`        ${e.results.slice(0, 5).map((r) => `${r.rank}.${r.slug}(${r.matchSource})`).join('  ')}`);
+    }
+  }
+  out.push('');
+  return out.join('\n');
+}
+
+/**
+ * The perturbation gate: every golden query, typed four slightly different
+ * ways, and the only question asked of each is whether the page emptied.
+ *
+ * This exists because the first relevance floor was an absolute threshold that
+ * one golden query sat 0.0015 above. A full stop moved it under. Nobody types
+ * a sentence twice the same way, and a search that answers a question only in
+ * its canonical spelling does not answer it.
+ */
+export function buildPerturbationReport(entries) {
+  const out = [];
+  const empty = entries.filter((e) => e.results.length === 0);
+  const byBase = new Map();
+  for (const e of empty) {
+    const base = e.query.base ?? e.query.id;
+    byBase.set(base, [...(byBase.get(base) ?? []), e.query.variant ?? '?']);
+  }
+
+  out.push('');
+  out.push('=== Perturbed golden queries ==============================================');
+  out.push('Each golden query, typed four ways somebody might actually type it: a full');
+  out.push('stop, a question mark, " please", and one transposed letter. A variant that');
+  out.push('empties a page means the floor is measuring the punctuation.');
+  out.push('');
+  out.push(`  variants searched   ${entries.length}`);
+  out.push(`  came back EMPTY     ${empty.length}`);
+  out.push(`  queries affected    ${byBase.size}`);
+  if (byBase.size > 0) {
+    out.push('');
+    for (const [base, variants] of byBase) {
+      out.push(`  ${base}  empty under: ${variants.join(', ')}`);
     }
   }
   out.push('');

@@ -473,6 +473,36 @@ parser refuses a negative that carries a `relevant` map: a sentence with a
 right tool is a golden query, and this file must not become a side door into
 the golden set.
 
+### The held-out set
+
+`eval/negatives.review.jsonl` is 25 more sentences, written by an adversarial
+reviewer **before reading ours** and never tuned against: ten far, ten near
+misses, five non-English. It is the only number here that says whether a floor
+generalises rather than fits.
+
+It is read exactly as its author wrote it — `q` rather than `query`, a `nonen`
+kind the first file never used — because editing a held-out file to suit the
+parser is editing the measurement. `--baseline` gates it separately, against
+its own `Held-out empty` column.
+
+The first floor this project shipped scored 86.7% on the file it was tuned on
+and **40% on this one**. That gap is what a held-out set is for.
+
+### The perturbation gate
+
+Every golden query is also searched four more ways: with a full stop, with a
+question mark, with " please", and with one interior letter transposed
+(`eval/perturb.mjs` defines them, and both the harness and the fixture writer
+import it so the recorded vectors and the searched sentences cannot drift).
+
+The only thing read off those 240 searches is whether any came back **empty**,
+and the gate is zero whenever the floor is running.
+
+This exists because the first floor was an absolute threshold that golden q052
+sat 0.0015 above: a full stop moved its vector by more than that, and the page
+emptied. Nobody types a sentence twice the same way. A search that answers a
+question only in its canonical spelling does not answer it.
+
 ### How the sentences were checked
 
 Every candidate was checked against the published catalogue before it was

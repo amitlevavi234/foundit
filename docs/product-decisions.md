@@ -124,6 +124,17 @@ does not promise the tool will be added. The honesty rule above now covers the p
 as well as the card: a partial answer looks like a partial answer, and no answer
 looks like no answer.
 
+*How well that works, measured, because the decision should not be read as a
+solved problem.* An adversarial review wrote 25 sentences the catalogue cannot
+answer, before reading ours. The floor refuses 40% of them. Every threshold that
+refuses more starts emptying pages for real questions — a Hebrew query about
+splitting costs, a Russian one about removing noise — and the two are not
+separable by similarity alone: "a recording studio that rents by the hour" looks
+exactly like a catalogue full of recording software. So the page is honest when
+it is empty, and it is still too often not empty when it should be. The full
+frontier is in `eval/baselines.md`; a calibrated score in Phase 5 is what fixes
+it properly.
+
 ## 7. Homepage
 
 A single chat-style input, example prompts in several languages, and a "top tools"

@@ -257,7 +257,7 @@ test('no embedding column is ever selected into application memory', () => {
     }
     assert.doesNotMatch(
       source,
-      /select\s+\*\s+from\s+public\.(tool_problems|query_embeddings)/i,
+      /select\s+\*\s+from\s+public\.(tools|tool_problems|query_embeddings)/i,
       `${rel(path)} does select * on a table with a vector column`,
     );
   }

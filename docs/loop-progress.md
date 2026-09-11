@@ -2,7 +2,7 @@
 
 Read at the start of every tick, updated before the end of it.
 
-**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended by the owner's review — a relevance floor, calmer cards and page speed ("After Phase 3: the owner's review" below); all awaiting Amit's sign-off; 4 next
+**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended twice — by the owner's review (a relevance floor, calmer cards, page speed) and by an adversarial review of that floor, which it did not pass (summary vectors, a column-level revoke, and a floor that is honest about refusing only 40% of what it should); all awaiting Amit's sign-off; 4 next
 **Server:** `foundit-prod`, Hetzner CX23, Falkenstein, `167.233.217.138`, Ubuntu 24.04.4
 
 ## Phase 0b — the machine
@@ -500,7 +500,106 @@ mattered; the total is.
 - **Every number here is from this laptop**, against Docker through WSL2. The
   server is the gate, at deploy.
 
+## The floor, reviewed: what was asked for cannot be built
 
+A second adversarial review read the relevance floor and did not pass it. It was
+right about all five things, and the most useful of them is that it **wrote its
+own negatives first** — 25 sentences, `eval/negatives.review.jsonl`, held out
+and never tuned against.
+
+| What the review found | Where it landed |
+| --- | --- |
+| **The gate fitted one file.** 7 of 10 of its near misses came back with a full page; the floor scored 86.7% on the file it was tuned on and **40%** on the reviewer's | Measured, recorded, and the gap is now a permanent gate: `--baseline` gates the held-out file separately |
+| **It moved when the sentence did not.** q052 sat 0.0015 above the gate, so a full stop, a "?" or a " please" emptied its page | `eval/perturb.mjs` and a perturbation gate: every golden query is searched four more ways and **zero** may come back empty. 240 variants, 0 empty |
+| **The script predicate was a trapdoor.** One Latin token in a Hebrew sentence flipped the gate from 0.35 to 0.45 and emptied q009 and q057; restating a Russian query in English emptied it | `~ '[A-Za-z]'` is gone. One gate, every alphabet |
+| **The per-result floor constrained nothing** — 0.30 admits about a third of the catalogue | Gate and floor are now one number, 0.34, chosen on four sets at once |
+| **`foundit_app` could read every vector**, which made 0006's "no distance leaves the database" false and mooted 0005's split | `0007` revokes SELECT on the embedding columns and gives back a column list. `db/test/vectors_test.sql` proves both tables refuse it and that everything the app draws still reads |
+
+### The redesign was built, measured, and does not work
+
+The instruction was a **relative** gate: score the catalogue, and ask whether a
+sentence's best match is a peak against its own background. It was built first
+and measured on all four sets. Every Z that leaves the golden set intact
+refuses **nothing at all** (0 of 30 and 0 of 25); by Z = 3.2 it has emptied
+five golden queries and still refuses only a third. The robust median/MAD form
+behaves identically.
+
+**The reason is structural, and it is the useful part.** A sentence nothing can
+answer has a flat, low background, so its nearest tool stands out sharply
+against it. A real question often stands out *less*, because its several
+relevant tools raise its own mean and spread. Peakedness measures how lonely
+the best match is, and loneliness is not relevance.
+
+**So the bar was not met, and this reports that rather than dressing it up.**
+The bar — 85% of the held-out set empty, zero golden empty, zero perturbed
+empty — is unreachable on this evidence in every family measured (relative,
+robust, absolute, hybrid). The two ends are 0.15 of cosine apart in the wrong
+direction: the weakest golden queries peak at 0.35–0.40, and eight held-out
+negatives peak at 0.46–0.58. "A recording studio that rents by the hour" really
+is about recording. The whole frontier is in `eval/baselines.md`.
+
+What ships is the highest gate that breaks nothing: **0.34**, which refuses 33%
+of our negatives and 40% of the held-out ones, with every golden query and all
+240 perturbations still answered.
+
+### What did move the number: the summaries
+
+`0007` embeds each tool's own summary and the vector leg takes the better of it
+and the nearest problem statement — which is what makes Home Assistant findable
+for "a free tool to run the lights and heating when the internet is down"
+(now returned at rank 2).
+
+| | Phase 3 | + summaries, floor off | Shipped |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.7018 | 0.7589 | **0.7618** |
+| recall@10 | 0.6747 | 0.7350 | **0.7364** |
+| non-English | 0.6052 | — | **0.6516** |
+| golden empty | 0 | 0 | **0** |
+| perturbed empty | — | 0 of 240 | **0 of 240** |
+| negatives / held-out empty | 0% / 0% | 0% / 0% | **33% / 40%** |
+
+Per query against Phase 3: 32 better, 12 worse, 16 unchanged. The losses are
+recorded rather than averaged away: q032 −0.23, q020 −0.11, q059 −0.10,
+q035 −0.09, q034 −0.08, q036 −0.07 and six smaller.
+
+### The review's own cases, run through the shipped search
+
+```
+q052 as written / + "." / + "?" / + " please"   12 results each
+q009 (Hebrew) + "Splitwise"                      4 results
+q057 (Hebrew) + "Signal"                         4 results   signal at 2
+q027 (Russian), and restated in English         12 results each
+"a free tool to run the lights and heating
+ when the internet is down"                     home-assistant at 2
+```
+
+### Known weaknesses, stated rather than hidden
+
+- **The floor is weak, and that is the honest state.** It refuses 40% of
+  sentences nobody anticipated. The owner's complaint is a third answered, not
+  solved. Phase 5's calibrated score is where this goes next, and the frontier
+  is written down so nobody has to rediscover it.
+- **The held-out set is now spent.** It has been measured against, so the next
+  review needs 25 more sentences of its own. This is the same trap the first
+  negatives file fell into, one file later.
+- **Column privileges need maintenance.** A column added to `tools` or
+  `tool_problems` by a later migration is not covered by 0007's grant and will
+  fail loudly on first use. That is the safe direction, and it is written in
+  the migration.
+- **The fixture is 1.5 MB** — 504 statements, 223 summaries, 370 sentences —
+  and grows with every eval sentence added. It is still the thing that lets CI
+  measure the real search with no key.
+- **Two of the review's smaller findings are fixed in ways worth re-checking:**
+  the empty page now runs one extra search to decide whether offering to drop a
+  constraint is honest, and the cache keys are lower-cased so a stranger cannot
+  multiply them by case. Both are cheap; both are new code on a path that is
+  only exercised when a page is empty.
+- **`relevance_floor()` still has two knobs where one is used.** gate and
+  per-result are both 0.34, so the second does nothing today. They are kept
+  apart because the frontier table was measured with both, and Phase 5 will
+  want the gap back.
+
+## Tried and rejected
 
 - **Docker on the owner's laptop.** Docker Desktop crashes on an orphaned
   `dockerInference` socket that Windows will not delete; five dead folders had
@@ -526,6 +625,12 @@ mattered; the total is.
   negative's nearest tool is an *outlier* against a low background, so the
   Hebrew car sentence scores a higher z than any golden query. Measured and
   recorded in the sweep rather than argued about.
+  **Measured a second time, at the review's instruction, against four sets and
+  in its robust median/MAD form as well** — same answer, more starkly: every
+  threshold that leaves the golden set answered refuses 0 of 30 and 0 of 25.
+  Peakedness is anti-correlated with answerability on this catalogue. Written
+  up in `eval/baselines.md` so that the next person who reaches for it has the
+  numbers rather than the intuition.
 - **Statically rendering the homepage with a short revalidate.** It would be
   the fastest thing possible, and it makes `next build` need a reachable
   database to prerender the page — which the deploy in `research/10` does not

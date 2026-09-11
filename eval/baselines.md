@@ -16,14 +16,17 @@ produce different numbers from the same code, so the gate picks the newest row
 recorded in the same mode. A run with no key and no fixture is a text-only run
 and is measured against the text-only baseline, which is the honest comparison.
 
-**`Zero-result` and `Negatives empty` are gates too, since the relevance
-floor.** A run may not leave more golden queries empty than the row records,
-and may not answer a smaller share of `eval/negatives.jsonl` with an empty
-page than the row records — a rate, so a longer negatives file does not trip
-it by arithmetic. A row that leaves either column blank gates nothing on it,
-which is every row recorded before the floor. If a row records negatives and
-the negatives were not run at all, that fails: a gate that switches itself off
-when its input file goes missing is not a gate.
+**Four more columns are gates, not decoration.** A run may not leave more
+golden queries empty than `Zero-result` records; may not answer a smaller share
+of `eval/negatives.jsonl` than `Negatives empty` records, nor of the held-out
+`eval/negatives.review.jsonl` than `Held-out empty` records (rates, so a longer
+file does not trip them by arithmetic); and, whenever the floor is running at
+all, may not empty a single one of the golden set's 240 mechanical
+perturbations. A row that leaves a column blank gates nothing on it, which is
+every row recorded before the floor. If a row records a file and that file was
+not run, the gate FAILS — a gate that switches itself off when its input goes
+missing is not a gate — and a cell it cannot parse is a hard error rather than
+a shrug.
 
 **A row marked WITHDRAWN is skipped**, whatever numbers are in it. The one
 below is kept because deleting it would hide what happened, not because it is a
@@ -65,13 +68,13 @@ size of the set noted.
 
 ## Recorded baselines
 
-| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | Negatives empty | What changed |
-| ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | --------------- | ------------ |
-| 2026-09-10 | 364779b | 2 | no | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | | **WITHDRAWN — see below.** Not a baseline. |
-| 2026-09-10 | 39569ba | 2 | no | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
-| 2026-09-11 | bc9abfe | 3 | yes | 60 | 0.6747 | 0.7019 | 72.6 | 115.3 | 0 of 60 | | Hybrid retrieval: a fifth RRF leg at weight 3.0, cosine distance over `tool_problems.embedding` (`text-embedding-3-small`, 512 dimensions, `halfvec`), ranking only the constraint-filtered candidate set. |
-| 2026-09-11 | 654f29d | 3 | yes | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 of 60 | | The adversarial review's fixes. The search is unchanged; the -0.0001 is float16 rounding, now frozen by `db/seed/embeddings.fixture.json`. **This is the reproducible one** — every run, laptop or CI, key or no key, warms from the same recorded vectors. |
-| 2026-09-11 | 9634cd6 | 3 | yes | 60 | 0.6719 | 0.7035 | 82.5 | 122.5 | 0 of 60 | 26 of 30 | **The relevance floor** (`0006_relevance_floor.sql`), after the owner's review. A result is returned only with evidence — close enough in meaning, every term of the sentence, or a close name. The golden set barely moves; the 30 sentences in `eval/negatives.jsonl` go from 0 of 30 answered with an empty page to 26 of 30, and from 20.0 to 2.2 rows leaked each. See "Phase 3 amended" below. |
+| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | Negatives empty | Held-out empty | Perturbed empty | What changed |
+| ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | --------------- | -------------- | --------------- | ------------ |
+| 2026-09-10 | 364779b | 2 | no | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | | | | **WITHDRAWN — see below.** Not a baseline. |
+| 2026-09-10 | 39569ba | 2 | no | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | | | | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
+| 2026-09-11 | bc9abfe | 3 | yes | 60 | 0.6747 | 0.7019 | 72.6 | 115.3 | 0 of 60 | | | | Hybrid retrieval: a fifth RRF leg at weight 3.0, cosine distance over `tool_problems.embedding` (`text-embedding-3-small`, 512 dimensions, `halfvec`), ranking only the constraint-filtered candidate set. |
+| 2026-09-11 | 654f29d | 3 | yes | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 of 60 | | | | The adversarial review's fixes. The search is unchanged; the -0.0001 is float16 rounding, now frozen by `db/seed/embeddings.fixture.json`. **This is the reproducible one** — every run, laptop or CI, key or no key, warms from the same recorded vectors. |
+| 2026-09-11 | 9634cd6 | 3 | yes | 60 | 0.6719 | 0.7035 | 82.5 | 122.5 | 0 of 60 | 26 of 30 | | | **The relevance floor** (`0006_relevance_floor.sql`), after the owner's review. A result is returned only with evidence — close enough in meaning, every term of the sentence, or a close name. The golden set barely moves; the 30 sentences in `eval/negatives.jsonl` go from 0 of 30 answered with an empty page to 26 of 30, and from 20.0 to 2.2 rows leaked each. See "Phase 3 amended" below. |
 
 ### Phase 2, by slice
 
@@ -415,11 +418,126 @@ side of that. This is a floor fitted to ninety sentences, not a calibrated
 relevance score, and the four leaks it leaves (`n13`, `n16`, `n19`, `n25`) are
 the near misses and the same-script case it cannot separate.
 
-**It is still the right trade.** Before it, every one of the thirty
-unanswerable sentences returned twenty tools; after it, twenty-six return
-nothing and the other four return fewer. The golden set did not pay for it:
-nDCG went up by 0.0017, because the rows the floor removes from a good page
-were below the good answers anyway.
+**It is still the right trade, and the golden set did pay something.** Before
+it, every one of the thirty unanswerable sentences returned twenty tools; after
+it, twenty-six return nothing and the other four return fewer. nDCG went up by
+0.0017 — but that average hid a bill, and an earlier draft of this section said
+"the golden set did not pay for it", which was not true:
+
+- **recall@10 fell**, 0.6747 to 0.6719: a judged tool that used to scrape into
+  a top ten is now below the floor.
+- **the non-English slice fell**, 0.6052 to 0.6025.
+- **individual queries lost ground** — among them q020, q059 and q007 — because
+  the floor removes a row that was doing no harm where it was.
+
+An average that moves a thousandth while its parts move hundredths is not a
+statement that nothing changed. The parts are recorded here from now on.
 
 Phase 5 is where a score means something. When it arrives, this floor is the
 first thing it should replace.
+
+---
+
+## Phase 3 amended again: the floor the review asked for cannot be built
+
+A second adversarial review read the floor above and did not pass it. It wrote
+**its own 25 negatives before opening ours** — `eval/negatives.review.jsonl`,
+held out and never tuned against — and found that seven of ten near misses came
+back with a full page; that golden q052 sat 0.0015 above the gate, so a full
+stop emptied it; that one Latin token inside a Hebrew sentence flipped which
+gate applied; and that `foundit_app` could read every vector in the database,
+which made 0006's "no distance leaves the database" false.
+
+The instruction was to replace the absolute gate with a **relative** one: score
+the whole catalogue, and ask whether a sentence's best match is a peak against
+its own background (z = (best − mean)/sd ≥ Z), with each result judged the same
+way. It was built and measured before anything was written. **It does not
+work**, and the reason is worth more than the measurement.
+
+### The relative gate, measured
+
+| Z | golden empty | perturbed empty | negatives empty | held-out empty |
+| - | ------------ | --------------- | --------------- | -------------- |
+| 2.0–2.6 | 0 | 0–1 | 0 of 30 (0%) | 0 of 25 (0%) |
+| 2.8 | 1 | 2 | 0 of 30 (0%) | 1 of 25 (4%) |
+| 3.0 | 2 | 7 | 6 of 30 (20%) | 2 of 25 (8%) |
+| 3.2 | 5 | 13 | 11 of 30 (37%) | 8 of 25 (32%) |
+
+The robust form (median/MAD) behaves the same: at Z = 3.0 it refuses nothing at
+all, and by the time it refuses anything it has emptied golden queries.
+
+**Peakedness is anti-correlated with answerability here.** A sentence the
+catalogue cannot answer has a flat, low background, so its nearest tool stands
+out sharply against it — "I need a recording studio that rents by the hour"
+peaks at 0.58 against a catalogue full of recording software. A real question
+often stands out *less*, because its several genuinely relevant tools raise its
+own mean and spread. The statistic measures how lonely the best match is, and
+loneliness is not relevance.
+
+### The absolute frontier, on the same four sets
+
+| gate | golden empty | perturbed empty | negatives empty | held-out empty |
+| ---- | ------------ | --------------- | --------------- | -------------- |
+| 0.30 | 0 | 0 | 5 of 30 (17%) | 4 of 25 (16%) |
+| 0.32 | 0 | 0 | 8 of 30 (27%) | 8 of 25 (32%) |
+| **0.34** | **0** | **0** | **10 of 30 (33%)** | **10 of 25 (40%)** |
+| 0.36 | 0 | 1 | 13 of 30 (43%) | 12 of 25 (48%) |
+| 0.38 | 1 | 5 | 14 of 30 (47%) | 14 of 25 (56%) |
+| 0.46 | 2 | 8 | 25 of 30 (83%) | 17 of 25 (68%) |
+| 0.52 | 6 | 33 | 29 of 30 (97%) | 21 of 25 (84%) |
+| 0.58 | 21 | 104 | 30 of 30 (100%) | 25 of 25 (100%) |
+
+Hybrids of the two (absolute AND relative) are identical to the absolute column:
+at any gate worth having, the z condition never binds.
+
+### Why the bar cannot be met
+
+The bar asked for **≥85% of the held-out set empty, with zero golden and zero
+perturbed-golden empties**. The two ends of that are 0.15 of cosine apart in
+the wrong direction:
+
+```
+lowest golden peaks          q009 0.3764   q057 0.3969   q049 0.4979
+  (q009 with a "?" appended) 0.3524
+highest held-out peaks       near-06 0.5782  near-01 0.5534  near-02 0.5385
+                             nonen-he 0.5230  near-10 0.5094  near-03 0.4956
+```
+
+Eight held-out negatives peak above the weakest real questions. No threshold
+separates them, because on this evidence they are not separable: "a recording
+studio that rents time by the hour" really is about recording, and a Hebrew
+sentence about driving lessons really does look like the catalogue's Hebrew
+statements. Cosine similarity to a 223-tool catalogue cannot tell "about this
+subject" from "answerable by one of these tools".
+
+**So the bar was not met and nothing pretends otherwise.** What ships is
+gate 0.34: the highest value at which no golden query and none of its 240
+perturbations comes back empty, refusing 33% of our negatives and 40% of the
+held-out ones. It is reported as a partial answer to the owner's complaint, not
+a solved problem, and the frontier above is the evidence for whoever decides
+what to do next.
+
+### What did move: the summaries
+
+`0007` embeds each tool's own summary and takes the better of it and the
+nearest problem statement. That is worth more than every floor in this
+document:
+
+| | Phase 3 (654f29d) | With summaries, floor off | Shipped (summaries + 0.34) |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.7018 | 0.7589 | **0.7618** |
+| recall@10 | 0.6747 | 0.7350 | **0.7364** |
+| non-English nDCG | 0.6052 | — | **0.6516** |
+| negatives empty | 0 of 30 | 0 of 30 | 10 of 30 |
+| held-out empty | 0 of 25 | 0 of 25 | 10 of 25 |
+| perturbations empty | — | 0 of 240 | 0 of 240 |
+
+Against Phase 3, per query: **32 better, 12 worse, 16 unchanged.** The gains are
+large (q044 +0.46, q031 +0.42, q050 +0.35, q038 +0.27) and the losses are real
+and recorded: q032 −0.23, q020 −0.11, q059 −0.10, q035 −0.09, q034 −0.08,
+q036 −0.07, and six smaller. q032's answer set is a food diary and the floor
+now cuts its page from twenty rows to nine, which costs it two judged tools
+below the cutoff.
+
+The floor itself costs the golden set nothing at 0.34 — 0.7589 → 0.7618 — which
+is the whole reason it is set there rather than higher.

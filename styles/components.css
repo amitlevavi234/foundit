@@ -1092,11 +1092,16 @@ dl.facts dd {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--s-13);
   padding: var(--s-2);
-  /* Each card is as tall as what it holds. With the default `stretch`, opening
-   * "Why this?" on one card would stretch every card in its row to match, and
-   * their footers — pinned to the bottom by `margin-top: auto` — would jump
-   * down with it. Opening one card must move that card and nothing beside it. */
-  align-items: start;
+  /* Cards in a row share a height, and therefore a footer baseline: Save and
+   * Open line up across the row, which is what the artboard draws and what
+   * makes a grid of cards readable.
+   *
+   * The cost is that opening "Why this?" on one card grows its whole row. That
+   * is accepted: a disclosure that pushes its neighbours' footers down is a
+   * normal thing for a grid to do, and the alternative — `align-items: start`,
+   * which was briefly shipped — buys stillness with a permanently ragged row
+   * of mismatched card heights on every search. The stillness was worth less
+   * than the alignment. */
 }
 
 @media (max-width: 1100px) {
