@@ -61,6 +61,7 @@ size of the set noted.
 | 2026-09-10 | 364779b | 2 | no | 60 | 0.5406 | 0.6876 | 11.4 | 17.3 | 0 of 60 | **WITHDRAWN — see below.** Not a baseline. |
 | 2026-09-10 | 39569ba | 2 | no | 60 | 0.4497 | 0.4878 | 49.7 | 90.9 | 4 of 60 | First trustworthy baseline. Statements rewritten from each tool's own summary with the golden set unopened; measured as `foundit_app`, not the owner. |
 | 2026-09-11 | bc9abfe | 3 | yes | 60 | 0.6747 | 0.7019 | 72.6 | 115.3 | 0 of 60 | Hybrid retrieval: a fifth RRF leg at weight 3.0, cosine distance over `tool_problems.embedding` (`text-embedding-3-small`, 512 dimensions, `halfvec`), ranking only the constraint-filtered candidate set. |
+| 2026-09-11 | 654f29d | 3 | yes | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 of 60 | The adversarial review's fixes. The search is unchanged; the -0.0001 is float16 rounding, now frozen by `db/seed/embeddings.fixture.json`. **This is the reproducible one** — every run, laptop or CI, key or no key, warms from the same recorded vectors. |
 
 ### Phase 2, by slice
 
@@ -169,25 +170,25 @@ will experience.
 
 ---
 
-## Phase 3, the real baseline — bc9abfe
+## Phase 3, the real baseline — 654f29d
 
 | Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero |
 | ----- | - | --------- | ------- | ------- | ------ | ---- |
-| all | 60 | 0.6747 | 0.7019 | 72.6 | 115.3 | 0 |
-| english | 50 | 0.6847 | 0.7212 | 73.4 | 115.3 | 0 |
-| non-english | 10 | 0.6250 | 0.6052 | 68.8 | 146.6 | 0 |
-| constrained | 17 | 0.7020 | 0.6834 | 55.8 | 106.3 | 0 |
-| unconstrained | 43 | 0.6640 | 0.7092 | 79.3 | 135.4 | 0 |
+| all | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 |
+| english | 50 | 0.6847 | 0.7211 | 67.7 | 122.9 | 0 |
+| non-english | 10 | 0.6250 | 0.6052 | 61.3 | 103.3 | 0 |
+| constrained | 17 | 0.7020 | 0.6834 | 64.9 | 117.2 | 0 |
+| unconstrained | 43 | 0.6640 | 0.7090 | 67.4 | 122.9 | 0 |
 
-Constraint violations: **0**. Permission suites: **3 of 3 passing**.
+Constraint violations: **0**. Permission suites: **3 of 3 passing**. Warmed from the recorded fixture, so this run called nothing and is reproducible exactly.
 
 `--read-query`, the slice that measures the reader and the ranker together —
 the path a visitor actually takes:
 
 | Slice | recall@10 | nDCG@10 | Phase 2 | Change |
 | ----- | --------- | ------- | ------- | ------ |
-| authored | 0.6747 | 0.7019 | 0.4878 | **+0.2141** |
-| derived (`--read-query`) | 0.6781 | 0.6836 | 0.4785 | **+0.2051** |
+| authored | 0.6747 | 0.7018 | 0.4878 | **+0.2140** |
+| derived (`--read-query`) | 0.6781 | 0.6834 | 0.4785 | **+0.2049** |
 
 The divergence between the two is **-0.0183 nDCG**, against -0.0093 in Phase 2.
 The reader costs roughly twice what it cost before, which is not the reader
@@ -201,11 +202,11 @@ That is Phase 4's list, already written.
 
 | Slice | Phase 2 | Phase 3 | Change |
 | ----- | ------- | ------- | ------ |
-| all | 0.4878 | 0.7019 | +0.2141 |
-| english | 0.5514 | 0.7212 | +0.1698 |
+| all | 0.4878 | 0.7018 | +0.2140 |
+| english | 0.5514 | 0.7211 | +0.1697 |
 | **non-english** | **0.1700** | **0.6052** | **+0.4352** |
 | constrained | 0.4454 | 0.6834 | +0.2380 |
-| unconstrained | 0.5046 | 0.7092 | +0.2046 |
+| unconstrained | 0.5046 | 0.7090 | +0.2044 |
 | zero-result queries | 4 of 60 | 0 of 60 | -4 |
 
 **Non-English was the single largest known weakness in the product** and it is

@@ -125,9 +125,13 @@ Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
 
 ## Phase 3 — vectors — **reviewed, failed, fixed; awaiting re-review and sign-off**
 
-Baseline **nDCG@10 0.7019**, recall@10 0.6747, 0 constraint violations, 0
-zero-result queries, commit `bc9abfe`, measured as `foundit_app`. Recorded in
+Baseline **nDCG@10 0.7018**, recall@10 0.6747, 0 constraint violations, 0
+zero-result queries, commit `654f29d`, measured as `foundit_app`. Recorded in
 `eval/baselines.md`. Phase 2 was 0.4878 / 0.4497 with 4 zero-result.
+
+The number is now reproducible exactly, by anyone, with no API key: the query
+vectors come from `db/seed/embeddings.fixture.json` rather than from a fresh
+call whose float16 rounding moved the fourth decimal.
 
 | Deliverable | Status | Evidence |
 | --- | --- | --- |
@@ -187,8 +191,15 @@ function and reporting it as the page's latency was measuring the wrong thing,
 and the review caught it.
 
 Re-measured, `SEARCH_DETAILED_SQL` through `lib/sql.ts` as `foundit_app`, 50 runs
-over five warm sentences, node timer around the single round trip. Two honest
-statements about the result:
+over five warm sentences, node timer around the single round trip:
+
+| Machine | n | min | median | p95 | max | over 150 ms |
+| ------- | - | --- | ------ | --- | --- | ----------- |
+| idle | 50 | 47.6 | **61.7** | 125.8 | 152.3 | **1 of 50** |
+| with a `next build` running beside it | 50 | 61.3 | 131.8 | 222.1 | 233.1 | 20 of 50 |
+| before the `rows 20` fix, idle-ish | 50 | 102.8 | 177.4 | 308.7 | 341.5 | 36 of 50 |
+
+Two honest statements about that:
 
 - **The `rows 20` fix is real and the win is about 20 ms**, measured by `EXPLAIN
   (ANALYZE)` before and after: the decoration went from 27.4 ms to 7.8 ms on the
