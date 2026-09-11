@@ -2,7 +2,7 @@
 
 Read at the start of every tick, updated before the end of it.
 
-**Current phase:** 0b — the machine (part done), then 2
+**Current phase:** 0b — the machine (part done); 2 and 2-UI awaiting sign-off; 3 built, awaiting review
 **Server:** `foundit-prod`, Hetzner CX23, Falkenstein, `167.233.217.138`, Ubuntu 24.04.4
 
 ## Phase 0b — the machine
@@ -122,6 +122,103 @@ Baseline **nDCG@10 0.4878**, recall@10 0.4497, 0 constraint violations, commit
 - The deploy pipeline in `research/10` does not exist yet — no Dockerfile, no Caddyfile, no deploy workflow. Phase 9.
 - `research/10` §6.6's Dockerfile would fail as written (`COPY public/` when there is no `public/`).
 - The standalone server binds `0.0.0.0`; safe behind Docker's 127.0.0.1 publishing, but set `HOSTNAME=127.0.0.1` on the box anyway.
+
+## Phase 3 — vectors — **built, awaiting the adversarial review and sign-off**
+
+Baseline **nDCG@10 0.7019**, recall@10 0.6747, 0 constraint violations, 0
+zero-result queries, commit `bc9abfe`, measured as `foundit_app`. Recorded in
+`eval/baselines.md`. Phase 2 was 0.4878 / 0.4497 with 4 zero-result.
+
+| Deliverable | Status | Evidence |
+| --- | --- | --- |
+| One new migration, applied and idempotent | done | `0004_vectors.sql`; `--fresh --seed` applies 0001–0004, a second `node db/apply.mjs` skips all four. Nothing else under `db/` changed except the new test file |
+| Embedding job fills every published statement | done | `scripts/embed.mjs`: 504 statements, 6 API requests, 7,547 prompt tokens. Second run embeds **0**. Null embeddings on published statements: **0** |
+| Hybrid search fuses text, trigram and vector in one round trip | done | a fifth RRF leg at weight 3.0 over `tool_problems.embedding`, cosine, best statement per tool; constraint violations **0** across 60 queries |
+| Constraints still filter before ranking | done | the vector leg is handed the eligible ids as an array, so it cannot return a filtered-out tool. `db/test/vectors_test.sql` makes a paid tool the *identical* vector to the query, asks for free, and insists it is gone |
+| Query embeddings cached in Postgres, keyed on normalised text | done | `public.query_embeddings`: no user, session, IP or request column, no foreign key, RLS forced, **no policy at all**, no grant to `foundit_app` |
+| A repeated search is one round trip under 150 ms | done | 58 ms median, 72 ms slowest of five consecutive hits, measured with a node timer around the single round trip as `foundit_app`. A miss is two trips plus one API call |
+| Beats Phase 2 on the golden set | done | authored **0.4878 → 0.7019**, `--read-query` **0.4785 → 0.6836**. Non-English **0.1700 → 0.6052** |
+| No vector index | done | `\di public.tool_problems*` shows five b-tree/GIN indexes and no ivfflat or hnsw; `vectors_test.sql` fails if one appears |
+| No embedding column read into application memory | done | no function returns a `halfvec`; `query_vector_ranks` does the arithmetic and returns ranks. A markup test greps `app/`, `lib/`, `eval/run.mjs` and `scripts/embed.mjs` for it |
+| One outbound call, one hardcoded address | done | `lib/embeddings.ts` is the only file in `app/`/`components/`/`lib/` that calls `fetch`; the test asserts the constant, the single URL, no template-built address, the three-field body, and one source for the key |
+| Degrades without a key | done | `embedQuery` → null, **one** log line with neither key nor query text, results are the Phase 2 answer, `search_events` still gets its row |
+| Every suite green | done | `npm test` 130 scoring + 99 unit + eval; `lint`, `tsc --noEmit`, `build`, `bash db/test.sh` (3 of 3) |
+| **Adversarial review by a fresh agent** | **not started** | the gate; the supervisor commissions it |
+| Owner sees it | waiting on Amit | |
+
+### The weight was measured, not argued
+
+Fifteen values, each a full 60-query run. 1.0 — the "hybrid means peers"
+default the leg started at — scored 0.6417. The plateau is 2.75–4.0, all within
+0.0014 of each other; **3.0** was taken from the middle of it rather than the
+nominal best (3.5, +0.0011), because the difference is one thousandth of sixty
+queries. At 100.0, where the other four legs are arithmetically irrelevant and
+the search is pure vector, it scores 0.6781 — *below* the fused 0.7018. The
+whole sweep is in `eval/baselines.md`.
+
+### Found along the way
+
+- **A run with no key now measures a different search**, so the regression gate
+  would have gone red on CI for a reason nobody changed. `eval/baselines.md`
+  gained a `Vectors` column and the gate picks the newest row recorded in the
+  same mode. Proved by emptying the cache and running keyless: **0.4878,
+  4 zero-result — exactly the Phase 2 row, to four decimals.** The vector leg is
+  purely additive, and CI keeps a real full-text gate without a key.
+- **The eval warms the cache before it seals the session read-only.** That is
+  the only write it makes anywhere and it is not to `search_events`. A cache
+  hit and a cache miss produce byte-identical results, so what is measured is
+  the shipped steady state — and once warm, a run needs no key at all.
+- **PostgreSQL's `btrim` trims spaces only, `String.trim()` trims all
+  whitespace.** The cache key is the search-events hash normalisation, operator
+  for operator, so a sentence beginning with a tab keys with a leading space.
+  Inherited rather than fixed — one normalisation, warts included — and pinned
+  by a test over twenty sentences whose expected values came from the database.
+- **`left(x, 200)` counts code points and `String.slice` counts UTF-16 units.**
+  A string of emoji capped the JavaScript way would hand the API half a
+  surrogate pair. `Array.from` before the slice; also in the twenty.
+
+### Known weaknesses, stated rather than hidden
+
+- **The zero-result page is effectively gone, including when it was right.**
+  The vector leg ranks every eligible tool with an embedded statement, so a
+  sentence the catalogue genuinely cannot answer now returns its nearest
+  neighbours instead of an honest empty state. nDCG@10 does not notice; a
+  person would. There is no relevance floor to say "these are the nearest and
+  none is close", and there cannot honestly be one until Phase 5 calibrates a
+  score. **This is the biggest thing Phase 3 traded away and it is not a bug
+  that can be fixed by tuning.**
+- **The reader now costs twice what it did.** The `--read-query` divergence
+  went from -0.0093 to -0.0183 — not because the reader got worse, but because
+  the ranker got better, so a constraint it fails to read costs more. Six
+  queries carry all of it and five are the same failure: "without paying for
+  anything", "no server involved at all", "without uploading my documents".
+  Phase 4's list, already written.
+- **Non-English is better, not fixed.** 0.6052 against English's 0.7212. The
+  embedding does not care what language the sentence is in, but the catalogue's
+  own text is English and `to_tsvector('english', ...)` still does nothing for
+  the other four legs.
+- **The number has a noise floor it did not have.** Re-fetching the same 60
+  embeddings moved the headline by 0.0001: float32 rounding into `halfvec`
+  differs between calls and two tools swap on a tie. Well inside the 0.005
+  tolerance, but the instrument is no longer bit-exact.
+- **`last_used_at` is written by a separate fire-and-forget call**, not by the
+  search, because `search_tools` is `STABLE` and cannot write. A cache hit that
+  never reaches the `after()` block — a crashed request — leaves the timestamp
+  stale. It is for eviction and nothing else reads it.
+- **The candidate array is `array(select id from eligible)`.** At 223 published
+  tools that is free. At fifty thousand it is a materialised array of fifty
+  thousand bigints handed to a function on every search, and the right answer
+  then is probably a temporary table or a rewrite — not an ANN index, which
+  still drops matches under a filter.
+- **No rate limit on the search endpoint yet.** It is public, it now calls a
+  paid API on a cache miss, and the only thing bounding the spend is that a
+  repeated sentence is free. Phase 4 owns the per-visitor limit; until it
+  lands, the vendor-side cap is the only ceiling.
+- **`store_problem_embedding` and `store_query_embedding` are `SECURITY
+  DEFINER` and callable by `foundit_app`.** Each is one narrow write with no
+  branch a caller can steer, and the blast radius is ranking rather than
+  disclosure — but they are two more privileged code paths than existed before,
+  and a reviewer should look at them first.
 
 ## Tried and rejected
 

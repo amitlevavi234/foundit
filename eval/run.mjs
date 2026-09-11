@@ -1270,8 +1270,11 @@ async function main(argv) {
             '\n',
         );
         process.stdout.write(
-          `          this run had query vectors for ${vectorsUsed ? 'every' : 'not every'} sentence, ` +
-            `so it is compared against the newest row recorded ${vectorsUsed ? 'with' : 'without'} them.\n`,
+          vectorsUsed
+            ? '          Every sentence had a query vector, so this is compared against the newest\n' +
+              '          row recorded with the vector leg running.\n'
+            : `          ${warm.missing} sentence(s) had no query vector, so this measured the text-only\n` +
+              '          search and is compared against the newest row recorded without the vector leg.\n',
         );
         if (!picked.sameMode) {
           process.stdout.write(
