@@ -1068,6 +1068,17 @@ const SEARCH_SQL = `
       p_embedding => $7::halfvec
     )`;
 
+/**
+ * Every published tool's name, for the guards that need the catalogue.
+ *
+ * The application reads the same list (cached for a minute) and passes it to
+ * `planSearch`, so the harness has to as well or the two are measuring
+ * different guards: a restatement naming one of our own tools is refused, and a
+ * "this is not software" for a sentence that names one is refused too.
+ */
+const TOOL_NAMES_SQL = `
+  select name from public.tools where status = 'published' order by name`;
+
 const FACTS_SQL = `
   select slug::text as slug, status::text as status, pricing::text as pricing,
          platforms::text[] as platforms, flags::text[] as flags, languages
@@ -1448,6 +1459,33 @@ class EvalExit extends Error {
 const AUTHORED_PLAN = (q) => ({ text: q.query, constraints: q.constraints, embedText: q.query });
 
 /**
+ * Give a plan the vector of the text it says it embeds.
+ *
+ * EVERY pass does this now, including the authored one, and the reason is a
+ * defect that survived one fix and came back wearing the other hat.
+ *
+ * The query-embedding cache maps a searched sentence to ONE vector. The
+ * application stores, under that key, the vector it actually used — which for a
+ * non-English sentence is the English restatement's. The harness runs two
+ * passes over the same sentences and cannot store two different vectors under
+ * one key, so at first it wrote the plain one and passed the restatement's
+ * explicitly. That made the harness and the application disagree again: the
+ * application read the restatement's vector out of its own cache, the harness
+ * read the plain one for its reference pass, and on the sentences where the
+ * rules strip nothing the two searched with different vectors.
+ *
+ * So the harness reads the cache for nothing. Every pass resolves its own
+ * vector from db/seed/embeddings.fixture.json and hands it to `search_tools` as
+ * `p_embedding`, which is the application's cache-miss path and produces the
+ * identical ranking to its cache-hit path by construction. What is left in the
+ * cache afterwards is then nobody's business.
+ */
+const withVector = (plan, vectors) => {
+  const key = normalizedKey(plan.embedText ?? plan.text);
+  return { ...plan, vector: vectors.get(key) ?? null };
+};
+
+/**
  * The shipped plan: the sentence read the way a visitor's search reads it.
  *
  * Rules first (lib/constraints.ts), then the model's cached reading, merged by
@@ -1468,15 +1506,10 @@ const AUTHORED_PLAN = (q) => ({ text: q.query, constraints: q.constraints, embed
  */
 const shippedPlan = (readings, readForSearch, options, vectors = new Map()) => (q) => {
   const plan = readForSearch(q.query, readings.get(normalizedKey(q.query)) ?? null, options);
-  // A vector is carried only when the text being embedded is NOT the text being
-  // searched. Otherwise null means "look in the cache", which is the
-  // single-round-trip path every repeated search takes.
-  const embedKey = normalizedKey(plan.embedText);
-  const vector = embedKey !== normalizedKey(plan.text) ? (vectors.get(embedKey) ?? null) : null;
   return {
     text: plan.text,
     embedText: plan.embedText,
-    vector,
+    vector: vectors.get(normalizedKey(plan.embedText)) ?? null,
     constraints: plan.constraints,
     keys: plan.keys,
     asksForSoftware: plan.asksForSoftware,
@@ -1890,7 +1923,22 @@ async function main(argv) {
     }
 
     // --- The plans ---------------------------------------------------------
+    let toolNames = [];
+    try {
+      const { rows } = await client.query(TOOL_NAMES_SQL, []);
+      toolNames = rows.map((r) => String(r.name));
+      process.stdout.write(
+        `  catalogue: ${toolNames.length} published tool names for the guards.\n`,
+      );
+    } catch (err) {
+      process.stdout.write(
+        `  NOTE: the tool names could not be read (${redact(err?.message ?? err)}); ` +
+          'the readers catalogue guards did not run.\n',
+      );
+    }
+
     const mergeOptions = {
+      toolNames,
       mode: opts.merge,
       text: opts.text,
       embed: opts.embed,
@@ -1899,7 +1947,7 @@ async function main(argv) {
     };
     let headlinePlan =
       opts.plan === 'written'
-        ? AUTHORED_PLAN
+        ? (q) => withVector(AUTHORED_PLAN(q), shippedVectors)
         : opts.plan === 'rules'
           ? rulesPlan(reader.readRulesOnly)
           : shippedPlan(readings.readings, reader.readForSearch, mergeOptions);
@@ -1924,11 +1972,13 @@ async function main(argv) {
       const texts = [];
       const embedTexts = [];
       for (const q of [...queries, ...negatives, ...heldOut, ...perturbed]) {
-        texts.push(AUTHORED_PLAN(q).text);
-        if (headlinePlan !== AUTHORED_PLAN) {
+        const authored = AUTHORED_PLAN(q);
+        texts.push(authored.text);
+        embedTexts.push(authored.embedText);
+        if (opts.plan !== 'written') {
           const plan = headlinePlan(q);
           texts.push(plan.text);
-          if (plan.embedText && plan.embedText !== plan.text) embedTexts.push(plan.embedText);
+          embedTexts.push(plan.embedText ?? plan.text);
         }
       }
       warm = await warmQueryCache(client, texts, redact);
@@ -1952,8 +2002,8 @@ async function main(argv) {
       return EXIT.DATABASE;
     }
 
-    // Rebuilt now that the restatement vectors are in hand, so the plan can
-    // carry one.
+    // Rebuilt now that the vectors are in hand, so every plan carries the one
+    // belonging to the text it says it embeds — and no pass reads the cache.
     if (opts.plan === 'shipped') {
       headlinePlan = shippedPlan(
         readings.readings,
@@ -1961,7 +2011,11 @@ async function main(argv) {
         mergeOptions,
         shippedVectors,
       );
+    } else if (headlinePlan !== AUTHORED_PLAN) {
+      const inner = headlinePlan;
+      headlinePlan = (q) => withVector(inner(q), shippedVectors);
     }
+    const referencePlan = (q) => withVector(AUTHORED_PLAN(q), shippedVectors);
 
     // Everything from here is measurement, and measurement does not write.
     await client.query('set session characteristics as transaction read only');
@@ -1972,16 +2026,16 @@ async function main(argv) {
     // which is what Phases 2 and 3 recorded. Both are printed; the first is the
     // one the gate reads.
     perQuery = await runPass(client, queries, opts, headlinePlan, redact);
-    if (headlinePlan !== AUTHORED_PLAN) {
-      writtenPerQuery = await runPass(client, queries, opts, AUTHORED_PLAN, redact);
+    if (opts.plan !== 'written') {
+      writtenPerQuery = await runPass(client, queries, opts, referencePlan, redact);
     }
     // The negatives go through exactly the same search, the same plan and the
     // same fetch limit. Nothing about them is special except what counts as
     // right.
     if (negatives.length > 0) {
       negPerQuery = await runPass(client, negatives, opts, headlinePlan, redact);
-      if (headlinePlan !== AUTHORED_PLAN) {
-        writtenNegPerQuery = await runPass(client, negatives, opts, AUTHORED_PLAN, redact);
+      if (opts.plan !== 'written') {
+        writtenNegPerQuery = await runPass(client, negatives, opts, referencePlan, redact);
       }
     }
     if (heldOut.length > 0) {

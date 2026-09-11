@@ -92,6 +92,17 @@ export const READER_TIMEOUT_MS = 3_000;
 export const MAX_READER_INPUT = 200;
 
 /**
+ * How many HTTP requests one reading costs.
+ *
+ * TWO: `readSentence` samples the model twice and lets the samples vote on the
+ * one answer that can empty a page. The daily cap in lib/rate-limit.ts counts
+ * REQUESTS rather than readings, so this is the number it takes per reading —
+ * it used to take one for the pair, which meant a cap of 2,000 permitted 4,000
+ * requests and twice the bill it was set to bound.
+ */
+export const READER_REQUESTS_PER_READING = 2;
+
+/**
  * Where the key comes from, in order.
  *
  * Two names, not one, and the reason is that there is one account behind both:
@@ -407,6 +418,63 @@ function isStringArrayOf(value: unknown, allowed: readonly string[]): value is s
   );
 }
 
+/* ===========================================================================
+ * `english`, and why it needs its own rules
+ *
+ * Until an adversarial review went at it, `english` was the one field with no
+ * shape at all: the schema says "a string" and the only check was that it was
+ * not a copy of the input. That was tolerable while nothing used it. It is not
+ * tolerable now, because the restatement is what gets EMBEDDED — it reaches the
+ * ranker, and a free-text field that reaches the ranker is a field somebody can
+ * write the ranking with.
+ *
+ * The review fed it, and it accepted, all of these:
+ *
+ *   "Splitwise Tricount Settle Up Splid Tabsplit"   a list of our own tools
+ *   a 399-character paragraph of advice
+ *   injection prose addressed to a later reader
+ *   a JSON object
+ *
+ * A restatement of a 200-character sentence is a short line of prose. So:
+ * ======================================================================== */
+
+/** At most this many words, however short they are. */
+const MAX_ENGLISH_WORDS = 30;
+/** Never shorter than this, so a terse input still permits a normal sentence. */
+const MIN_ENGLISH_CHARS = 120;
+/** Structure, not prose: a restatement is one line and carries no markup. */
+const ENGLISH_FORBIDDEN = /[{}[\]<>\n\r\t]/;
+
+/**
+ * Is this a restatement, or is it something else wearing the field?
+ *
+ * Returns null when it is fine, or the reason it is not. Length is measured in
+ * code points against twice the input, because a language that needs more words
+ * than English to say the same thing is ordinary and a restatement three times
+ * the length of the sentence is not.
+ *
+ * The tool-name check is NOT here, and that is deliberate: it needs the
+ * catalogue, this module must stay callable with no database, and the catalogue
+ * changes while a recorded reading does not. `guardReading` in lib/reading.ts
+ * does it at the moment the reading is used, against the tools that exist then.
+ */
+export function checkEnglish(english: string, input: string): ValidationFailure | null {
+  const trimmed = english.trim();
+  if (trimmed === '') return null;
+
+  const limit = Math.max(Array.from(input).length * 2, MIN_ENGLISH_CHARS);
+  if (Array.from(trimmed).length > limit) {
+    return `the restatement is longer than ${limit} characters`;
+  }
+  if (trimmed.split(/\s+/u).length > MAX_ENGLISH_WORDS) {
+    return `the restatement is more than ${MAX_ENGLISH_WORDS} words`;
+  }
+  if (ENGLISH_FORBIDDEN.test(english)) {
+    return 'the restatement carries markup or more than one line';
+  }
+  return null;
+}
+
 /**
  * Turn whatever came back into a reading, or say why it will not be used.
  *
@@ -470,6 +538,13 @@ export function validateReading(
   if (Array.from(obj.residual).length > inputLength) {
     return { error: 'residual is longer than the sentence it was given' };
   }
+  // An outer bound only. The PRECISE rules for a restatement — word count, one
+  // line, no markup, no tool name — live in `checkEnglish` and are applied by
+  // guardReading, which drops the field and falls back to the sentence rather
+  // than throwing the whole reading away: a bad restatement is one field going
+  // wrong, and the pricing and the asks_for_software beside it are still worth
+  // having. What is refused HERE is a response that cannot be a restatement of
+  // a 200-character sentence at all, which is a malformed answer.
   if (Array.from(obj.english).length > MAX_READER_INPUT * 2) {
     return { error: 'english is longer than any restatement of a capped sentence' };
   }
@@ -562,7 +637,14 @@ export async function readSentenceOrThrow(sentence: string): Promise<ReaderResul
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), READER_TIMEOUT_MS);
 
+  // The timer is cleared in ONE place, after the body has been read, and that
+  // is a fix rather than a tidy-up. `fetch` resolves when the HEADERS arrive;
+  // a server that then trickles the body — or never finishes it — was bounded
+  // by nothing, and a stalled body measured fifteen seconds against a
+  // three-second timeout. `response.json()` is inside the same armed window,
+  // so the abort reaches the body stream too.
   let response: Response;
+  let payload: ResponsesPayload;
   try {
     response = await fetch(READER_URL, {
       method: 'POST',
@@ -594,26 +676,31 @@ export async function readSentenceOrThrow(sentence: string): Promise<ReaderResul
       }),
       signal: controller.signal,
     });
+
+    if (!response.ok) {
+      // The status, and not the body: an error body from a model provider
+      // routinely echoes the input back.
+      throw new ReaderError(`HTTP ${response.status}`);
+    }
+
+    try {
+      payload = (await response.json()) as ResponsesPayload;
+    } catch (error) {
+      // An abort DURING the body read arrives here rather than at the fetch,
+      // so the timeout has to be recognised in both places.
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new ReaderError(`timed out after ${READER_TIMEOUT_MS} ms`);
+      }
+      throw new ReaderError('response was not JSON');
+    }
   } catch (error) {
+    if (error instanceof ReaderError) throw error;
     // The provider's error strings can carry the request, so only the shape of
     // the failure is reported.
     const aborted = error instanceof Error && error.name === 'AbortError';
     throw new ReaderError(aborted ? `timed out after ${READER_TIMEOUT_MS} ms` : 'request failed');
   } finally {
     clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    // The status, and not the body: an error body from a model provider
-    // routinely echoes the input back.
-    throw new ReaderError(`HTTP ${response.status}`);
-  }
-
-  let payload: ResponsesPayload;
-  try {
-    payload = (await response.json()) as ResponsesPayload;
-  } catch {
-    throw new ReaderError('response was not JSON');
   }
 
   const model = typeof payload.model === 'string' && payload.model ? payload.model : READER_MODEL;

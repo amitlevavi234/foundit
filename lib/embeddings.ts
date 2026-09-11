@@ -213,7 +213,14 @@ export async function embedTexts(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EMBEDDINGS_TIMEOUT_MS);
 
+  // The timer is cleared in ONE place, after the body has been read, and that
+  // is a fix rather than a tidy-up. `fetch` resolves when the HEADERS arrive;
+  // a server that then trickles the body — or never finishes it — was bounded
+  // by nothing at all, and a stalled body measured fifteen seconds against a
+  // four-second timeout. `response.json()` is inside the same armed window, so
+  // the abort reaches the body stream too.
   let response: Response;
+  let payload: EmbeddingResponse;
   try {
     response = await fetch(EMBEDDINGS_URL, {
       method: 'POST',
@@ -233,26 +240,31 @@ export async function embedTexts(
       }),
       signal: controller.signal,
     });
+
+    if (!response.ok) {
+      // The status, and not the body: an error body from a model provider
+      // routinely echoes the input back.
+      throw new EmbeddingError(`HTTP ${response.status}`);
+    }
+
+    try {
+      payload = (await response.json()) as EmbeddingResponse;
+    } catch (error) {
+      // An abort DURING the body read arrives here rather than at the fetch,
+      // so the timeout has to be recognised in both places.
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new EmbeddingError(`timed out after ${EMBEDDINGS_TIMEOUT_MS} ms`);
+      }
+      throw new EmbeddingError('response was not JSON');
+    }
   } catch (error) {
+    if (error instanceof EmbeddingError) throw error;
     // The provider's error strings can carry the request, so only the shape of
     // the failure is reported.
     const aborted = error instanceof Error && error.name === 'AbortError';
     throw new EmbeddingError(aborted ? `timed out after ${EMBEDDINGS_TIMEOUT_MS} ms` : 'request failed');
   } finally {
     clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    // The status, and not the body: an error body from a model provider
-    // routinely echoes the input back.
-    throw new EmbeddingError(`HTTP ${response.status}`);
-  }
-
-  let payload: EmbeddingResponse;
-  try {
-    payload = (await response.json()) as EmbeddingResponse;
-  } catch {
-    throw new EmbeddingError('response was not JSON');
   }
 
   const data = payload.data;

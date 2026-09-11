@@ -12,6 +12,7 @@ import {
   runSearchDetailed,
   runStoreQueryEmbedding,
   runStoreQueryReading,
+  runToolNames,
   runToolPage,
   runTop,
   runTouchQueryEmbedding,
@@ -339,6 +340,39 @@ const toolCached = unstable_cache(
   ['catalogue:tool:v1'],
   CATALOGUE_CACHE,
 );
+
+/**
+ * Every published tool's name, cached for a minute like the other catalogue
+ * reads.
+ *
+ * One column of short strings, read once a minute rather than once a search,
+ * and it never reaches a page: it goes to the guards in lib/reading.ts, which
+ * refuse a model restatement that names one of our tools and refuse a "this is
+ * not software" for a sentence that does. Both are the same rule from two
+ * sides — the model may read the sentence and may not choose the answer.
+ *
+ * A failure here is an empty list, which switches those two checks off rather
+ * than taking a search down. That is the safe direction for availability and
+ * the unsafe one for the guard, so it is logged.
+ */
+const toolNamesCached = unstable_cache(
+  () => runToolNames(getPool()),
+  ['catalogue:tool-names:v1'],
+  CATALOGUE_CACHE,
+);
+
+export async function getToolNames(): Promise<string[]> {
+  try {
+    return await toolNamesCached();
+  } catch (error) {
+    console.error(
+      `the published tool names could not be read (${
+        (error as { code?: string } | null)?.code ?? 'unknown'
+      }); the reader's catalogue guards did not run for this search`,
+    );
+    return [];
+  }
+}
 
 /** Everything the homepage draws. One round trip on a miss, none on a hit. */
 export async function getHome(topLimit = 6, foundLimit = 3): Promise<HomeData> {

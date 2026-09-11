@@ -599,11 +599,17 @@ q027 (Russian), and restated in English         12 results each
   apart because the frontier table was measured with both, and Phase 5 will
   want the gap back.
 
-## Phase 4 — understanding the sentence — **built, awaiting the adversarial review**
+## Phase 4 — understanding the sentence — **reviewed, FAILED, fixed, re-measured**
 
-Baseline **nDCG@10 0.7763**, recall@10 0.7719, non-English **0.8254**, 0
-constraint violations, 0 zero-result, 0 of 240 perturbations empty, measured as
-`foundit_app` with no API key at all. Recorded in `eval/baselines.md`.
+**The first recorded row was withdrawn.** An adversarial review found that the
+eval and the application did not run the same search: `lib/reading.ts` computed
+the text to embed, and `app/results/page.tsx` used the rules residual instead.
+So the recorded non-English figure, 0.8254, described a code path no visitor
+ever took; the path they did take measured **0.6523**, which is Phase 3 to four
+decimals. Everything below is after that was fixed, and after nine other
+findings. The numbers are the RE-measured ones, and they are the mean-nearest of
+five live recordings rather than the best of them — see "the spread" below and
+`eval/baselines.md`.
 
 **The headline is now the shipped path, not the authored one.** Phases 2 and 3
 measured the ranker with the golden set's own hand-written constraints, which
@@ -618,20 +624,58 @@ same run, which is what says the instrument did not move underneath the number.
 | gpt-5-nano, strict schema, validated before use | done | `lib/reader-model.ts`: one hardcoded URL, `strict: true`, `additionalProperties: false`, all seven fields required, 3 s timeout, `store: false`. A hand-written validator, no new dependency, refuses 14 kinds of bad answer |
 | It can name no tool | done | every field is an enum member, an ISO code, a boolean or a restatement of the person's own sentence; `residual` is accepted only when proved to be a *deletion* of the input, character by character, in order |
 | Model call and embedding call concurrent | done | one prefetch statement asks both caches, then one `Promise.all`. Timeline below: both start at 197.7 ms, the embedder finishes at 930.9 and the reader at 2234.2 — the window is the longer of the two, not their sum |
-| Readings cached in Postgres, keyed on the normalised query | done | `0008_reader.sql` (**not 0007 — that number was taken by the Phase 3 amendment; the brief's name is recorded in the migration header**). No user column, no foreign key, RLS enabled + forced, **no policy at all**, no grant to `foundit_app`, 20,000-row LRU cap, raises over 200 characters |
+| Readings cached in Postgres, keyed on the normalised query | done | `0008_reader.sql` (**not 0007 — that number was taken by the Phase 3 amendment; the brief's name is recorded in the migration header**). No user column, no foreign key, RLS enabled + forced, **no policy at all**, no grant to `foundit_app`, 20,000-row LRU cap, raises over 200 characters. `0009` then made a cached REFUSAL expire after 24 hours: it is the one field that empties a page without searching, and one bad sample must not do that for ever |
 | The fixture covers readings, so CI runs the model path with no key | done | `scripts/read.mjs`, sibling of `scripts/embed.mjs`; 355 readings in `db/seed/embeddings.fixture.json`; a keyless `--baseline` on a fresh database reproduces 0.7763 exactly and exits 0 |
-| Per-visitor rate limit and global daily caps | done | `lib/rate-limit.ts`: token bucket per visitor keyed on `sha256(per-process salt + address)`, nothing persisted or logged. Proven live: two searches, then the page |
+| Per-visitor rate limit and global daily caps | done, with two stated limits | `lib/rate-limit.ts`: token bucket per visitor keyed on `sha256(per-process salt + address)`, nothing persisted or logged. Proven live. **It holds only with Cloudflare in front** overwriting `cf-connecting-ip`; direct-to-origin traffic shares one bucket. **The page is a 200, not a 429.** Both are written into `docs/product-decisions.md` §16 and `.env.example` |
 | Over a daily cap, search degrades and never errors | done | with both caps at 1, the second search made no paid call (0.9 ms in the `Promise.all`) and still returned 12 results, saying "Ordered by text match" |
-| Beats the Phase 3-amended row | done | **0.7618 → 0.7763 (+0.0145)**, and against what a visitor actually got in Phase 3 (`--plan=rules`, 0.7411) **+0.0352** |
-| The non-English slice improves specifically | done | **0.6516 → 0.8254 (+0.1738)**. Against the rules-only path, 0.6523 → 0.8254 |
+| Beats the Phase 3-amended row | done, by about a hundredth | **0.7618 → 0.7755 (+0.0137)** on the mean-nearest of five recordings. Against what a visitor got in Phase 3 (`--plan=rules`, 0.7411) it is **+0.0344**. The worst of the five, 0.7620, would NOT have cleared the gate — see the spread below |
+| The non-English slice improves specifically | done | **0.6516 → 0.8207 (+0.1691)**. Against the rules-only path, 0.6523 → 0.8207 |
+| The application runs the path that was measured | done, and it did not before | one function, `planSearch`, returns every string a search needs; `tests/parity.test.mjs` asserts the two callers agree byte for byte; and the six non-English golden queries return identical tools in identical order from the running application and from the harness, on a cold cache |
 | The perturbation gate stays at zero | done | 0 of 240 — and it went red first, which is the most useful thing that happened this phase |
 | Negatives improve because "not software" is read | **partly** | ours 10 → 13 of 30; held-out 10 → 11 of 25. **The near misses barely moved** — see below |
-| Cost measured and recorded | done | **$0.000232 a search, $0.2316 per thousand**, from the providers' own usage fields, against a ceiling of $0.002. Priced at full input rate, claiming no cache discount |
-| Two outbound calls, two files, one address each | done | `tests/markup.test.mjs` tightened: exactly two files may call `fetch`, each holds exactly one literal URL, each body's keys are enumerated, neither logs its key |
+| Cost measured and recorded | done | from the providers' own usage fields, against a ceiling of $0.002 a search, priced at the full input rate with no cache discount claimed. The daily caps are costed too: spending both every day for a month is **$4.21** against a $5 ceiling, which is what set `MAX_READER_CALLS_PER_DAY` to 1,200 rather than 2,000 |
+| Two outbound calls, two files, one address each | done | `tests/markup.test.mjs` tightened: exactly two files may call `fetch`, each holds exactly one literal URL, each body's keys are enumerated, neither logs its key. **The key comes from two variable names, not one** — `OPENAI_API_KEY` then `EMBEDDINGS_API_KEY`, one account — and the test enumerates both |
 | Degrades with no key / a failing provider | done | `tests/reader-failures.test.mjs` stubs the transport for ten kinds of garbage; every one returns null with one log line carrying neither the sentence nor the key |
 | Every suite green | done | `npm test` 143 unit + 176 scoring + the eval; `lint`, `tsc --noEmit`, `build`, `bash db/test.sh` (4 of 4, including the new `reader_test.sql`) |
 | **Adversarial review by a fresh agent** | **not done — the supervisor commissions it** | item 10 of the goal |
 | Owner sees it | waiting on Amit | |
+
+### The spread, and why the number is the middle one
+
+The first recorded 0.8254 was the best of a spread as well as being measured on
+the wrong path: a reviewer re-recorded the non-English readings five times and
+got 0.7396–0.8231, mean 0.7866, with the recorded figure above all five.
+
+So the procedure is now explicit — record five times, measure each, freeze the
+one nearest the MEAN — and these are the five after the fixes:
+
+| recording | nDCG@10 | non-English | negatives | held-out | perturbed empty |
+| --------- | ------- | ----------- | --------- | -------- | --------------- |
+| 1 | 0.7620 | 0.7395 | 12 of 30 | 11 of 25 | 0 of 240 |
+| **2 — frozen** | **0.7755** | **0.8207** | **13 of 30** | **11 of 25** | **0 of 240** |
+| 3 | 0.7775 | 0.8329 | 13 of 30 | 11 of 25 | 0 of 240 |
+| 4 | 0.7666 | 0.7671 | 13 of 30 | 11 of 25 | 0 of 240 |
+| 5 | 0.7756 | 0.8213 | 12 of 30 | 11 of 25 | 0 of 240 |
+
+Only the non-English readings were re-recorded, so the English slice is 0.7665
+in all five and the spread is the restatement's alone. **The worst recording
+would not have cleared the gate**, and that is the honest shape of this result:
+the reader beats Phase 3 by about a hundredth, four times out of five.
+
+### What the review found, beyond the number
+
+| Finding | Where it landed |
+| --- | --- |
+| **CRITICAL — the application never embedded the restatement.** `lib/reading.ts` computed `embedText`; `app/results/page.tsx` embedded the rules residual. The measured non-English 0.8254 was really 0.6523, and all-60 was 0.7474 — BELOW the row it claimed to beat | One function, `planSearch`, returns the filters, the text to rank on and the text to embed; both callers use it; `tests/parity.test.mjs` compares them on ten sentences. The harness also stopped reading the query-vector cache, because one key holds one vector and two passes wanted two — the same divergence in a second costume, which survived the first fix |
+| **`english` was unvalidated prose reaching the ranker** — a list of our own tool names, a 399-character paragraph, injection prose, a JSON object, all accepted | Checked like an input: ≤30 words, one line, no markup, no longer than twice the sentence, and no published tool's name as a whole word. On rejection the sentence itself is embedded and the refusal is counted |
+| **The reader's daily cap counted one token for two HTTP calls** | It counts requests. And once it did, 2,000 was the wrong number: $7.01 a month against a $5 ceiling. The default is 1,200 — 600 readings a day, $4.21 a month — and a test fails with the figure in the message if it drifts |
+| **The 3 s timeout bounded headers only; a stalled body ran 15 s** | The abort timer stays armed until the body has been read, in both outbound files. Two stub tests measure 3.0 s and 4.0 s |
+| **A model refusing everything emptied 3 of 4 real questions** — two samples of a broken model agree with each other | An in-process circuit: if more than half of the last twenty LIVE readings refused, no refusal is honoured until that stops. Ten samples before it concludes anything, so the damage is bounded at about ten pages. Plus: a sentence naming one of our own tools is never "not software" |
+| **A cached refusal was replayed to every later visitor** | `0009` expires a cached refusal after 24 hours. Every other reading is cached until eviction — the asymmetry is the point, because only this one empties a page without searching |
+| **`lib/visitor.ts` accepted `abc` and `::::` as addresses**, so a visitor could mint a bucket per request | `net.isIP()`. And the comment now states the real guarantee rather than a better one |
+| **`languages` carried the sentence's own language in ~90% of non-English readings** | Already refused by `MERGE_DEFAULTS.accept`; there is now a test asserting `languages` and `flags` are not in it, because a default is a thing somebody widens and a test is not |
+| **The `ModelDimension` comment said flags help** | Corrected — they cost a tenth of a point even whitelisted |
+| **"two round trips" undercounted the work** | Two BLOCKING round trips and five statements: the prefetch, the search, and three after the response has gone out |
 
 ### The concurrency, as one search actually ran
 
@@ -650,10 +694,19 @@ that would have been 2,769 ms.
 
 Note the shape, because it is not Phase 3's. A search is now **one prefetch
 statement** (both caches, two primary-key lookups), **then the paid calls**,
-**then one search**. Phase 3's arrangement — search, discover the vector is
-missing, embed, search again — cannot survive a reader, because the reader
-changes the constraints the search runs with and a search run before the
-reading is a search with the wrong WHERE clause.
+**then one search** — and, on the non-English path only, one more embedding
+call between them, for the restatement. Phase 3's arrangement — search,
+discover the vector is missing, embed, search again — cannot survive a reader,
+because the reader changes the constraints the search runs with and a search
+run before the reading is a search with the wrong WHERE clause.
+
+**Two BLOCKING round trips, five statements.** An earlier version of this
+document said "two round trips" and left it there, which undercounts the work
+the database does by more than half. In full, per search: the prefetch, the
+search, and then three more after the response has gone out and while nobody is
+waiting — `log_search_event`, `touch_query_embedding` and `touch_query_reading`.
+A cache hit is the same five. The visitor waits for two of them; a capacity
+estimate needs all five.
 
 ### What the model is allowed to say, and what measuring said
 
@@ -679,11 +732,14 @@ its answers have a tail. On one sentence:
   sampled six more:  true true true true true true
 ```
 
-One sample in seven would have told somebody asking how to split a holiday bill
-that Foundit only lists software. The golden set did not catch it — the same
-sentence without the question mark read `true`. **`eval/perturb.mjs` caught it**,
-because the perturbation gate now runs on the shipped plan rather than on the
-authored one, and the run went red.
+One sample of seven refused. That is ONE OBSERVATION and not a measured rate —
+seven draws put the true probability somewhere between about half a per cent and
+a third, which is a range wide enough that the only honest statement is "it
+happens, and the cost when it does is a real question answered with nothing".
+The golden set did not catch it, because the same sentence without the question
+mark read `true`. **`eval/perturb.mjs` caught it**, because the perturbation
+gate now runs on the shipped plan rather than the authored one, and the run
+went red.
 
 The fix is two samples and a vote, and it paid for itself twice: the recording
 before it had **five of the ten non-English golden queries come back with an
@@ -735,6 +791,20 @@ pretending: no vector leg ran, so the heading claims words rather than meaning.
   with it. A person sees the right page; a bot sees a 200 and no `Retry-After`.
   The fix is a middleware that owns the limit and returns both, and it means
   moving the bucket somewhere both runtimes can reach.
+- **The per-visitor limit holds only behind Cloudflare.** It keys on
+  `cf-connecting-ip`, which Cloudflare overwrites on every request; traffic that
+  reaches the origin directly shares ONE bucket between all of it, because
+  `x-forwarded-for` can be written by anybody and trusting it there would let
+  one attacker mint a fresh identity per request. The origin has no published
+  port, which is what makes that unreachable rather than merely unlikely.
+- **The circuit only sees live readings.** A cached refusal is not evidence and
+  does not feed it, so up to about ten refusals can be cached before the circuit
+  notices a broken model — and those ten are then served from the cache until
+  they expire. `0009`'s 24-hour ttl is the bound on that, not the circuit.
+- **Five recordings is a small sample of a noisy thing.** The range across them
+  is 0.0155 of nDCG and 0.0934 of the non-English slice. Five says roughly where
+  the middle is; it does not say the middle is stable, and a sixth recording
+  could sit outside the range.
 - **The near-miss negatives barely moved.** The brief expected reading "is this
   software at all" to lift exactly the sentences the relevance floor could not:
   held-out near misses went 0 of 10 to 1 of 10, and ours 2 of 15 to 3 of 15.
@@ -769,9 +839,11 @@ pretending: no vector leg ran, so the heading claims words rather than meaning.
   brief asked for the socket address as the fallback and Next 15 does not expose
   it. A shared bucket fails in the safe direction (everybody together gets sixty
   an hour), and behind the tunnel the first header is always set.
-- **`db/seed/embeddings.fixture.json` is 1.9 MB** — 504 statements, 223
-  summaries, 539 sentences and 355 readings — and grows with every eval sentence
-  added. It is still the thing that lets CI measure the real search with no key.
+- **`db/seed/embeddings.fixture.json` is about 1.9 MB** — 504 statements, 223
+  summaries, ~550 sentences and 355 readings — and grows with every eval
+  sentence added. It is still the thing that lets CI measure the real search
+  with no key, and freezing it is now also what fixes WHICH of five recordings
+  the number came from.
 - **Every number here is from this laptop**, against Docker through WSL2. The
   server is the gate, at deploy.
 

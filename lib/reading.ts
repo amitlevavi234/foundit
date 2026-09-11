@@ -56,7 +56,8 @@ import {
   type QueryReading as RulesReading,
   type ReadConstraint,
 } from './constraints.ts';
-import type { QueryReading as ModelReading } from './reader-model';
+import { checkEnglish, type QueryReading as ModelReading } from './reader-model.ts';
+import { normalizeQuery } from './embeddings.ts';
 import type { Platform, PricingModel, SearchConstraints, ToolFlag } from './types';
 
 /* ===========================================================================
@@ -201,13 +202,61 @@ export interface GuardedReading {
   refused: Refusal[];
 }
 
+/** What the guards need from outside to do their job. */
+export interface GuardContext {
+  /**
+   * The names of every published tool, for the one check that needs the
+   * catalogue.
+   *
+   * An adversarial review put `"Splitwise Tricount Settle Up Splid Tabsplit"`
+   * in `english` and watched it sail through, and that string is EMBEDDED — it
+   * reaches the ranker. A model that can write the query it is being asked to
+   * read is a model that can choose the answer, which is the one thing
+   * `docs/build-phases.md` says it may never do.
+   *
+   * It is a parameter rather than a lookup because lib/reading.ts is pure and
+   * must stay callable with no database, and because the catalogue changes
+   * while a recorded reading does not: the check belongs at the moment the
+   * reading is USED, against the tools that exist then. An empty list means the
+   * check does not run, and every caller that has a database passes one.
+   */
+  toolNames?: readonly string[];
+}
+
+/** `Splitwise` as a whole word, in any case, with punctuation around it. */
+function mentionsAny(text: string, names: readonly string[]): string | null {
+  if (names.length === 0 || text === '') return null;
+  const haystack = ` ${text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ')} `;
+  for (const name of names) {
+    const needle = name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    // One-letter and two-letter names would match half the language; the
+    // catalogue has none, and if it ever does this is the safe direction.
+    if (needle.length < 3) continue;
+    if (haystack.includes(` ${needle} `)) return name;
+  }
+  return null;
+}
+
 /**
  * Put one model reading through the guards.
  *
  * @param reading  a reading that has already passed `validateReading`
- * @param input    the sentence the model was given
+ * @param input    the sentence the model was given, NORMALISED
+ * @param context  what the catalogue-dependent checks need
+ *
+ * `input` must be the normalised sentence — `normalizeQuery(query)` — and not
+ * the raw one. The two differ by case, by whitespace runs and by the
+ * 200-character cap, and for a while the application passed one and the eval
+ * passed the other, which meant the residual's deletion check was strictly
+ * tighter in one of them than the other on exactly the sentences where it
+ * mattered. `readSentenceWith` below normalises once so no caller has to
+ * remember.
  */
-export function guardReading(reading: ModelReading, input: string): GuardedReading {
+export function guardReading(
+  reading: ModelReading,
+  input: string,
+  context: GuardContext = {},
+): GuardedReading {
   const refused: Refusal[] = [];
   const out: GuardedReading = {
     pricing: [],
@@ -273,20 +322,43 @@ export function guardReading(reading: ModelReading, input: string): GuardedReadi
     out.languages = [...reading.languages];
   }
 
-  // --- english: a restatement, not an echo ---------------------------------
   // --- the refusal, corroborated -------------------------------------------
-  if (!reading.asksForSoftware && namesSoftware(input)) {
+  //
+  // Two corroborations, and the second is the one the review forced. A sentence
+  // that names a program is asking for a program. And a sentence that names one
+  // of OUR tools is doing it twice over — somebody typing "splitwise" is not
+  // asking for a plumber, whatever a broken model says about it.
+  const named = reading.asksForSoftware
+    ? null
+    : (namesSoftware(input) ? 'a program' : mentionsAny(input, context.toolNames ?? []));
+  if (named !== null) {
     out.asksForSoftware = true;
     refused.push({
       field: 'asks_for_software',
-      reason: 'the sentence names a program, so "not software" cannot be trusted',
+      reason: `the sentence names ${named}, so "not software" cannot be trusted`,
     });
   }
 
+  // --- english: a restatement, and nothing else wearing the field ----------
+  //
+  // It is the only model output that reaches the ranker, because it is what
+  // gets embedded. Everything below is a way it has actually been abused.
   const english = reading.english.trim();
   if (english !== '') {
+    const shape = checkEnglish(english, input);
+    const mentions = mentionsAny(english, context.toolNames ?? []);
     if (!HAS_WORD.test(english)) {
       refused.push({ field: 'english', reason: 'the restatement has no words in it' });
+    } else if (shape !== null) {
+      refused.push({ field: 'english', reason: shape });
+    } else if (mentions !== null) {
+      // The one that matters most. A restatement naming a tool is the model
+      // writing the query rather than reading the sentence, and the query is
+      // what the vector leg ranks on.
+      refused.push({
+        field: 'english',
+        reason: `the restatement names a tool in the catalogue (${mentions})`,
+      });
     } else if (english.toLowerCase() === input.trim().toLowerCase()) {
       // The sentence handed back unchanged. It means "this was already
       // English" said the expensive way, and using it would embed the same
@@ -340,8 +412,15 @@ export type MergeMode = 'rules-win' | 'model-wins';
  *   pricing    helps. "without paying for anything", "without owning
  *              photoshop" — phrasings the word lists were never going to
  *              anticipate, and the guard above admits only two possible sets.
- *   flags      helps. "no server involved at all", "my notes stay as files on
- *              my own computer".
+ *   flags      HURTS, and the comment here used to say it helped, which was
+ *              wrong and was caught by a review reading it against the table.
+ *              The phrasings it catches are real — "no server involved at all"
+ *              is a flag the word lists will never enumerate — but what it
+ *              costs is larger: whitelisted to the two flags a sentence really
+ *              states, it still took a tenth of a point of nDCG off the golden
+ *              set, because the flags it volunteers UNASKED empty pages. It is
+ *              not in the shipped `accept` and `tests/reader.test.mjs` asserts
+ *              that it is not.
  *   platforms  hurts. The rules already ask for the shape a platform
  *              requirement takes ("on my phone", "for Linux") after a long
  *              argument recorded in lib/constraints.ts, and the model's extra
@@ -587,19 +666,57 @@ export function mergeReading(
   };
 }
 
+/** Everything a caller needs beyond the sentence itself. */
+export interface PlanOptions extends MergeOptions, GuardContext {}
+
 /**
- * The whole reading, from a sentence and an optional model reading.
+ * **The one function that decides what a search does.** Both the application
+ * and the eval harness call it, and neither may work any of this out for
+ * itself.
  *
- * One call, so the application, the eval harness and the tests compose the two
- * halves in the same order and cannot drift.
+ * It exists in this form because the two DID diverge, silently, and the
+ * divergence invalidated a whole phase's number. `lib/reading.ts` computed
+ * `embedText`; `app/results/page.tsx` took `text` and `filters` off the same
+ * object and then embedded something else — the rules residual it had worked
+ * out before the reading existed. So the eval measured a search that embedded
+ * the English restatement of a non-English sentence and the application ran one
+ * that did not, and the recorded non-English number, 0.8254, belonged to a code
+ * path no visitor ever took. The real one was 0.6523, which is Phase 3 to four
+ * decimals.
+ *
+ * Nothing about that was visible in a test, because both halves were correct on
+ * their own. What makes it visible now is that there is one function, it
+ * returns every string the search needs, and `tests/parity.test.mjs` puts ten
+ * sentences through the application's path and the harness's and asserts the
+ * results are byte-identical.
+ *
+ * THE NORMALISATION IS DONE HERE, ONCE. The guards check the model's residual
+ * against the sentence, and for a while the application checked against the raw
+ * query while the harness checked against the normalised one — a difference in
+ * case, whitespace and the 200-character cap, on exactly the field whose whole
+ * job is to be checked. Callers pass what the person typed; this normalises.
+ *
+ * @param query    the sentence as typed
+ * @param dropped  constraint keys switched off on the results screen
+ * @param model    the validated model reading, or null for rules-only
+ * @param options  merge options, and the catalogue the guards need
  */
-export function readSentenceWith(
+export function planSearch(
   query: string,
   dropped: readonly string[] = [],
   model: ModelReading | null = null,
-  options: MergeOptions = {},
+  options: PlanOptions = {},
 ): MergedReading {
   const rules = readQuery(query, dropped);
-  const guarded = model ? guardReading(model, query) : null;
+  const guarded = model
+    ? guardReading(model, normalizeQuery(query), { toolNames: options.toolNames ?? [] })
+    : null;
   return mergeReading(rules, guarded, { ...options, dropped });
 }
+
+/**
+ * The old name for `planSearch`, kept because tests and scripts use it.
+ *
+ * @deprecated Call `planSearch`. This is the same function.
+ */
+export const readSentenceWith = planSearch;

@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
+import { READER_REQUESTS_PER_READING } from './reader-model.ts';
+
 /**
  * What stops one stranger with a script from spending the whole month's budget
  * in an afternoon.
@@ -43,10 +45,27 @@ import { createHash, randomBytes } from 'node:crypto';
  * two-thousandth search of the day has done nothing wrong.
  */
 
-/** Defaults, all overridable from the environment. */
+/**
+ * Defaults, all overridable from the environment, and all counted in HTTP
+ * REQUESTS rather than in operations.
+ *
+ * The two daily numbers are not round numbers somebody liked. They are the
+ * largest values whose worst case — every cap spent every day for a month, by
+ * somebody doing it on purpose — stays under `MAX_MONTHLY_SPEND`, which is five
+ * dollars against a server that costs about five euros. `lib/prices.ts` does
+ * that arithmetic and `tests/rate-limit.test.mjs` fails if these two drift above
+ * it:
+ *
+ *   reader    1,200 requests/day = 600 readings/day    $4.19 a month
+ *   embedding 2,000 requests/day                       $0.02 a month
+ *
+ * The asymmetry is the price list: a reading is ~1,850 input tokens twice over,
+ * and embedding a capped sentence is fifteen. The embedder could be ten times
+ * more generous and still cost nothing; the reader could not.
+ */
 export const DEFAULT_SEARCHES_PER_IP_PER_HOUR = 60;
 export const DEFAULT_EMBEDDING_CALLS_PER_DAY = 2000;
-export const DEFAULT_READER_CALLS_PER_DAY = 2000;
+export const DEFAULT_READER_CALLS_PER_DAY = 1200;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -212,15 +231,23 @@ export class DailyCap {
     this.windowStart = this.clock.now();
   }
 
-  /** True when one more call is within today's cap; counts it if so. */
-  take(cap: number): boolean {
+  /**
+   * True when `requests` more calls are within today's cap; counts them if so.
+   *
+   * `requests`, not "one more operation", and the difference was a real defect.
+   * `readSentence` makes TWO HTTP requests — it samples the model twice and
+   * votes — and this took one token for the pair, so a cap of 2,000 permitted
+   * 4,000 requests and twice the bill it was set to bound. All or nothing: a
+   * pair that does not fit is not half made.
+   */
+  take(cap: number, requests = 1): boolean {
     const now = this.clock.now();
     if (now - this.windowStart >= DAY_MS) {
       this.windowStart = now;
       this.used = 0;
     }
-    if (this.used >= cap) return false;
-    this.used += 1;
+    if (this.used + requests > cap) return false;
+    this.used += requests;
     return true;
   }
 
@@ -236,7 +263,12 @@ export class DailyCap {
 
 declare global {
   var __founditLimiter:
-    | { buckets: TokenBuckets; embeddings: DailyCap; reader: DailyCap }
+    | {
+        buckets: TokenBuckets;
+        embeddings: DailyCap;
+        reader: DailyCap;
+        circuit: RefusalCircuit;
+      }
     | undefined;
 }
 
@@ -248,6 +280,7 @@ function state() {
     buckets: new TokenBuckets(),
     embeddings: new DailyCap(),
     reader: new DailyCap(),
+    circuit: new RefusalCircuit(),
   };
   return globalThis.__founditLimiter;
 }
@@ -290,20 +323,115 @@ export function allowSearch(address: string): SearchAllowance {
 }
 
 /**
- * Is there room in today's embedding budget for one more call?
+ * Is there room in today's embedding budget for `requests` more calls?
  *
  * Called immediately before the call, and counted whether or not the call then
  * succeeds — a failed call still cost a request and a retry storm is exactly
  * what a cap is for. False means the search runs without a vector, which is the
  * Phase 2 search and a perfectly good page.
+ *
+ * **Both caps count HTTP REQUESTS**, so the number in the environment means the
+ * number on the provider's bill. `.env.example` says what the defaults are
+ * worth in money per month.
  */
-export function mayCallEmbeddings(): boolean {
-  return state().embeddings.take(limits().embeddingCallsPerDay);
+export function mayCallEmbeddings(requests = 1): boolean {
+  return state().embeddings.take(limits().embeddingCallsPerDay, requests);
 }
 
-/** The same, for the sentence reader. False means the rules pass alone. */
-export function mayCallReader(): boolean {
-  return state().reader.take(limits().readerCallsPerDay);
+/**
+ * The same, for the sentence reader. False means the rules pass alone.
+ *
+ * The default is the number of requests ONE reading costs, because one reading
+ * is two samples and a vote (lib/reader-model.ts). A caller asking for a
+ * reading is asking for both.
+ */
+export function mayCallReader(requests = READER_REQUESTS_PER_READING): boolean {
+  return state().reader.take(limits().readerCallsPerDay, requests);
+}
+
+/* ===========================================================================
+ * The refusal circuit
+ * ======================================================================== */
+
+/**
+ * How many recent readings the circuit looks at, and how many of them have to
+ * refuse before it stops believing any of them.
+ *
+ * An adversarial review pointed a stub at the reader that answered
+ * `asks_for_software: false` for every sentence, and watched three of four real
+ * questions come back with "Foundit only lists software". Two samples of the
+ * same broken model are two samples of the same broken model: the vote in
+ * `readSentence` defends against NOISE, and not against a model, a prompt or a
+ * provider that has gone wrong in one direction.
+ *
+ * So if more than half of the last twenty live readings refused, stop honouring
+ * refusals at all and search instead. A real traffic mix is overwhelmingly
+ * people asking for software — the golden set refuses none of its 60, and both
+ * negatives files together refuse about a fifth — so half is far outside
+ * anything normal and well inside anything broken.
+ *
+ * `CIRCUIT_MIN_SAMPLES` stops a quiet morning with three plumbers in it from
+ * tripping the circuit, and bounds the damage of a genuinely broken model at
+ * about ten pages rather than at every page until somebody notices.
+ */
+const CIRCUIT_WINDOW = 20;
+const CIRCUIT_MIN_SAMPLES = 10;
+const CIRCUIT_THRESHOLD = 0.5;
+
+export class RefusalCircuit {
+  private readonly recent: boolean[] = [];
+  private open = false;
+
+  /** Record one LIVE reading. A cached one is not new evidence. */
+  record(refused: boolean): void {
+    this.recent.push(refused);
+    if (this.recent.length > CIRCUIT_WINDOW) this.recent.shift();
+
+    const refusals = this.recent.filter(Boolean).length;
+    const tripped =
+      this.recent.length >= CIRCUIT_MIN_SAMPLES &&
+      refusals / this.recent.length > CIRCUIT_THRESHOLD;
+
+    if (tripped && !this.open) {
+      this.open = true;
+      // One line, carrying counts rather than sentences. It is worth waking
+      // somebody for: it means the reader is wrong about everything.
+      console.error(
+        `the sentence reader refused ${refusals} of the last ${this.recent.length} readings; ` +
+          'refusals are being ignored until that falls back under half',
+      );
+    } else if (!tripped && this.open) {
+      this.open = false;
+      console.error(
+        'the sentence reader is refusing at a normal rate again; refusals are honoured',
+      );
+    }
+  }
+
+  /** False when refusals are not to be believed. */
+  get trusted(): boolean {
+    return !this.open;
+  }
+
+  /** For the tests, and nothing else. */
+  get samples(): number {
+    return this.recent.length;
+  }
+}
+
+/** Record one live reading's verdict. A cached reading is not evidence. */
+export function recordRefusal(refused: boolean): void {
+  state().circuit.record(refused);
+}
+
+/**
+ * May a refusal empty a page at all right now?
+ *
+ * False when the circuit is open, which means the reader has been refusing more
+ * than half of everything and is not to be believed about any of it.
+ */
+export function refusalsTrusted(): boolean {
+  return state().circuit.trusted;
 }
 
 /** Today's paid-call counts. For the eval and for the admin panel in Phase 8. */

@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { isIP } from 'node:net';
 import { headers } from 'next/headers';
 
 /**
@@ -11,63 +12,67 @@ import { headers } from 'next/headers';
  * that sixty searches an hour means sixty per person rather than sixty in
  * total.
  *
- * WHERE IT COMES FROM, AND WHAT IS HONEST ABOUT THAT.
+ * THE GUARANTEE THIS ACTUALLY PROVIDES, stated plainly because an earlier
+ * version of this comment overstated it:
  *
- * `docs/build-phases.md` and the Phase 4 brief say: `CF-Connecting-IP` when
- * present, and the socket address otherwise. The first half is exact and is
- * what production uses — every request reaches this application through the
- * Cloudflare Tunnel, and Cloudflare sets that header on every one of them.
+ *   **The per-visitor limit holds only with Cloudflare in front of us,
+ *   overwriting `cf-connecting-ip` on every request.** That is the production
+ *   arrangement — every request reaches this application through the Cloudflare
+ *   Tunnel and there is no published port to reach the origin by (Phase 0b) —
+ *   and under it a visitor cannot forge the header and cannot spread their
+ *   searches across buckets.
  *
- * **The second half is not reachable in this framework, and pretending
- * otherwise would be worse than saying so.** A Next 15 Server Component is
- * handed request headers and nothing else; there is no supported API that
- * exposes the socket's remote address, and `request.ip` was removed. So the
- * fallback is the two headers a reverse proxy conventionally sets, and then a
- * single shared bucket.
+ *   **Traffic that reaches the origin directly shares one bucket.** Not one
+ *   bucket each: one bucket between all of it. `x-forwarded-for` can be written
+ *   by anybody talking to the origin, so trusting it there would let one
+ *   attacker mint a fresh identity per request, which is worse than no limit at
+ *   all because it would look like one. Sharing a bucket fails in the safe
+ *   direction for the bill and the unsafe one for availability, and the
+ *   arrangement that makes it unreachable is the tunnel.
  *
- * A shared bucket fails in the SAFE direction — everybody together gets sixty
- * an hour rather than everybody separately getting sixty an hour — so a
- * misconfigured deploy costs availability rather than money. It is also
- * unreachable in production: if `CF-Connecting-IP` is ever absent there, the
- * tunnel is not what is in front of us and that is a much larger problem than a
- * rate limit.
- *
- * NOTHING HERE TRUSTS A VISITOR-SUPPLIED HEADER IN PRODUCTION. `CF-Connecting-IP`
- * is set by Cloudflare and overwritten on every request, so a visitor cannot
- * forge it through the tunnel. `X-Forwarded-For` CAN be forged by anyone
- * talking to the origin directly — which is why it is last, why only its first
- * entry is read, and why it is worth remembering that the origin is not
- * reachable directly (no published port, `docs/loop-progress.md` Phase 0b).
+ * The socket address is not an option. `docs/build-phases.md` asks for it as
+ * the fallback and Next 15 does not expose it: a Server Component is handed
+ * request headers and nothing else, and `request.ip` was removed. Middleware
+ * can see more, but it runs in a different runtime from this page, so the
+ * in-memory bucket cannot be shared with it.
  */
 
-/** The bucket everybody shares when no address can be determined. */
+/** The bucket everybody unattributable shares. Not one each — one between all. */
 export const SHARED_BUCKET = 'unattributed';
 
-const ADDRESS_HEADERS = ['cf-connecting-ip', 'x-real-ip'] as const;
+/**
+ * In order of how much they can be trusted.
+ *
+ * `cf-connecting-ip` is set by Cloudflare and overwritten on every request, so
+ * a visitor cannot forge it through the tunnel. `x-real-ip` is the convention a
+ * reverse proxy on the same host sets. `x-forwarded-for` is last and only its
+ * first entry is read, because the rest of the list is whatever the client sent.
+ */
+const ADDRESS_HEADERS = ['cf-connecting-ip', 'x-real-ip', 'x-forwarded-for'] as const;
 
 /**
- * A plausible address, or the shared bucket.
+ * A real IP address, or null.
  *
- * Only the shape is checked, not the value: this string is about to be hashed,
- * and the only thing that matters is that two requests from the same visitor
- * produce the same one and a visitor cannot produce a fresh one per request by
- * putting junk in a header. Anything that is not an address-shaped string is
- * therefore ignored rather than used as a key of its own.
+ * `net.isIP` and not a regular expression. The shape check this replaced —
+ * "three to forty-five characters of hex, colons and dots" — accepted `abc`,
+ * `deadbeef` and `::::`, which meant a visitor could mint a fresh bucket per
+ * request by putting a different meaningless string in the header. A rate limit
+ * somebody can opt out of by typing is not a rate limit; it is a rate limit
+ * shaped decoration, which is worse, because it stops anybody looking.
  */
-const ADDRESS_SHAPE = /^[0-9a-fA-F:.]{3,45}$/;
-
-function firstValid(value: string | null | undefined): string | null {
+function validAddress(value: string | null | undefined): string | null {
   if (!value) return null;
   const first = value.split(',')[0]?.trim() ?? '';
-  return ADDRESS_SHAPE.test(first) ? first : null;
+  // isIP returns 4, 6, or 0 for "not an address at all".
+  return isIP(first) === 0 ? null : first;
 }
 
 /**
- * The visitor's address as far as this process can tell.
+ * The visitor's address as far as this process can tell, or `SHARED_BUCKET`.
  *
- * Async because `headers()` is async in Next 15. Returns `SHARED_BUCKET` rather
- * than throwing when there is nothing to go on, so a rate limiter never takes a
- * page down.
+ * Async because `headers()` is async in Next 15. Returns the shared bucket
+ * rather than throwing when there is nothing to go on, so a rate limiter never
+ * takes a page down.
  */
 export async function visitorAddress(): Promise<string> {
   let list: Awaited<ReturnType<typeof headers>>;
@@ -80,8 +85,8 @@ export async function visitorAddress(): Promise<string> {
   }
 
   for (const name of ADDRESS_HEADERS) {
-    const found = firstValid(list.get(name));
+    const found = validAddress(list.get(name));
     if (found) return found;
   }
-  return firstValid(list.get('x-forwarded-for')) ?? SHARED_BUCKET;
+  return SHARED_BUCKET;
 }

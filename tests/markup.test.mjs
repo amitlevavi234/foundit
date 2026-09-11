@@ -359,11 +359,37 @@ test('no client component pulls a paid call — or a key — into a browser bund
 test('nothing about a visitor is persisted or logged by the rate limiter', () => {
   const source = read(join(ROOT, 'lib', 'rate-limit.ts'));
 
-  // No database, no file, no log line. The whole thing is two Maps and a
-  // counter, and a restart forgetting everybody is the point.
-  assert.doesNotMatch(source, /\bconsole\.\w+\(/, 'the rate limiter must not log');
-  assert.doesNotMatch(source, /from ['"]pg['"]|writeFile|appendFile|localStorage/, 'nothing is written down');
+  // No database, no file. The whole thing is two Maps and a counter, and a
+  // restart forgetting everybody is the point.
+  assert.doesNotMatch(
+    source,
+    /from ['"]pg['"]|writeFile|appendFile|localStorage/,
+    'nothing is written down',
+  );
   assert.doesNotMatch(source, /insert into|INSERT INTO/, 'no row is ever written about a visitor');
+
+  // It DOES log, twice, and both lines are about the refusal circuit rather
+  // than about a visitor: "the reader refused 14 of the last 20 readings" is
+  // worth waking somebody for, and carries counts. What may never appear in one
+  // is a visitor, a key or a sentence — so the check is on the CONTENT of every
+  // log call rather than on there being none, which is what it used to be and
+  // which would have been traded away the first time a line was needed.
+  const calls = source.match(/console\.\w+\([\s\S]*?\);/g) ?? [];
+  assert.ok(calls.length > 0, 'the circuit says when it opens and when it closes');
+  for (const call of calls) {
+    // Only an INTERPOLATION can carry a value out of this module; the prose
+    // around it is prose. "the sentence reader refused 14 of the last 20" names
+    // a component and reports two counts, and an earlier version of this
+    // assertion failed it for containing the word "sentence" — which is the
+    // kind of false positive that gets a check deleted rather than fixed.
+    for (const [, expression] of call.matchAll(/\$\{([^}]*)\}/g)) {
+      assert.doesNotMatch(
+        expression,
+        /address|\bip\b|key|query|sentence|salt|bucket/i,
+        `a rate-limiter log line interpolates something it must not: \${${expression}}`,
+      );
+    }
+  }
 
   // The address is hashed with a salt generated in this process and never
   // stored raw. `sha256(ip)` alone is four billion hashes to reverse.

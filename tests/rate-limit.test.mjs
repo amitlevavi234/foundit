@@ -21,10 +21,13 @@ import {
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_SEARCHES_PER_IP_PER_HOUR,
   DailyCap,
+  RefusalCircuit,
   TokenBuckets,
   limits,
   visitorKey,
 } from '../lib/rate-limit.ts';
+import { READER_REQUESTS_PER_READING } from '../lib/reader-model.ts';
+import { costOf, MAX_MONTHLY_SPEND, worstCaseMonthly } from '../lib/prices.ts';
 
 const HOUR = 60 * 60 * 1000;
 const MINUTE = 60 * 1000;
@@ -173,7 +176,7 @@ test('the limits come from the environment, with the documented defaults', () =>
     });
     assert.equal(DEFAULT_SEARCHES_PER_IP_PER_HOUR, 60, '.env.example says 60');
     assert.equal(DEFAULT_EMBEDDING_CALLS_PER_DAY, 2000, '.env.example says 2000');
-    assert.equal(DEFAULT_READER_CALLS_PER_DAY, 2000, '.env.example says 2000');
+    assert.equal(DEFAULT_READER_CALLS_PER_DAY, 1200, '.env.example says 1200 — two requests per reading, costed to $4.19 a month');
 
     process.env.MAX_SEARCHES_PER_IP_PER_HOUR = '5';
     assert.equal(limits().searchesPerIpPerHour, 5, 'the environment wins');
@@ -193,5 +196,98 @@ test('the limits come from the environment, with the documented defaults', () =>
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
+  }
+});
+
+test('the cap counts HTTP REQUESTS, so the number means the bill', () => {
+  // The defect this pins: one reading is TWO requests — two samples and a vote
+  // — and the cap took one token for the pair, so a cap of 2,000 permitted
+  // 4,000 requests and twice the money it was set to bound.
+  const clock = fakeClock();
+  const cap = new DailyCap(clock);
+
+  assert.equal(READER_REQUESTS_PER_READING, 2, 'a reading is two requests');
+
+  // A cap of 10 must permit five readings, not ten.
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(cap.take(10, READER_REQUESTS_PER_READING), true, `reading ${i + 1} of 5`);
+  }
+  assert.equal(cap.take(10, READER_REQUESTS_PER_READING), false, 'the sixth reading is refused');
+  assert.equal(cap.count, 10, 'and the counter equals the requests actually permitted');
+
+  // All or nothing: a pair that does not fit is not half made.
+  const odd = new DailyCap(fakeClock());
+  assert.equal(odd.take(3, 2), true);
+  assert.equal(odd.take(3, 2), false, 'one token left is not enough for a pair');
+  assert.equal(odd.count, 2, 'and the refused pair counted nothing');
+  assert.equal(odd.take(3, 1), true, 'a single request still fits');
+});
+
+test('the worst case at the default caps is under the monthly ceiling', () => {
+  // A cap nobody has costed is a number somebody picked. This is the arithmetic
+  // that says the defaults in .env.example are the right size, from the same
+  // prices lib/prices.ts uses for the per-search figure.
+  const worst = worstCaseMonthly(limits());
+  assert.ok(
+    worst.total < MAX_MONTHLY_SPEND,
+    `spending every day's cap for a month costs $${worst.total.toFixed(2)}, ` +
+      `over the $${MAX_MONTHLY_SPEND.toFixed(2)} ceiling`,
+  );
+  // And it is not absurdly under it either: a ceiling ten thousand times the
+  // worst case is not a ceiling, it is a decoration.
+  assert.ok(worst.total > MAX_MONTHLY_SPEND / 100, 'the caps should be meaningful, not theatre');
+  assert.ok(costOf({ readerIn: 1, readerOut: 1, embeddingIn: 1, searches: 1 }).total > 0);
+});
+
+test('a reader that refuses everything stops being believed', () => {
+  // Two samples of a broken model are two samples of a broken model. A review
+  // pointed a stub that refused every sentence at the page and three of four
+  // real questions came back with "Foundit only lists software".
+  const circuit = new RefusalCircuit();
+  const said = [];
+  const realError = console.error;
+  console.error = (line) => said.push(String(line));
+
+  try {
+    // A handful of genuine refusals must NOT trip it: a quiet morning with
+    // three plumbers in it is an ordinary morning.
+    for (let i = 0; i < 3; i += 1) circuit.record(true);
+    assert.equal(circuit.trusted, true, 'three refusals in a row is not a broken reader');
+
+    // Ordinary traffic, mostly software, keeps it closed.
+    for (let i = 0; i < 17; i += 1) circuit.record(false);
+    assert.equal(circuit.trusted, true, 'three in twenty is a normal rate');
+
+    // Now the broken model: everything refuses.
+    for (let i = 0; i < 20; i += 1) circuit.record(true);
+    assert.equal(circuit.trusted, false, 'a reader refusing everything is not believed');
+    assert.equal(said.length, 1, 'and it says so once, not once per search');
+    assert.match(said[0], /refused \d+ of the last \d+ readings/);
+    assert.ok(!said[0].includes('plumber'), 'the line carries counts, not sentences');
+
+    // And it closes again when the rate comes back down.
+    for (let i = 0; i < 20; i += 1) circuit.record(false);
+    assert.equal(circuit.trusted, true, 'it recovers rather than latching for ever');
+    assert.equal(said.length, 2);
+    assert.match(said[1], /normal rate again/);
+  } finally {
+    console.error = realError;
+  }
+});
+
+test('the circuit needs enough evidence before it trips', () => {
+  const circuit = new RefusalCircuit();
+  const realError = console.error;
+  console.error = () => {};
+  try {
+    // Nine refusals out of nine is 100% and still under the minimum sample
+    // count, so it holds its nerve.
+    for (let i = 0; i < 9; i += 1) circuit.record(true);
+    assert.equal(circuit.trusted, true, 'nine samples is not enough to conclude anything');
+    circuit.record(true);
+    assert.equal(circuit.trusted, false, 'ten is');
+    assert.equal(circuit.samples, 10);
+  } finally {
+    console.error = realError;
   }
 });

@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 
 import { readQuery, toSearchConstraints } from '../lib/constraints.ts';
 import { validateReading } from '../lib/reader-model.ts';
-import { readSentenceWith } from '../lib/reading.ts';
+import { planSearch } from '../lib/reading.ts';
 import { normalizeQuery } from '../lib/embeddings.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,6 +67,10 @@ export function fixtureReadings() {
  */
 export function readingFromStored(stored, sentence) {
   if (!stored) return null;
+  // Against the NORMALISED sentence, which is what app/results/page.tsx now
+  // does too. For a while one validated against the raw query and the other
+  // against the normalised one, so the residual's deletion check was strictly
+  // tighter on one side than the other.
   const checked = validateReading(stored, normalizeQuery(sentence));
   return 'reading' in checked ? checked.reading : null;
 }
@@ -96,7 +100,14 @@ export function readingFromStored(stored, sentence) {
  */
 export function readForSearch(sentence, stored = null, options = {}) {
   const model = readingFromStored(stored, sentence);
-  const merged = readSentenceWith(sentence, [], model, options);
+  // `planSearch` and nothing else. This is the one function that decides what a
+  // search does, and app/results/page.tsx calls the same one with the same
+  // arguments — tests/parity.test.mjs puts ten sentences through both and
+  // asserts the filters and the embed text come out byte-identical. It exists
+  // in that shape because the two DID diverge: the harness measured a search
+  // that embedded the English restatement and the application ran one that did
+  // not, and a phase's recorded non-English number belonged to nobody's search.
+  const merged = planSearch(sentence, [], model, options);
 
   const search = toSearchConstraints(merged.constraints);
   const constraints = {};

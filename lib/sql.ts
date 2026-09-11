@@ -358,6 +358,28 @@ export const STORE_QUERY_READING_SQL = `
 export const TOUCH_QUERY_READING_SQL = `
   select public.touch_query_reading(p_query => $1::text)`;
 
+/**
+ * Every published tool's name, and nothing else about it.
+ *
+ * One column, a few hundred short strings, cached for a minute with the other
+ * catalogue reads. It exists for one guard: the model's English restatement is
+ * EMBEDDED, so it reaches the ranker, and an adversarial review put
+ * "Splitwise Tricount Settle Up Splid Tabsplit" in that field and watched it
+ * through. A restatement naming a tool is the model writing the query rather
+ * than reading the sentence.
+ *
+ * It also corroborates a refusal: somebody typing a tool's name is not asking
+ * for a plumber, whatever a broken model says.
+ */
+export const TOOL_NAMES_SQL = `
+  select name from public.tools where status = 'published' order by name`;
+
+/** The names, for the guards in lib/reading.ts. Never a row, never an id. */
+export async function runToolNames(exec: Executor): Promise<string[]> {
+  const { rows } = await exec.query<{ name: string }>(TOOL_NAMES_SQL, []);
+  return rows.map((row) => String(row.name));
+}
+
 /** What one prefetch found. Neither field says anything about anybody. */
 export interface Prefetch {
   /** The stored reading, unvalidated — the caller checks it. Null on a miss. */

@@ -36,6 +36,10 @@
 --   6. A reading recorded under a different model is invisible, so changing
 --      public.reading_model() in a migration retires every stale row at once.
 --
+--   7. A cached REFUSAL expires after a day and an ordinary reading does not
+--      (0009). It is the one answer that empties a page without searching, and
+--      one bad sample must not do that for ever.
+--
 --   docker exec -i foundit-dev-db psql -v ON_ERROR_STOP=1 -U foundit_owner \
 --     -d foundit < db/test/reader_test.sql
 -- ===========================================================================
@@ -359,7 +363,67 @@ begin
 end
 $$;
 
-select 'READER TEST PASSED — the reading cache refuses what 0008 says it refuses'
+-- ===========================================================================
+-- 9. A cached REFUSAL goes stale; a cached reading does not (0009).
+--
+--    `asks_for_software: false` is the only field in a reading that empties a
+--    page without searching, and a reading is cached until it is evicted. One
+--    bad sample, on one afternoon, would otherwise be a permanent answer: every
+--    later visitor who typed that sentence would be told Foundit only lists
+--    software because of a coin that came up tails once. The application's
+--    two-sample vote and its refusal circuit both work on LIVE readings and
+--    neither can see a row written last month.
+-- ===========================================================================
+set local role foundit_app;
+
+do $$
+declare
+  v_refusal jsonb := pg_temp.reading() || '{"asks_for_software": false}'::jsonb;
+begin
+  perform public.store_query_reading('someone to fix the leak', v_refusal, public.reading_model());
+
+  -- Fresh, so it is served: the application must not pay for the model again
+  -- for a sentence somebody is retrying in the same sitting.
+  if public.query_reading('someone to fix the leak') is null then
+    perform pg_temp.fail('a refusal recorded a moment ago was not served');
+  end if;
+
+  -- An ordinary reading of the same age is served too, which is the control:
+  -- what expires is the refusal, not the cache.
+  perform public.store_query_reading('a tool to split a bill', pg_temp.reading(), public.reading_model());
+  if public.query_reading('a tool to split a bill') is null then
+    perform pg_temp.fail('an ordinary reading was not served');
+  end if;
+end
+$$;
+
+reset role;
+
+-- Age both rows past the ttl. The owner does this directly because the point is
+-- what query_reading DOES with an old row, and there is no function that makes
+-- a row old — nor should there be.
+update public.query_readings
+   set created_at = now() - public.reading_refusal_ttl() - interval '1 minute'
+ where query_norm in ('someone to fix the leak', 'a tool to split a bill');
+
+set local role foundit_app;
+
+do $$
+begin
+  if public.query_reading('someone to fix the leak') is not null then
+    perform pg_temp.fail('a refusal older than the ttl was still served');
+  end if;
+
+  if public.query_reading('a tool to split a bill') is null then
+    perform pg_temp.fail(
+      'an ordinary reading expired; only refusals do, or the cache saves nothing');
+  end if;
+end
+$$;
+
+reset role;
+
+select 'READER TEST PASSED — the reading cache refuses what 0008 and 0009 say it refuses'
        as result;
 
 rollback;

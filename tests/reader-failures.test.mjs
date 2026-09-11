@@ -246,3 +246,183 @@ test('the tokens a search is billed for are both calls, not one', async () => {
   assert.equal(out.value.tokensIn, 200, 'two calls at 100 input tokens each');
   assert.equal(out.value.tokensOut, 40, 'and 20 output tokens each');
 });
+
+test('a stalled body times out, not just stalled headers', async () => {
+  // `fetch` resolves when the HEADERS arrive. A provider that answers 200 and
+  // then trickles — or never finishes — the body was bounded by nothing at all:
+  // an adversarial review measured fifteen seconds against a three-second
+  // timeout, because the abort timer was cleared the moment the headers landed.
+  //
+  // The stub below answers instantly and then hangs in `json()`, honouring the
+  // abort signal the way a real body stream does.
+  const { readSentenceOrThrow, READER_TIMEOUT_MS } = await import('../lib/reader-model.ts');
+
+  const stalls = (_url, init) =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
+        }),
+    });
+
+  const started = Date.now();
+  const out = await withStubbedFetch(stalls, async () => {
+    try {
+      await readSentenceOrThrow(SENTENCE);
+      return null;
+    } catch (error) {
+      return error;
+    }
+  });
+  const elapsed = Date.now() - started;
+
+  assert.ok(out.value, 'a stalled body must be refused, not awaited for ever');
+  assert.match(out.value.message, /timed out after/);
+  assert.ok(
+    elapsed < READER_TIMEOUT_MS * 2,
+    `it must give up near the timeout, not long after it (took ${elapsed} ms)`,
+  );
+});
+
+test('the embedder bounds a stalled body too', async () => {
+  const { embedTexts, EMBEDDINGS_TIMEOUT_MS } = await import('../lib/embeddings.ts');
+  const saved = saveKeys();
+  const realFetch = globalThis.fetch;
+  try {
+    process.env[KEY_NAMES[1]] = 'a value no stub ever looks at';
+    globalThis.fetch = (_url, init) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal.addEventListener('abort', () => {
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              reject(error);
+            });
+          }),
+      });
+
+    const started = Date.now();
+    let thrown = null;
+    try {
+      await embedTexts([SENTENCE]);
+    } catch (error) {
+      thrown = error;
+    }
+    const elapsed = Date.now() - started;
+
+    assert.ok(thrown, 'a stalled body must be refused');
+    assert.match(thrown.message, /timed out after/);
+    assert.ok(elapsed < EMBEDDINGS_TIMEOUT_MS * 2, `took ${elapsed} ms`);
+  } finally {
+    globalThis.fetch = realFetch;
+    restoreKeys(saved);
+  }
+});
+
+test('a reader that refuses EVERYTHING stops emptying pages', async () => {
+  // The review's attack: point the reader at a model that answers
+  // `asks_for_software: false` for every sentence, and three of four real
+  // questions came back with "Foundit only lists software". The two-sample vote
+  // does not help — two samples of a broken model agree with each other.
+  //
+  // What follows is exactly the two lines app/results/page.tsx runs, over the
+  // functions it runs them on:
+  //
+  //     if (fresh) recordRefusal(!plan.asksForSoftware);
+  //     notSoftware = !plan.asksForSoftware && refusalsTrusted();
+  //
+  // The address the reader calls is a hardcoded constant and there is no
+  // supported way to point a running server somewhere else, which is the whole
+  // design; so the transport is stubbed and the composition is driven here.
+  const { readSentence } = await import('../lib/reader-model.ts');
+  const { planSearch } = await import('../lib/reading.ts');
+  const { RefusalCircuit } = await import('../lib/rate-limit.ts');
+
+  // Real questions, every one of which has an answer in the catalogue. None
+  // says "app" or names a tool, so nothing else in the guards saves them —
+  // only the circuit can.
+  const QUESTIONS = [
+    'we all paid for different bits of the holiday and now nobody knows who owes who',
+    'I get to the end of every month with no idea where the money went',
+    'my video file is too big to email, how do I shrink it',
+    'stop myself opening the same distracting websites while I am trying to work',
+    'cut all the long silences out of an interview I recorded',
+    'keep a folder identical on two computers without a cloud company in the middle',
+    'send money to family in another country without losing a chunk to the exchange rate',
+    'sketch a quick diagram of how our system works and send someone the link',
+    'get a written transcript of a meeting I was in',
+    'have long articles read out loud to me while I am walking',
+    'follow the blogs I care about without an algorithm deciding what I see',
+    'scan all the paper in my filing cabinet so I can search it later',
+    'find out where my working hours actually go so I can bill a client honestly',
+    'shopping list the whole household can add to from their own phones',
+    'draw a logo that will still look sharp when it is printed on a banner',
+    'check my English grammar before I send an email to a client',
+    'make all my podcast episodes come out at the same loudness',
+    'open and edit a photoshop file without owning photoshop',
+    'somewhere to write a novel where I can move the chapters around',
+    'back up my whole laptop so I can get everything back if it is stolen',
+    'merge two pdfs without uploading my documents to some website',
+    'keep all the flight and hotel bookings for one trip in a single place',
+    'record my screen and stream it live',
+    'block distracting sites',
+  ];
+
+  const brokenModel = (sentence) =>
+    ok(
+      envelope(
+        JSON.stringify({ ...EMPTY, asks_for_software: false, residual: sentence }),
+      ),
+    )();
+
+  const circuit = new RefusalCircuit();
+  const realError = console.error;
+  console.error = () => {};
+
+  let emptied = 0;
+  try {
+    for (const sentence of QUESTIONS) {
+      const fresh = await withStubbedFetch(
+        () => brokenModel(sentence),
+        () => readSentence(sentence),
+      );
+      const plan = planSearch(sentence, [], fresh.value.reading, { toolNames: [] });
+      // The page's two lines, with this test's own circuit standing in for the
+      // process-wide one.
+      if (fresh.value) circuit.record(!plan.asksForSoftware);
+      const notSoftware = !plan.asksForSoftware && circuit.trusted;
+      if (notSoftware) emptied += 1;
+    }
+  } finally {
+    console.error = realError;
+  }
+
+  assert.equal(circuit.trusted, false, 'the circuit must be open after a run like that');
+  // The circuit needs ten samples before it will conclude anything, so the
+  // first ten pages are lost and every one after them renders. That is the
+  // bound, stated: ten, not all of them.
+  assert.ok(emptied <= 10, `at most ten pages may be emptied before it trips, not ${emptied}`);
+  assert.ok(
+    QUESTIONS.length - emptied >= 14,
+    'and every question after it trips must reach the search',
+  );
+});
+
+test('a working reader is not punished for the occasional real refusal', async () => {
+  // The other direction: the circuit must not trip on ordinary traffic, or it
+  // would quietly disable the feature the phase is for.
+  const { RefusalCircuit } = await import('../lib/rate-limit.ts');
+  const circuit = new RefusalCircuit();
+  // Roughly the mix both negatives files together produce: about a fifth.
+  for (let i = 0; i < 40; i += 1) circuit.record(i % 5 === 0);
+  assert.equal(circuit.trusted, true, 'one in five refusing is a normal week');
+});

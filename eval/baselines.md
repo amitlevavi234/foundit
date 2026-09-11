@@ -76,7 +76,7 @@ size of the set noted.
 | 2026-09-11 | 654f29d | 3 | yes | 60 | 0.6747 | 0.7018 | 66.7 | 117.2 | 0 of 60 | | | | The adversarial review's fixes. The search is unchanged; the -0.0001 is float16 rounding, now frozen by `db/seed/embeddings.fixture.json`. **This is the reproducible one** — every run, laptop or CI, key or no key, warms from the same recorded vectors. |
 | 2026-09-11 | 9634cd6 | 3 | yes | 60 | 0.6719 | 0.7035 | 82.5 | 122.5 | 0 of 60 | 26 of 30 | | | **The relevance floor** (`0006_relevance_floor.sql`), after the owner's review. A result is returned only with evidence — close enough in meaning, every term of the sentence, or a close name. The golden set barely moves; the 30 sentences in `eval/negatives.jsonl` go from 0 of 30 answered with an empty page to 26 of 30, and from 20.0 to 2.2 rows leaked each. See "Phase 3 amended" below. |
 | 2026-09-11 | 5c002ff | 3 | yes | 60 | 0.7364 | 0.7618 | 84.6 | 119.8 | 0 of 60 | 10 of 30 | 10 of 25 | 0 of 240 | **Tool summaries embedded** (`0007`), and the floor re-tuned against a held-out negatives file and 240 perturbations. The summaries are the gain: nDCG 0.7035 → 0.7618, recall 0.6719 → 0.7364, non-English 0.6025 → 0.6516. **The negatives share falls, 26 of 30 → 10 of 30, and that is the honest direction**: the old value was fitted to that file, and on the held-out file — which nobody had tuned against — the old floor and this one both refuse 40%. The relative gate the review asked for was built first and refuses nothing at all; see "Phase 3 amended again" below. |
-| 2026-09-12 | 0ffd091 | 4 | yes | 60 | 0.7719 | 0.7763 | 70.0 | 103.2 | 0 of 60 | 13 of 30 | 11 of 25 | 0 of 240 | **The sentence, read.** `gpt-5-nano` through the Responses API with a strict schema, merged behind the rules pass, which keeps the last word. **The headline is now the SHIPPED path** — what a visitor gets — rather than the golden set's own constraints; the reference pass on the same run still reads 0.7618, so the instrument did not move. Nearly all the gain is non-English (0.6516 → 0.8254), from embedding the model's English restatement instead of the sentence. Against what a visitor got in Phase 3 (`--plan=rules`, 0.7411) it is +0.0352, and the reader's divergence goes from −0.0183 to **+0.0145**. The model may fill ONE dimension, pricing: flags and interface languages were measured and both made the search worse. A refusal needs two samples to agree, because one in seven called a question about splitting a bill "not software" — `eval/perturb.mjs` caught it. $0.000232 a search. See "Phase 4" below. |
+| 2026-09-12 | 0ffd091 | 4 | yes | 60 | 0.7719 | 0.7763 | 70.0 | 103.2 | 0 of 60 | 13 of 30 | 11 of 25 | 0 of 240 | **WITHDRAWN — see "Phase 4, withdrawn" below.** Not a baseline. The numbers are real and describe a code path no visitor ran: the harness embedded the model's English restatement and the application embedded the rules residual, so the non-English figure belonged to nobody's search. Kept because deleting it would hide what happened. Originally recorded as: **The sentence, read.** `gpt-5-nano` through the Responses API with a strict schema, merged behind the rules pass, which keeps the last word. **The headline is now the SHIPPED path** — what a visitor gets — rather than the golden set's own constraints; the reference pass on the same run still reads 0.7618, so the instrument did not move. Nearly all the gain is non-English (0.6516 → 0.8254), from embedding the model's English restatement instead of the sentence. Against what a visitor got in Phase 3 (`--plan=rules`, 0.7411) it is +0.0352, and the reader's divergence goes from −0.0183 to **+0.0145**. The model may fill ONE dimension, pricing: flags and interface languages were measured and both made the search worse. A refusal needs two samples to agree, because one in seven called a question about splitting a bill "not software" — `eval/perturb.mjs` caught it. $0.000232 a search. See "Phase 4" below. |
 
 ### Phase 2, by slice
 
@@ -559,6 +559,23 @@ below the cutoff.
 The floor itself costs the golden set nothing at 0.34 — 0.7589 → 0.7618 — which
 is the whole reason it is set there rather than higher.
 
+## Phase 4, WITHDRAWN: what the first recording measured
+
+**Every number in this section is real and none of it describes the product.**
+An adversarial review found that `eval/run.mjs` and `app/results/page.tsx` did
+not run the same search — the harness embedded the model's English restatement
+and the application embedded the rules residual — so the headline below belongs
+to a code path no visitor ever took. The row it produced is marked WITHDRAWN in
+the table at the top of this file and is kept for the same reason the Phase 2
+withdrawal is: deleting it would hide what happened.
+
+It is left here unedited because the sweeps in it are still the sweeps that
+chose the defaults — `--accept`, `--embed`, `--text` and the merge mode were all
+measured on the harness's path, which is the path that decides which reading is
+better, and the fix did not change their ordering. What it changed is the
+headline. Read this section for the reasoning and
+**"Phase 4, re-measured" below for the numbers.**
+
 ## Phase 4: reading the sentence
 
 ### The instrument changed, and that is recorded rather than slipped in
@@ -777,3 +794,157 @@ Three things about that number:
   because a cache key on somebody's sentence is a correlation handle.
 * **It is the price of a FIRST-EVER sentence.** Both caches are keyed on the
   normalised text, so a repeat costs nothing at all.
+
+## Phase 4, re-measured: what an adversarial review found
+
+The section above was written from a run that measured a search the application
+did not perform. This one is written from a run that measures the one it does.
+
+### The defect, because it is the useful part
+
+`lib/reading.ts` computed `embedText` — for a non-English sentence, the model's
+English restatement, which is the whole of where the non-English gain came from.
+`app/results/page.tsx` took `filters` and `text` off the same object and then
+embedded a string it had worked out for itself, before the reading existed.
+
+So the harness handed `search_tools` the restatement's vector and the
+application handed it the sentence's. Measured on the application's actual path,
+the recorded 0.8254 non-English was **0.6523** — Phase 3 to four decimals — and
+the all-60 figure was 0.7474, which is 0.0144 BELOW the row it claimed to beat.
+
+Every test passed throughout. Each half was correct on its own and nothing
+compared them. What exists now: one function, `planSearch`, returns every string
+a search needs, both callers use it, and `tests/parity.test.mjs` puts ten
+sentences through the application's call and the harness's and asserts the
+filters and the embedded text come out byte-identical. Separately, the harness
+no longer reads the query-vector cache at all — both passes carry their own
+vector — because the cache holds one vector per sentence and two passes wanting
+two different ones is the same divergence in a second costume. It was: the fix
+above passed and the application still disagreed, until that changed too.
+
+**Proved end to end rather than by reading the code.** With the cache emptied,
+the six non-English golden queries were put through the running application and
+through the harness, and the returned tools are identical in identical order:
+
+```
+        harness                                    application
+q009    tricount tabsplit splitwise wanderlog …    (identical)
+q018    duolingo anki almaany quizlet koreader     (identical)
+q059    almaany morfix wordreference koreader …    (identical)
+q027    quietroom audacity auphonic ocenaudio …    (identical)
+q031    handbrake dropbox shotcut photopea vlc     (identical)
+q007    rome2rio trainline                         (identical)
+```
+
+### The recorded run — the mean-nearest of five
+
+| Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero |
+| ----- | - | --------- | ------- | ------- | ------ | ---- |
+| all | 60 | 0.7636 | 0.7755 | 65.8 | 110.8 | 0 |
+| english | 50 | 0.7413 | 0.7665 | 67.1 | 111.1 | 0 |
+| non-english | 10 | 0.8750 | 0.8207 | 59.4 | 90.5 | 0 |
+| constrained | 15 | 0.8367 | 0.7895 | 56.4 | 110.8 | 0 |
+| unconstrained | 45 | 0.7393 | 0.7708 | 68.9 | 111.1 | 0 |
+
+The reference pass on the same run reads **0.7618**, which is the Phase 3
+row exactly and is what says the instrument did not move underneath the number.
+The reader's divergence is **+0.0137**, against −0.0183 in Phase 3.
+
+### The spread, which is the honest part
+
+The first recorded 0.8254 was not only measured on the wrong path — it was the
+best of a spread rather than the middle of one. A reviewer re-recorded the
+non-English readings five times and got 0.7396 to 0.8231, mean 0.7866, with the
+recorded figure above all five.
+
+So the recording procedure is now explicit: record the non-English readings five
+times, measure each, and freeze the one nearest the MEAN. The five, after the
+fixes:
+
+| recording | nDCG@10 | non-English | negatives | held-out | perturbed empty | golden empty |
+| --------- | ------- | ----------- | --------- | -------- | --------------- | ------------ |
+| 1 | 0.7620 | 0.7395 | 12 of 30 | 11 of 25 | 0 of 240 | 0 |
+| **2 — frozen** | **0.7755** | **0.8207** | **13 of 30** | **11 of 25** | **0 of 240** | **0** |
+| 3 | 0.7775 | 0.8329 | 13 of 30 | 11 of 25 | 0 of 240 | 0 |
+| 4 | 0.7666 | 0.7671 | 13 of 30 | 11 of 25 | 0 of 240 | 0 |
+| 5 | 0.7756 | 0.8213 | 12 of 30 | 11 of 25 | 0 of 240 | 0 |
+
+```
+nDCG@10      mean 0.7714   range 0.7620 – 0.7775
+non-English  mean 0.7963   range 0.7395 – 0.8329
+```
+
+Trial 2 is frozen because 0.7755 is nearest the mean, not because 0.7775 was
+available. **The worst of the five, 0.7620, would not have cleared the gate**
+(0.7618 + 0.005 = 0.7668), and saying so is the point of running five: the
+honest claim is "this beats Phase 3 by about a hundredth, four times out of
+five", not "this beats Phase 3 by 0.0145".
+
+Everything that is not a restatement is identical across the five recordings —
+the English slice is 0.7665 in all of them — because only the non-English
+readings were re-recorded. The spread is the restatement's alone.
+
+### Against what a visitor got in Phase 3
+
+| | rules only (Phase 3's reader) | shipped, frozen recording | change |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.7411 | **0.7755** | +0.0344 |
+| english nDCG | 0.7588 | **0.7665** | +0.0077 |
+| **non-English nDCG** | 0.6523 | **0.8207** | **+0.1684** |
+| negatives empty | 10 of 30 | **13 of 30** | +3 |
+| held-out empty | 10 of 25 | **11 of 25** | +1 |
+
+### What else the review found, and what each cost
+
+Ten findings, and the three that changed behaviour rather than wording:
+
+**`english` was unvalidated prose that now reaches the ranker.** It accepted a
+list of our own tools ("Splitwise Tricount Settle Up Splid Tabsplit"), a
+399-character advice paragraph, injection prose and a JSON object — and it is
+the one model output that gets embedded. It is now checked like an input: at
+most thirty words, one line, no markup, no longer than twice the sentence, and
+it may not contain a published tool's name as a whole word. The catalogue's
+names reach the guard as an argument (one cached query) rather than as a lookup,
+so `lib/reading.ts` stays pure and the check runs against the tools that exist
+when the reading is USED rather than when it was recorded. On rejection the
+sentence itself is embedded and the refusal is counted.
+
+**A broken model emptied three of four real questions.** Pointed at a stub
+answering `asks_for_software: false` for everything, the two-sample vote did
+nothing — two samples of a broken model agree with each other. There is now an
+in-process circuit: if more than half of the last twenty LIVE readings refused,
+no refusal is honoured until that stops. It needs ten samples before it will
+conclude anything, which bounds the damage at about ten pages rather than at
+every page until somebody notices. A cached refusal also expires after 24 hours
+(`0009`), because it is the one answer that empties a page without searching.
+
+**The reader's daily cap counted one token for two HTTP calls**, so a cap of
+2,000 permitted 4,000 requests and twice the money it was set to bound. It
+counts requests now — and once it did, the default was wrong: 2,000 reader
+requests a day is $7.01 a month, over the $5 ceiling this project is willing to
+lose. The default is 1,200, which is 600 readings a day and **$4.21 a month**
+with the embedder's 2,000 alongside it. `tests/rate-limit.test.mjs` fails, with
+the figure in the message, if either drifts above it.
+
+Also: the 3-second timeout bounded headers only and a stalled body ran for
+fifteen seconds — the abort timer now stays armed until the body has been read,
+in both outbound files; `net.isIP()` replaced a shape check that accepted `abc`
+and `::::` as addresses; and the harness and the application validated the
+model's residual against two different strings (raw versus normalised), which
+`planSearch` now normalises once.
+
+### What it costs, re-measured
+
+```
+per search    tokens   $ / 1M      $ each
+reader in     3915.0    0.050   0.00024568
+reader out     122.4    0.400
+embedding in    14.4    0.020   0.00000029
+
+cost per search              $0.000246
+cost per thousand searches   $0.2456
+ceiling (docs/build-phases)  $0.002000 per search — within it, by 8.1x
+```
+
+And the other ceiling, which the first version of this phase did not have:
+spending both daily caps every day for a month is **$4.21**, against $5.

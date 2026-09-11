@@ -56,6 +56,65 @@ export const EMBEDDING_INPUT_PER_MTOK = 0.02;
  */
 export const MAX_COST_PER_SEARCH = 0.002;
 
+/**
+ * What this project is willing to lose in a month if every cap is spent every
+ * day by somebody doing it on purpose.
+ *
+ * `docs/build-phases.md` puts a ceiling on the cost of a SEARCH. That bounds the
+ * ordinary case and bounds nothing about the adversarial one, because the thing
+ * that decides the bill is not the price of a search but how many searches a
+ * stranger can make us run. This is the other number, and the daily caps in
+ * `.env.example` are chosen against it rather than picked.
+ *
+ * Five dollars a month, against a server that costs about five euros: an
+ * attacker who succeeds completely doubles the running cost of the project, and
+ * does not produce a bill anybody has to find out about by reading a statement.
+ */
+export const MAX_MONTHLY_SPEND = 5;
+
+/**
+ * What one reader request costs, measured.
+ *
+ * Averages over the 355 readings recorded into db/seed/embeddings.fixture.json,
+ * divided by the two requests each of them is. Kept here rather than read from
+ * the fixture so the arithmetic below works with no file and no database — the
+ * eval prints the live figure from the fixture itself and the two agree.
+ */
+export const READER_INPUT_TOKENS_PER_REQUEST = 1_850;
+export const READER_OUTPUT_TOKENS_PER_REQUEST = 60;
+/** A capped search sentence. Measured over the golden set: 866 tokens for 60. */
+export const EMBEDDING_TOKENS_PER_REQUEST = 15;
+
+export interface DailyCaps {
+  embeddingCallsPerDay: number;
+  readerCallsPerDay: number;
+}
+
+export interface WorstCase {
+  reader: number;
+  embedding: number;
+  total: number;
+}
+
+/**
+ * What spending every day's cap, every day, for thirty days would cost.
+ *
+ * The caps count HTTP REQUESTS, so this multiplies request prices by request
+ * counts — which is the fix for the defect where one token was taken for the
+ * reader's two calls and the real ceiling was double the stated one.
+ */
+export function worstCaseMonthly(caps: DailyCaps): WorstCase {
+  const perReaderRequest =
+    (READER_INPUT_TOKENS_PER_REQUEST * READER_INPUT_PER_MTOK +
+      READER_OUTPUT_TOKENS_PER_REQUEST * READER_OUTPUT_PER_MTOK) /
+    1e6;
+  const perEmbeddingRequest = (EMBEDDING_TOKENS_PER_REQUEST * EMBEDDING_INPUT_PER_MTOK) / 1e6;
+
+  const reader = caps.readerCallsPerDay * perReaderRequest * 30;
+  const embedding = caps.embeddingCallsPerDay * perEmbeddingRequest * 30;
+  return { reader, embedding, total: reader + embedding };
+}
+
 export interface Usage {
   /** Reader input tokens, billed at the full rate. */
   readerIn: number;

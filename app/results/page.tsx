@@ -23,6 +23,7 @@ import {
   type ReadConstraint,
 } from '@/lib/constraints';
 import {
+  getToolNames,
   logSearchEvent,
   prefetchForSearch,
   searchToolsDetailed,
@@ -31,10 +32,16 @@ import {
   touchQueryEmbedding,
   touchQueryReading,
 } from '@/lib/db';
-import { embedQuery } from '@/lib/embeddings';
-import { allowSearch, mayCallEmbeddings, mayCallReader } from '@/lib/rate-limit';
+import { embedQuery, normalizeQuery } from '@/lib/embeddings';
+import {
+  allowSearch,
+  mayCallEmbeddings,
+  mayCallReader,
+  recordRefusal,
+  refusalsTrusted,
+} from '@/lib/rate-limit';
 import { readSentence, validateReading, READER_MODEL } from '@/lib/reader-model';
-import { readSentenceWith } from '@/lib/reading';
+import { planSearch } from '@/lib/reading';
 import { clarifier, matchBand, matchedProblemOf } from '@/lib/results';
 import { MAX_QUERY_LENGTH, QueryTooLongError } from '@/lib/sql';
 import type { ToolResultDetail } from '@/lib/types';
@@ -327,7 +334,18 @@ async function Answer({
   let notSoftware = false;
   /** Nothing was left to rank on, so there is no "search" to loosen. */
   const browseOnly = searchText === '';
-  let merged = { constraints, filters: toSearchConstraints(constraints), text: searchText };
+  let merged = {
+    constraints,
+    filters: toSearchConstraints(constraints),
+    text: searchText,
+    embedText: searchText,
+  };
+
+  // The catalogue's own names, for the two guards that need them: a restatement
+  // may not name a tool, and a sentence that names one is not "not software".
+  // Cached for a minute with the other catalogue reads, so this is a map lookup
+  // rather than a query, and an empty list on failure rather than a dead page.
+  const toolNames = tooLong ? [] : await getToolNames();
 
   const startedAt = performance.now();
   const marks: Array<[string, number]> = [['start', startedAt]];
@@ -373,16 +391,81 @@ async function Answer({
       // cache is not more trustworthy than the model answer it came from, it
       // is the same answer later, and the shape CHECK in the database is about
       // structure rather than about the values being ones this build knows.
-      const checked = cached.reading !== null ? validateReading(cached.reading, query) : null;
+      // Validated against the NORMALISED sentence, which is what planSearch
+      // guards against — the two used to differ and the residual check was
+      // stricter in one of them than the other.
+      const checked =
+        cached.reading !== null ? validateReading(cached.reading, normalizeQuery(query)) : null;
       const reading = fresh?.reading ?? (checked && 'reading' in checked ? checked.reading : null);
       if (checked && 'error' in checked) {
         console.error(`a cached reading was refused (${checked.error}); the rules pass stands`);
       }
 
-      const plan = readSentenceWith(query, dropped, reading);
-      merged = { constraints: plan.constraints, filters: plan.filters, text: plan.text };
-      notSoftware = !plan.asksForSoftware;
+      // ONE function decides what this search does — the same one eval/run.mjs
+      // calls, through eval/reader.mjs. It returns the filters, the text to
+      // rank on and the text to EMBED, and the last of those is not the first:
+      // for a non-English sentence it is the model's English restatement. An
+      // earlier version of this file took `filters` and `text` from here and
+      // then embedded something it had worked out for itself, which is how a
+      // whole phase came to be measured on a path no visitor ever ran.
+      const plan = planSearch(query, dropped, reading, { toolNames });
+      merged = {
+        constraints: plan.constraints,
+        filters: plan.filters,
+        text: plan.text,
+        embedText: plan.embedText,
+      };
       fromModel = plan.constraints.filter((c) => plan.fromModel.includes(c.key));
+
+      // --- is this refusal believable? ----------------------------------
+      //
+      // Only a LIVE reading is evidence about the model's current behaviour; a
+      // cached one is evidence about the day it was recorded, and replaying it
+      // into the circuit would let one bad afternoon trip the circuit for a
+      // week. So the circuit is fed here and consulted here.
+      //
+      // A review pointed a stub that refused everything at this page and three
+      // of four real questions came back with "Foundit only lists software".
+      // The two-sample vote in readSentence does not help against that: two
+      // samples of a broken model are two samples of a broken model. The
+      // circuit is what does — once the reader has refused more than half of
+      // the last twenty readings, no refusal is honoured until it stops.
+      if (fresh) recordRefusal(!plan.asksForSoftware);
+      notSoftware = !plan.asksForSoftware && refusalsTrusted();
+
+      // --- 2b. the restatement, embedded afterwards ---------------------
+      //
+      // The only sequential paid call, and the one the phase goal explicitly
+      // permits — "except that a restated English sentence may be embedded
+      // afterwards when measurement shows it helps". It cannot be concurrent
+      // with the reading, because it is the reading's output: there is no
+      // restatement to embed until the model has produced one.
+      //
+      // It runs only when the plan wants a different string from the one
+      // already embedded above, which is exactly the non-English path, and it
+      // is what the non-English slice of the golden set is bought with.
+      let vector = embedded?.vector ?? null;
+      let vectorModel = embedded?.model ?? null;
+      // `cached.embeddingMissing` is the condition, not just "the plan wants a
+      // different string". The vector that gets stored below is filed under the
+      // key of the text being SEARCHED, so on the second visit to a non-English
+      // sentence the cache already holds the restatement's vector and the
+      // database will find it — asking for it again would be paying twice for
+      // the same answer on every repeat.
+      if (!notSoftware && merged.embedText !== merged.text && cached.embeddingMissing) {
+        if (mayCallEmbeddings()) {
+          const restated = await embedQuery(merged.embedText);
+          mark('restatement-done');
+          if (restated) {
+            vector = restated.vector;
+            vectorModel = restated.model;
+          }
+        } else {
+          // Over the daily cap. The sentence's own vector, or none: a worse
+          // ranking, never an error.
+          console.error('the daily embedding cap is reached; the restatement was not embedded');
+        }
+      }
 
       // --- 3. one search ------------------------------------------------
       // Nothing is searched for a sentence that is not a request for software:
@@ -394,17 +477,21 @@ async function Answer({
           merged.filters,
           RESULT_LIMIT,
           category,
-          embedded?.vector ?? null,
+          vector,
         );
         results = answer.results;
         embeddingMissing = answer.embeddingMissing;
-        usedVector = (embedded !== null || !embeddingMissing) && merged.text !== '';
+        usedVector = (vector !== null || !embeddingMissing) && merged.text !== '';
         mark('search');
       }
 
       // --- after the response has gone out ------------------------------
-      if (embedded) {
-        after(() => storeQueryEmbedding(merged.text, embedded.vector, embedded.model));
+      // The vector is stored under the key of the text that was SEARCHED, not
+      // of the text that was embedded, because that is the key the next
+      // identical search will look under. It is what makes a repeat of this
+      // sentence produce the identical ranking without paying for either call.
+      if (vector && vectorModel) {
+        after(() => storeQueryEmbedding(merged.text, vector, vectorModel));
       }
       if (fresh) {
         after(() => storeQueryReading(query, toStored(fresh.reading), READER_MODEL));

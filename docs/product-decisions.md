@@ -386,16 +386,26 @@ the page emptied. Pricing is different because the phrasings are endless
 readings a sentence can produce are already enumerated.
 
 **A non-English sentence is restated in English, and the restatement is
-embedded — never filtered on and never ranked on.** The catalogue is English and
+embedded — never filtered on and never ranked on.** It is also the only thing
+the model writes that reaches the ranker at all, so it is checked like an input
+rather than trusted like an answer: at most thirty words, one line, no markup,
+no longer than twice the sentence, and it may not name a tool in the catalogue.
+A restatement naming a tool is the model writing the query instead of reading
+the sentence. Anything that fails falls back to embedding the sentence itself
+and is counted. The catalogue is English and
 indexed as English, so this is the first thing in four phases to move the
 non-English slice for a structural reason rather than a tuning one. Giving the
 restatement to full-text search as well was measured and was worse; it is not
 done.
 
-**"This is not a request for software" empties the page, and needs three
-agreements to do it.** The sentence must not name a program in any language the
-catalogue serves, and *both* of two independent samples of the model must say
-so. That is not belt and braces for its own sake — one sample in seven said a
+**"This is not a request for software" empties the page, and needs four
+agreements to do it.** The sentence must name no program in any language the
+catalogue serves; it must name no tool in our own catalogue; *both* of two
+independent samples of the model must say so; and the reader must not have been
+refusing more than half of everything lately, which is a circuit that opens when
+it is and stops any refusal being honoured until it closes. A cached refusal
+also expires after a day, because it is the one answer that empties a page
+without searching and one bad sample must not do that for ever. That is not belt and braces for its own sake — one sample in seven said a
 question about splitting a holiday bill was not a request for software, and the
 cost of being wrong is a person with a real problem told that nothing exists.
 The page that results says Foundit only lists software and that this sounds
@@ -408,6 +418,17 @@ and no foreign key, exactly like `query_embeddings` and `search_events`. The
 rate limiter that bounds the spend keeps nothing at all: a token bucket in
 memory, keyed on a salted hash of an address that is never stored or logged, and
 a restart forgets everybody.
+
+**Two things about that limit that are true and were overstated once.** It holds
+per visitor only with Cloudflare in front of us overwriting `cf-connecting-ip`,
+which is the production arrangement and the origin has no published port to
+reach directly; traffic that does reach the origin directly shares ONE bucket
+between all of it, because `x-forwarded-for` can be written by anybody and
+trusting it would let one attacker mint a fresh identity per request. And the
+page a limited visitor gets is an HTTP **200**, not a 429: a Next 15 Server
+Component cannot set a status code, and middleware runs in a different runtime
+from the in-memory bucket. A person sees the right page; a bot sees no
+`Retry-After`.
 
 **`store: false` is in the request.** The Responses API retains a response by
 default so it can be fetched back by id. The sentence somebody typed is the text
