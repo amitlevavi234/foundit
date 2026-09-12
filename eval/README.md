@@ -572,7 +572,7 @@ With no key and no fixture, the floor does not apply, the negatives leak as
 they did in Phase 3, and the run is compared against the text-only row —
 which records no negatives, so nothing is gated on them.
 
-## The reranker: `--rerank`, `--rerank-n=`, `--record-reranks`
+## The reranker: `--rerank`, `--rerank-n=`, `--rerank-floor=`, `--record-reranks`
 
 ### Why this is in the harness rather than in a script
 
@@ -600,8 +600,43 @@ different question and files its answers separately — which is what made
 measuring 20, 30 and 50 three runs rather than three fixtures.
 
 The pass fetches `max(--limit, N)` rows, judges the top N, drops everything
-graded 0, and cuts what is left back to `--limit` before scoring. That is the
-application's own order of operations with the application's own two numbers.
+below the shown-from threshold, and cuts what is left back to `--limit` before
+scoring. That is the application's own order of operations with the
+application's own numbers.
+
+**`--rerank-floor=N` is the one sweep in this harness that costs nothing, and
+that is the point of it.** It sets the lowest grade that still reaches a page —
+`RERANK_SHOWN_FROM` in `lib/rerank.ts`, which ships at 2. The threshold is
+applied when a judgement is USED rather than when it is recorded, so ONE
+recording's judgements score at every value of it: choosing it is a free
+re-score rather than three more paid recordings. Both callers in the application
+pass nothing and get the shipped constant, so `applyRerank` is still the single
+function that decides the order — the parameter exists for the sweep and for
+nothing else.
+
+That distinction is worth keeping in mind when reading any table here: a change
+to what the model is ASKED (the prompt, the sampling, N) needs its own
+recordings and its own money, and a change to what is DONE with the answer does
+not.
+
+**`RERANK_SAMPLES` is a knob here too, and the harness is built for it even
+though it ships at 1.** Two samples per judgement with the LOWER mark kept was
+measured over three recordings and not shipped — `lib/rerank.ts` says why, and
+`eval/recordings/min2-{1,2,3}.json` are the runs. What the harness keeps from
+that: a run's reranker section prints how many judgements came back from only
+one sample, `prerecordJudgements` gives any short judgement a second attempt on
+its own before accepting it (a fixture that mixes one-sample and two-sample
+judgements measures neither), and the recording concurrency is `4 / samples` —
+four sentences at two calls each is eight requests in flight and the provider
+answers that with 429s. The first recording taken that way lost 145 of 354
+judgements outright and made another 72 from a single sample.
+
+**Every recording now also prints the distribution of its own output tokens** —
+`p50 238, p90 247, p99 250, max 251 over 354 calls`. That line is not decoration:
+`max_output_tokens` is what the worst case is BILLED at, so it is the number the
+daily caps are multiplied by, and it has to be set from the tail rather than from
+the mean. `scripts/output-tokens.mjs --measure` does the same for the reader,
+whose ceiling was 900 against a measured p99 of 117.
 
 ### What it does not do
 
@@ -632,6 +667,21 @@ against a row recorded with the reranker running. That is loud in three places,
 so it does not also need to be a refusal — and bumping the version would make
 every fixture anybody has on disk unreadable to `scripts/embed.mjs` for a
 reason that is already visible.
+
+**A fixture holding judgements from the WRONG MODEL is a different matter, and
+the database refuses it rather than this file.** `fixture.rerankModel` is written
+into `public.query_reranks.rerank_model`, `store_query_rerank` raises if it is
+not `public.rerank_model()`, and `query_rerank` serves nothing whose model does
+not match — so a fixture recorded under another model loads into nothing and the
+run says every sentence measured the Phase 4 order. Loudly wrong beats quietly
+mixed.
+
+It only covers the MODEL today, and `lib/rerank.ts` names the case it does not:
+a change to the prompt or to `RERANK_SAMPLES` produces different answers to the
+same question under the same model name, so it has to move
+`public.rerank_model()` in a migration or every judgement recorded the old way
+is served as though the new rule had produced it. The precision work did that
+for a day, measured what it wanted to measure, and took both back out.
 
 ### A sentence with no recorded judgement
 

@@ -92,6 +92,281 @@ this is the one a run is gated against.
 | Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | Negatives empty | Held-out empty | Perturbed empty | Rerank coverage | What changed |
 | ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | --------------- | -------------- | --------------- | --------------- | ------------ |
 | 2026-09-12 | 15ff3a8 | 5 | yes | 60 | 0.7842 | 0.8707 | 78.6 | 108.1 | 0 of 60 | 20 of 30 | 19 of 25 | 0 of 240 | 347 of 353 | **The Phase 5 review's fixes, and the reranker's number re-recorded from artefacts anybody can open.** The search is unchanged; what changed is what may be claimed about it. Three fresh recordings at N=20 — `eval/recordings/n20-1.json`, `n20-2.json`, `n20-3.json` — read 0.8811, **0.8707** and 0.8711. The frozen one is `n20-2`, the LOWEST of the three, because it is the only one of the three that clears every gate: `n20-1` empties two of the 240 perturbations and `n20-3` empties one of them and a golden query outright. So the number is the worst of three rather than the middle of five, and the reason is written down. Against the previously recorded Phase 5 row the negatives share falls 22 of 30 → 20 of 30 and the held-out 20 of 25 → 19 of 25: the same code, a different recording, and that spread IS the finding. New: the reviewer's 25 blind negatives (20 of 25 empty, near misses 14 of 17) and 15 blind answerable sentences (rank 1 in **15 of 15**), both held out. Prompt injection through a candidate's own statement closed; two write paths closed (`0011`); `query_reranks_shape` made to mean what it says (`0011`, `0012`); the caps re-costed from output CEILINGS and cut to 120 first-ever searches a day. $0.000427 a search. See "Phase 5, re-measured" below. |
+| 2026-09-12 | 033fe53 | 6+ | yes | 60 | 0.7875 | 0.8796 | 119.7 | 171.9 | 0 of 60 | 21 of 31 | 19 of 25 | 0 of 240 | 354 of 354 | **NOT A NEW MEASUREMENT — the row above, re-read with one negative added and the denominator changed from 30 to 31.** `eval/negatives.jsonl` gained the owner's own sentence, "app that transfer reels to recepies free", typed as he typed it; adding a test is allowed and the golden set is untouched. Nothing about the search changed, and the judgements are the frozen `n20-2` set plus one for the new sentence. The nDCG moves 0.8707 → 0.8796 for a reason that has nothing to do with quality: the frozen fixture was missing judgements for 6 of its 353 searches, which measured the Phase 4 order, and recording those six is what moved it — coverage 347 of 353 → 354 of 354. Reproduce exactly: `node eval/run.mjs --rerank-floor=1` against the committed fixture (`eval/recordings/shown1-frozen.json`). This is the BEFORE the row below is measured against. |
+| 2026-09-12 | 033fe53 | 6+ | yes | 60 | 0.7269 | 0.8645 | 119.7 | 171.9 | 0 of 60 | 24 of 31 | 22 of 25 | 0 of 240 | 354 of 354 | **A "Loose" result is no longer shown.** `RERANK_SHOWN_FROM` is 2: the reranker's grade 1 — "in the right area rather than an answer to it" — is dropped from the page with its 0s. The owner searched "app that transfer reels to recepies free" and was shown a receipt splitter graded 3; his decision (`docs/product-decisions.md` §17) is that the page should say there is nothing rather than show something unrelated, and this is the half of it that could be shipped. **Sentences that should return nothing: 21 of 31 → 24 of 31, near misses 8 of 16 → 11 of 16, held-out 19 of 25 → 22 of 25, the reviewer's 25 → 22 of 25. The price is nDCG 0.8796 → 0.8645 (a DROP of 0.0151) and recall 0.7875 → 0.7269 (a drop of 0.0606)**, and the drop is the point rather than a footnote: a judged-relevant tool the model reads as "in the right area" now leaves the page. Nothing else moved — 0 golden queries emptied, 0 of 240 perturbations, 15 of 15 answerable sentences still at rank 1, coverage 354 of 354, $0.000428 a search. The threshold costs no API call, changes no judgement and was chosen by re-scoring one recording at every value of it. **Two samples per judgement with the lower mark — the other half, and the half that fixes the owner's sentence outright — was measured over three recordings and NOT shipped: it empties golden queries and perturbations.** See "Ranking precision (after Phase 6)" below. |
+
+### Ranking precision (after Phase 6) — the owner's decision, measured
+
+The owner searched **"app that transfer reels to recepies free"** on 12
+September 2026 and was shown **Receiptly, a receipt splitter, as the only result
+on the page**. The cached judgement in `public.query_reranks` graded it
+**relevance 3**. Nothing about the two sentences agrees except that "recepies"
+looks like "receipts". His words: he would rather the page say there is no
+matching tool than show one that is not related.
+
+That is a decision to weigh precision over recall, it is recorded as an
+amendment to `docs/product-decisions.md` §17, and this section is what it cost
+to find out how much of it can be bought.
+
+**The sentence was added to `eval/negatives.jsonl` as `n31`, exactly as typed.**
+Adding a test is allowed; the golden set is untouched and no negative was
+removed or reworded. The denominators in every row and table below are 31 rather
+than 30, and the two rows above are the same recording read at both thresholds
+so that the before and the after differ by one constant and nothing else.
+
+#### What ships, and the one gate it misses
+
+`RERANK_SHOWN_FROM = 2`. A judgement of 1 no longer reaches a page. That is the
+whole of the shipped change, it costs no API call, and it changes no judgement —
+the threshold is applied when a judgement is USED, which is what made choosing
+it a free re-score (`eval/run.mjs --rerank-floor=`) rather than three more paid
+recordings.
+
+| Gate | Target | Frozen recording | Lowest of three | Verdict |
+| --- | --- | --- | --- | --- |
+| `negatives.jsonl` empty | ≥ 28 of 31 | 24 of 31 | 23 of 31 | **MISSED by 4** |
+| `negatives.review.jsonl` empty | ≥ 22 of 25 | 22 of 25 | 22 of 25 | met |
+| `negatives.review2.jsonl` empty | ≥ 20 of 25 (recorded) | 22 of 25 | 22 of 25 | met |
+| golden queries with no results | 0 | 0 | 0 | met |
+| perturbation flips | 0 of 240 | 0 | **1** | met on the frozen one |
+| nDCG@10 | ≥ 0.860 | 0.8645 | 0.8472 | met on the frozen one |
+| `positives.review.jsonl` at rank 1 | ≥ 15 of 15 (recorded) | 15 of 15 | 15 of 15 | met |
+| rerank coverage | within 5 points | 354 of 354 | 354 of 354 | met |
+| cost per search | ≤ $0.002 | $0.000428 | — | met |
+| monthly worst case at the caps | ≤ $5.00 | **$3.23** (was $4.68) | — | met |
+
+**The one gate the shipped configuration misses is the headline one**, and it
+misses it by four sentences: 24 of 31 rather than 28 of 31. The rest of this
+section is why the other four could not be bought, measured rather than argued.
+
+#### The frontier, measured for nothing
+
+The threshold is applied at use time, so one recording's judgements score at
+every value of it. Every row below is a full run — 60 golden queries, 31
+negatives, two held-out files, 15 answerable sentences, 240 perturbations — and
+not one of them cost an API call beyond the recording it scores.
+
+| judgements | shown from | nDCG@10 | recall@10 | golden empty | perturbed empty | `negatives` | held-out | review2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `shown1-frozen` | 1 | 0.8796 | 0.7875 | 0 | 0 | 21 of 31 | 19 of 25 | 20 of 25 |
+| the same, **shipped** | **2** | **0.8645** | **0.7269** | **0** | **0** | **24 of 31** | **22 of 25** | **22 of 25** |
+| `min2-1` | 1 | 0.8639 | 0.7250 | 0 | 1 | 25 of 31 | 20 of 25 | 20 of 25 |
+| `min2-1` | 2 | 0.8505 | 0.6661 | 0 | 1 | 27 of 31 | 23 of 25 | 23 of 25 |
+| `min2-1` | 3 | 0.7398 | 0.4967 | **3** | **6** | 29 of 31 | 23 of 25 | 24 of 25 |
+
+Two things that table settles.
+
+**Grade 3 alone is not a threshold.** It refuses 29 of 31 unanswerable
+sentences and empties three golden queries and six perturbations doing it, and
+it costs a seventh of the nDCG. It is in the table so that nobody has to try it
+again.
+
+**The negatives gate cannot be reached from here.** The only row that clears 28
+of 31 is the one that empties golden queries, and that is the wall Phase 3 hit
+with a cosine floor, one level up: every setting that refuses the near miss also
+refuses a real question. A reading of the pair moved the wall without removing
+it.
+
+#### Two samples, the lower mark: three recordings, and not shipped
+
+Lever 1 from the brief. Call the reranker twice per judgement and keep
+`min(relevance_a, relevance_b)`, so a hallucinated 3 has to happen twice. It
+works on exactly the sentence it was built for — and it empties pages this
+catalogue answers.
+
+| | `min2-1` | `min2-2` | `min2-3` | lowest |
+| --- | --- | --- | --- | --- |
+| nDCG@10 (shown from 2) | 0.8505 | 0.8428 | 0.8537 | 0.8428 |
+| recall@10 | 0.6661 | 0.6625 | 0.6800 | 0.6625 |
+| **golden queries emptied** | 0 | **1** (q028) | 0 | **1** |
+| **perturbed empty of 240** | **1** (q018) | **2** (q028) | **1** (q042) | **2** |
+| `negatives.jsonl` empty | 27 of 31 | 26 of 31 | 27 of 31 | 26 of 31 |
+| held-out empty | 23 of 25 | 22 of 25 | 23 of 25 | 22 of 25 |
+| review2 empty | 23 of 25 | 22 of 25 | 23 of 25 | 22 of 25 |
+| answerable at rank 1 | 15 of 15 | 15 of 15 | 15 of 15 | 15 of 15 |
+| coverage | 354 of 354 | 354 of 354 | 354 of 354 | — |
+| judgements from one sample | 1 | 1 | 1 | — |
+| cost per search | $0.000607 | $0.000607 | $0.000607 | — |
+
+**Every one of the three failed the perturbation gate**, at both thresholds, and
+one of the three emptied a golden query outright. `docs/build-phases.md` sets
+that gate at zero rather than at "no worse than recorded", and the Phase 5
+review's sentence for it stands: a floor that depends on a full stop is not a
+floor. There was no recording to freeze.
+
+**Why it fails is the same mechanism that makes it work.** A sample that grades
+all twenty candidates 0 has refused the whole page, and under the lower mark
+that one sample has a veto. On `min2-2` it used it on golden q028 — *"edit a
+video for free without a watermark stamped across it"*, which this catalogue
+answers with Shotcut, Kdenlive, DaVinci Resolve, CapCut and LosslessCut. The
+judgement recorded for it is twenty zeros. The other sample in that pair had
+graded LosslessCut 3 and five tools 2; one recording earlier, both samples had
+judged the same sentence richly.
+
+**And the obvious fix undoes the reason for the change.** `readSentence` has
+said since Phase 4 that "a refusal which could not be corroborated is not a
+refusal", so the rule was built: discard a sample that refuses everything when
+the other one does not. It was recorded (`eval/recordings/vote-1.json`) and then
+pointed at the owner's own sentence, six judgements of it:
+
+```
+the lower mark        Receiptly 0 on every recording taken
+with the rescue rule  Receiptly 3 five times of six, 1 once
+```
+
+A single sample saying "none of these" is what a correct empty page and a wrong
+empty page look like from here, and this instrument cannot tell them apart. So
+the veto is the lower mark rather than a bug in it, `RERANK_SAMPLES` stays at 1,
+and the mechanism is kept in `lib/rerank.ts` — tested, one constant away — for
+the day the reranker is a steadier model.
+
+For the record, `vote-1` at shown-from 2: nDCG 0.8452, recall 0.6928, **golden
+empty 1 (q042)**, perturbed 2, negatives 25 of 31, held-out 22 of 25. The rescue
+rule cost precision as well as principle: at shown-from 1 it refuses 21 of 31
+against the plain lower mark's 25.
+
+#### A stricter rubric: measured, worse, not shipped
+
+Lever 2 from the brief, written exactly as the brief specifies it — 3 is "does
+the specific thing", 2 is "does it in part or with a workaround", 1 is "same
+problem area, not this task", 0 is "unrelated, or only shares words" — plus an
+explicit paragraph that a name or a word resembling a word in the sentence is
+not evidence, and a third worked example of that case. One recording,
+`eval/recordings/min2p2-1.json`, on top of two samples:
+
+| shown from | nDCG@10 | golden empty | perturbed empty | `negatives` | held-out | review2 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1, shipped prompt (`min2-1`) | 0.8639 | 0 | 1 | 25 of 31 | 20 of 25 | 20 of 25 |
+| 1, revised rubric | 0.8571 | 0 | **3** | 23 of 31 | 20 of 25 | 21 of 25 |
+| 2, shipped prompt (`min2-1`) | 0.8505 | 0 | 1 | 27 of 31 | 23 of 25 | 23 of 25 |
+| 2, revised rubric | 0.8349 | 0 | **4** | 25 of 31 | 23 of 25 | 23 of 25 |
+
+**Worse on the number, worse on the negatives it was written for, and three to
+four times worse on the perturbation gate.** The cause is legible in the rubric
+rather than mysterious: "does it in part, or with a workaround … two or three
+steps rather than one" is generous, and it pulls near misses up from 1 to 2 —
+which is precisely the grade the shipped threshold shows. The Phase 5 review
+measured a different revision of the same prompt and found the same shape of
+result; this is the second prompt revision to buy ordering and pay for it in
+refusals.
+
+Its one good sentence was measured on its own, too. The shipped prompt plus the
+word-resemblance paragraph and nothing else, eight single judgements of the
+owner's sentence, against the shipped prompt's own five:
+
+```
+shipped prompt                     Receiptly shown 3 times of 5
++ the word-resemblance paragraph   Receiptly shown 2 times of 8
+the whole revised rubric           Receiptly shown 1 time of 8
+two samples, the lower mark        Receiptly shown 0 times
+```
+
+A paragraph that moves a single sample from three in five to two in eight on one
+sentence is not a fix, and it would need its own three recordings to ship.
+Recorded here, not shipped.
+
+#### The spread of the shipped configuration, on identical code
+
+Three recordings, the same code, the same threshold. This is the Phase 5 finding
+reproduced rather than a new one, and it is why the frozen number is not a claim
+about the reranker:
+
+| | `shown2-frozen` **frozen** | `shown2-b` | `shown2-c` |
+| --- | --- | --- | --- |
+| nDCG@10 | **0.8645** | 0.8472 | 0.8678 |
+| recall@10 | 0.7269 | 0.6889 | 0.7261 |
+| golden queries emptied | 0 | 0 | 0 |
+| perturbed empty of 240 | 0 | **1** | 0 |
+| `negatives.jsonl` empty | 24 of 31 | 23 of 31 | 24 of 31 |
+| held-out empty | 22 of 25 | 22 of 25 | 23 of 25 |
+| review2 empty | 22 of 25 | 22 of 25 | 23 of 25 |
+| answerable at rank 1 | 15 of 15 | 15 of 15 | 15 of 15 |
+
+Mean nDCG 0.8598, range 0.0206 — **wider than Phase 5's 0.0104 on the same
+instrument** — and `shown2-b` would have cleared neither the perturbation gate
+nor the 0.860 target. The frozen one is `shown2-frozen` because it is the
+recording the fixture already held: the Phase 5 frozen `n20-2` judgement set
+with one judgement added for the new sentence, so the shipped number is a
+re-score of a recording that was frozen before this work started and could not
+have been chosen to flatter it. `shown2-b` and `shown2-c` are fresh recordings
+taken afterwards, for the spread alone.
+
+#### The owner's sentence, after
+
+```
+select judgement from public.query_reranks
+ where query_norm = 'app that transfer reels to recepies free';
+
+[{"slug": "draftbin", "relevance": 0}, {"slug": "splitwise", "relevance": 0},
+ {"slug": "tabsplit", "relevance": 0}, {"slug": "miniflux", "relevance": 0},
+ {"slug": "receiptly", "relevance": 0}, ... all twenty at 0 ...]
+```
+
+Receiptly is 0 and the page says *"Nothing here does what you asked."*
+
+**And that is one draw of an unstable judgement, not a property of the search.**
+Five more single samples of the same question graded Receiptly 3, 2 and 2. What
+the shipped change guarantees is narrower and worth stating exactly: a tool the
+reranker reads as merely "in the right area" can no longer reach the page at
+all. Whether *this* sentence returns nothing depends on the judgement that gets
+cached for it, and the change that would have made it certain is the one in the
+two-samples section above.
+
+#### What it costs, and the cap rebalance that turned out to be a cut
+
+The shipped change makes no call, so the per-search cost is unchanged at
+**$0.000428**. The caps moved anyway, and downwards, because the precision work
+had to measure something the project had been guessing:
+
+```
+per request     was      now    how it was chosen
+reader out      900      360    3 x a measured p99 of 117 (max 127, 396 requests)
+rerank out      700      750    3 x a measured p99 of 250 (max 293, 707 calls)
+
+monthly worst case at MAX_READER_CALLS_PER_DAY=240, MAX_RERANK_CALLS_PER_DAY=120
+  reader     $3.30  ->  $1.74
+  rerank     $1.37  ->  $1.46
+  embedding  $0.02      $0.02
+  total      $4.68  ->  $3.23      against a $5.00 ceiling
+```
+
+`.env.example` had named the reader's 900 as the binding constraint on all three
+caps and nobody had measured the distribution it bounds.
+`scripts/output-tokens.mjs --measure` now does, in one command, over the same
+396 sentences the eval searches with; every recording run prints the same
+statistic for the reranker. **The reranker's ceiling went UP by fifty**, which is
+the same rule honestly applied — 700 was 2.8 times its p99, not three.
+
+`tests/rate-limit.test.mjs` recomputes every line of that from the fixture and
+the two ceilings, so this block is the last recomputation rather than a promise.
+
+#### Known weaknesses of this number
+
+- **The negatives gate is missed by four sentences and the frontier says why.**
+  24 of 31 is the honest figure for what ships. The seven that still leak are
+  near misses graded 2 by a model that read the pair — not word matches, not the
+  floor failing — and every setting that refuses them also refuses a real
+  question.
+- **Recall fell by 0.0606 and some of that is wrong.** Every tool the reranker
+  graded 1 is gone from every page, including ones the golden set judges
+  relevant. The owner asked for this; it is not free and the number is here.
+- **The nDCG drop is 0.0151 against 0.011 named as acceptable.** It clears the
+  0.860 floor by 0.0045 on the frozen recording and misses it by 0.0128 on the
+  lowest of the three. One of three recordings of identical code would not have
+  shipped.
+- **A judgement is still one sample, so a page can still change under somebody
+  who reloads it.** That is the Phase 5 weakness, unfixed, and the fix was
+  measured here and cannot be afforded in golden empties.
+- **`had_good_match` is now arithmetically `result_count > 0` on a judged
+  search**, because everything shown is a 2 or a 3. §17 records that and names
+  the way out if the two columns ever need to be independent again.
+- **The perturbation gate holds on this fixture and is not a property of the
+  reranker.** One of the three shipped-configuration recordings emptied a
+  perturbed golden query, and the Phase 5 recordings did the same twice in three.
+  The gate is real and the instrument under it wobbles.
+- **The spend on all of it was $0.90 of a $3.00 ceiling**, of which $0.64 bought
+  the two levers that were not shipped. A measurement that says no is worth what
+  it costs.
 
 ### Phase 2, by slice
 
