@@ -103,6 +103,40 @@ export const MAX_READER_INPUT = 200;
 export const READER_REQUESTS_PER_READING = 2;
 
 /**
+ * The ceiling on what one reading may produce, reasoning tokens included.
+ *
+ * IT WAS 900, AND 900 WAS THE MOST EXPENSIVE NUMBER IN THE PROJECT. Nothing
+ * was wrong with it as a safety limit; what was wrong is what it is multiplied
+ * by. `max_output_tokens` is the number the WORST case is billed at, so the
+ * daily caps in `.env.example` are costed against it rather than against the
+ * measured mean — and at 900 the reader's line alone came to $3.30 of a $5
+ * monthly ceiling, which `.env.example` had already named as the binding
+ * constraint on all three caps.
+ *
+ * MEASURED, and the measurement is repeatable:
+ * `scripts/output-tokens.mjs --measure` reads every sentence the eval searches
+ * with, one request each, and prints the distribution rather than the mean —
+ * because a ceiling belongs on the tail. Over 396 requests on 12 September
+ * 2026:
+ *
+ *   min 56   mean 71   p50 66   p90 88   p95 101   p99 117   max 127
+ *
+ * So 360 is three times the p99 and nearly three times the largest answer any
+ * of those sentences produced, which leaves room for a sentence unlike all of
+ * them — the case a ceiling exists for — and frees about a pound a month of
+ * worst case for the reranker's second sample. Not the mean, and not 900.
+ *
+ * WHAT HAPPENS IF A READING EVER RUNS PAST IT. The response comes back with
+ * `status: incomplete` and no text, `callResponses` refuses it by name, and
+ * that sample is lost; a refusal needs two samples to agree, so one lost sample
+ * cannot empty a page. The reading falls back to the rules, which is the Phase
+ * 3 product and renders perfectly well. `lib/prices.ts` holds this number a
+ * second time, because it must stay a leaf with no imports;
+ * `tests/rate-limit.test.mjs` asserts the two agree.
+ */
+export const READER_MAX_OUTPUT_TOKENS = 360;
+
+/**
  * Where the key comes from, in order.
  *
  * Two names, not one, and the reason is that there is one account behind both:
@@ -824,7 +858,7 @@ export async function readSentenceOrThrow(sentence: string): Promise<ReaderResul
     schemaName: 'query_reading',
     schema: READER_SCHEMA,
     timeoutMs: READER_TIMEOUT_MS,
-    maxOutputTokens: 900,
+    maxOutputTokens: READER_MAX_OUTPUT_TOKENS,
   });
 
   const checked = validateReading(answer.parsed, capped);

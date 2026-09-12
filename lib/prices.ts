@@ -145,11 +145,27 @@ export const RERANK_OUTPUT_TOKENS_PER_REQUEST = 206;
  * rather than on the ordinary one. The average is what the per-search figure
  * uses; this is what the cap arithmetic uses.
  *
+ * BOTH ARE NOW MEASURED RATHER THAN PICKED, and both came down. The rule is
+ * three times the p99 of the per-request distribution, taken over the
+ * sentences the eval searches with:
+ *
+ *   reader   900 -> 360   p99 117, max 127 over 396 requests
+ *                         (scripts/output-tokens.mjs --measure)
+ *   rerank   700 -> 750   p99 250, max 293 over 707 calls
+ *                         (the "output tokens per request" line of any
+ *                          --record-reranks run)
+ *
+ * The reranker's went UP by fifty, which is the same rule honestly applied:
+ * its answer is twenty verdicts rather than seven fields, its p99 is twice the
+ * reader's, and 700 was 2.8 times it rather than three. The two changes
+ * together still free about $1.30 a month of worst case, which is what pays
+ * for the reranker's second sample.
+ *
  * Written here rather than imported so lib/prices.ts stays a leaf with no
  * imports of its own; tests/rate-limit.test.mjs asserts the two pairs agree.
  */
-export const READER_MAX_OUTPUT_TOKENS = 900;
-export const RERANK_MAX_OUTPUT_TOKENS = 700;
+export const READER_MAX_OUTPUT_TOKENS = 360;
+export const RERANK_MAX_OUTPUT_TOKENS = 750;
 
 export interface DailyCaps {
   embeddingCallsPerDay: number;

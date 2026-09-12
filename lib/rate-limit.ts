@@ -58,9 +58,9 @@ import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
  * a cap raised past what the money allows fails a test.
  *
  * The asymmetry between them is the price list: a reading is about 1,965 input
- * tokens twice over, a judgement 2,126 once, and embedding a capped sentence is
- * fifteen. The embedder could be ten times more generous and still cost
- * nothing; the other two could not.
+ * tokens twice over, a judgement about 2,126 once, and embedding a capped
+ * sentence is fifteen. The embedder could be ten times more generous and still
+ * cost nothing; the other two could not.
  *
  * So the caps are set TOGETHER, from one number: how many first-ever searches a
  * day a stranger may make us pay for. One search is two reader requests, one
@@ -70,18 +70,28 @@ import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
  * THAN THE PRODUCT.** The Phase 5 review found the cost model computed from
  * AVERAGE output tokens — 65 for a reading, 206 for a judgement. A cap does not
  * bound the average; it bounds the bill, and the bill's worst case is a model
- * that reasons to `max_output_tokens` on every call, which is 900 and 700. At
+ * that reasons to `max_output_tokens` on every call, which was 900 and 700. At
  * the averages the three caps cost $4.05 a month and looked comfortable; at the
  * ceilings the same caps cost $17.52, and the number that was supposed to be a
  * ceiling was a hope with three decimal places.
  *
- *   reader    2 x 120 = 240 requests/day    $3.30 a month at the ceiling
- *   rerank        120 = 120 requests/day    $1.37 a month at the ceiling
- *   embedding    2,000 requests/day         $0.02 a month
- *                                   total   $4.68 a month
+ * **THE PRECISION WORK DID NOT RAISE IT AND DID LOWER THE BILL.** Two samples
+ * per judgement were measured and not shipped (`lib/rerank.ts`,
+ * `RERANK_SAMPLES`), so a judgement is still one request — but the two output
+ * CEILINGS the worst case is billed at stopped being guesses.
+ * `scripts/output-tokens.mjs` measured the reader's per-request distribution —
+ * p99 117, max 127 over 396 requests — and three times the p99 is 360 rather
+ * than 900; the reranker's own p99, printed by every recording run, put its
+ * ceiling at 750 rather than 700. Same caps, same 120 searches, a third less
+ * worst case:
  *
- * against a $5 ceiling, and `tests/rate-limit.test.mjs` now recomputes all of
- * it from `db/seed/embeddings.fixture.json` and the two ceilings, so a drifting
+ *   reader    2 x 120 = 240 requests/day    $1.74 a month at the ceiling
+ *   rerank    1 x 120 = 120 requests/day    $1.46 a month at the ceiling
+ *   embedding    2,000 requests/day         $0.02 a month
+ *                                   total   $3.23 a month, was $4.68
+ *
+ * against a $5 ceiling, and `tests/rate-limit.test.mjs` recomputes all of it
+ * from `db/seed/embeddings.fixture.json` and the two ceilings, so a drifting
  * constant or a raised cap fails a test rather than a statement. THE TEST IS
  * THE AUTHORITY AND THIS COMMENT IS NOT: the measured input tokens move by a
  * few percent each time the fixture is re-recorded, and these three lines are
@@ -94,11 +104,13 @@ import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
  * saying so is better than saying 320 from a model that understated the worst
  * case by four times.
  *
- * **What to change when there is real traffic**, in this order: the reader's
- * `max_output_tokens`, which is now the binding constraint at 900 against a
- * measured 65 and was chosen after an incident rather than from a measurement;
- * then `MAX_MONTHLY_SPEND` in lib/prices.ts, on purpose, with the owner. Not
- * these three numbers one at a time.
+ * **What to change when there is real traffic**, in this order: this number —
+ * there is now $1.77 a month of headroom, which is 120 more first-ever
+ * searches a day or a second reranker sample if one is ever worth shipping —
+ * and then `MAX_MONTHLY_SPEND` in lib/prices.ts, on purpose, with the owner.
+ * Not these three one at a time. The output ceilings are no longer the place to
+ * look: they are measured now, and `scripts/output-tokens.mjs` is how to
+ * measure them again.
  */
 export const DEFAULT_SEARCHES_PER_IP_PER_HOUR = 60;
 export const DEFAULT_EMBEDDING_CALLS_PER_DAY = 2000;

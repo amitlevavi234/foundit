@@ -31,7 +31,14 @@ import {
   limits,
   visitorKey,
 } from '../lib/rate-limit.ts';
-import { READER_REQUESTS_PER_READING } from '../lib/reader-model.ts';
+import {
+  READER_MAX_OUTPUT_TOKENS as READER_CEILING_SENT,
+  READER_REQUESTS_PER_READING,
+} from '../lib/reader-model.ts';
+import {
+  RERANK_MAX_OUTPUT_TOKENS as RERANK_CEILING_SENT,
+  RERANK_REQUESTS_PER_JUDGEMENT,
+} from '../lib/rerank.ts';
 import {
   costOf,
   EMBEDDING_TOKENS_PER_REQUEST,
@@ -213,7 +220,18 @@ test('the limits come from the environment, with the documented defaults', () =>
     // month. The three caps are now set together from one number — how many
     // first-ever searches a day a stranger may make us pay for — which is 320.
     assert.equal(DEFAULT_READER_CALLS_PER_DAY, 240, '.env.example says 240 — two requests per reading, 120 readings');
+    // UNCHANGED BY THE PRECISION WORK, which is a result rather than an
+    // oversight: two samples per judgement were measured over three recordings
+    // and not shipped (lib/rerank.ts RERANK_SAMPLES). What did change is the two
+    // output ceilings the worst case below is billed at — measured rather than
+    // guessed, see scripts/output-tokens.mjs — so the same 120 searches a day
+    // now cost $3.23 a month instead of $4.68.
     assert.equal(DEFAULT_RERANK_CALLS_PER_DAY, 120, '.env.example says 120 — one request per judgement');
+    assert.equal(
+      DEFAULT_RERANK_CALLS_PER_DAY / RERANK_REQUESTS_PER_JUDGEMENT,
+      DEFAULT_READER_CALLS_PER_DAY / READER_REQUESTS_PER_READING,
+      'the three caps are set together, from ONE number: first-ever searches a day',
+    );
 
     process.env.MAX_SEARCHES_PER_IP_PER_HOUR = '5';
     assert.equal(limits().searchesPerIpPerHour, 5, 'the environment wins');
@@ -301,18 +319,39 @@ test('the cap arithmetic is computed from the fixture, not from a comment', () =
   assert.ok(rr?.judgements > 0, 'the fixture must carry reranker token counts');
   assert.ok(qt?.sentences > 0, 'the fixture must carry embedding token counts');
 
+  // PER REQUEST, NOT PER READING OR PER JUDGEMENT, because the caps count
+  // requests. The reranker's divisor was 1 until a judgement became two calls,
+  // and leaving it at 1 would have made every figure below exactly twice what
+  // the bill is — the cap arithmetic would have read $7.52 and a cap would have
+  // been cut to fix a division.
   const measured = {
     readerIn: rd.in / (rd.sentences * READER_REQUESTS_PER_READING),
     readerOut: rd.out / (rd.sentences * READER_REQUESTS_PER_READING),
-    rerankIn: rr.in / rr.judgements,
-    rerankOut: rr.out / rr.judgements,
+    rerankIn: rr.in / (rr.judgements * RERANK_REQUESTS_PER_JUDGEMENT),
+    rerankOut: rr.out / (rr.judgements * RERANK_REQUESTS_PER_JUDGEMENT),
     embeddingIn: qt.in / qt.sentences,
   };
 
   // The ceilings the requests are actually made with, asserted against the
-  // modules that make them so the two cannot drift apart.
-  assert.equal(READER_MAX_OUTPUT_TOKENS, 900, 'lib/reader-model.ts sends max_output_tokens: 900');
-  assert.equal(RERANK_MAX_OUTPUT_TOKENS, 700, 'lib/rerank.ts sends max_output_tokens: 700');
+  // modules that make them so the two cannot drift apart. lib/prices.ts holds
+  // its own copy because it must stay a leaf with no imports; this is the one
+  // place the two copies meet, and it used to compare the copy with a literal
+  // — which proves nothing about what goes out on the wire.
+  assert.equal(
+    READER_MAX_OUTPUT_TOKENS,
+    READER_CEILING_SENT,
+    'lib/prices.ts and lib/reader-model.ts disagree about max_output_tokens',
+  );
+  assert.equal(
+    RERANK_MAX_OUTPUT_TOKENS,
+    RERANK_CEILING_SENT,
+    'lib/prices.ts and lib/rerank.ts disagree about max_output_tokens',
+  );
+  // And they are three times a measured p99 rather than a number somebody
+  // liked: reader p99 117 over 396 requests (scripts/output-tokens.mjs),
+  // reranker p99 250 over 707 calls (any --record-reranks run's own report).
+  assert.equal(READER_MAX_OUTPUT_TOKENS, 360, '3 x a measured p99 of 117, rounded up');
+  assert.equal(RERANK_MAX_OUTPUT_TOKENS, 750, '3 x a measured p99 of 250');
 
   const worstCase = worstCaseMonthly(limits(), {
     ...measured,
