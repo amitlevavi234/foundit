@@ -90,6 +90,11 @@ const SENTENCE_FILES = [
   join(ROOT, 'eval', 'golden.jsonl'),
   join(ROOT, 'eval', 'negatives.jsonl'),
   join(ROOT, 'eval', 'negatives.review.jsonl'),
+  // The Phase 5 reviewer's two held-out files. A sentence the eval searches
+  // with and the fixture does not hold is a sentence CI measures differently
+  // from a laptop, which is the whole failure this list exists to prevent.
+  join(ROOT, 'eval', 'negatives.review2.jsonl'),
+  join(ROOT, 'eval', 'positives.review.jsonl'),
 ];
 
 /** The fixture format. Bumped in 0007, when tool summaries joined it. */
@@ -217,7 +222,10 @@ async function evalSentences() {
       const obj = JSON.parse(trimmed);
       // The golden set and eval/negatives.jsonl say "query"; the held-out
       // review set says "q". Both are read; neither file is edited.
-      const text = typeof obj.query === 'string' ? obj.query : obj.q;
+      // "query", "q" or "sentence": three review files, three spellings, and
+      // not one of them is edited to suit a script.
+      const text =
+        typeof obj.query === 'string' ? obj.query : typeof obj.q === 'string' ? obj.q : obj.sentence;
       if (typeof text === 'string' && text.trim() !== '') authored.push(text);
     }
   }

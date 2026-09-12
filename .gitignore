@@ -7,6 +7,12 @@ node_modules/
 # numbers that matter are transcribed into eval/baselines.md by hand
 eval/results/
 
+# ...but eval/recordings/ IS committed. It holds one small JSON per recording
+# the baselines table cites — the spread, the per-query numbers, the coverage —
+# because a number in a table with nothing behind it is a claim, and the Phase 5
+# review was right that five recordings nobody can open are not five recordings.
+!eval/recordings/
+
 # builds
 .next/
 out/

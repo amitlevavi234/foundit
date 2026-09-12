@@ -1,0 +1,15 @@
+{"id":"pos-01","lang":"en","sentence":"The four of us keep losing track of who paid for what on this trip.","expect":["splitwise","tricount","settle-up","splid","tabsplit"]}
+{"id":"pos-02","lang":"en","sentence":"I want my notes to stay in files I can still open in ten years.","expect":["obsidian","logseq","joplin","draftbin","zettlr"]}
+{"id":"pos-03","lang":"en","sentence":"I keep opening the same news site instead of working.","expect":["cold-turkey","freedom","leechblock","deepwork"]}
+{"id":"pos-04","lang":"en","sentence":"Sarah sent a form by email and I only have my phone to sign it on.","expect":["paperfold","adobe-acrobat","docuseal","docusign"]}
+{"id":"pos-05","lang":"en","sentence":"My laptop disk is full of the same photos copied three times.","expect":["czkawka"]}
+{"id":"pos-06","lang":"en","sentence":"There is a fridge hum under the interview I recorded in the kitchen.","expect":["quietroom","auphonic","audacity","ocenaudio"]}
+{"id":"pos-07","lang":"en","sentence":"I want maps that still work when there is no signal in the mountains.","expect":["organic-maps","osmand"]}
+{"id":"pos-08","lang":"en","sentence":"I need to shrink a two-hour video before I send it to my brother.","expect":["handbrake","losslesscut","ffmpeg"]}
+{"id":"pos-09","lang":"en","sentence":"I keep reusing the same password on every site and I know it is bad.","expect":["bitwarden","keepassxc","1password"]}
+{"id":"pos-10","lang":"en","sentence":"I want to read Wikipedia on a plane with no internet.","expect":["kiwix"]}
+{"id":"pos-11","lang":"he","sentence":"אני רוצה לגבות את התמונות מהטלפון לכונן שנמצא אצלי בבית","gloss":"back up phone photos to a drive at home","expect":["lensbox","syncthing","nextcloud","restic"]}
+{"id":"pos-12","lang":"es","sentence":"Necesito transcribir una entrevista larga para poder buscar dentro del texto.","gloss":"transcribe a long interview and search the text","expect":["otter-ai","descript","speakback"]}
+{"id":"pos-13","lang":"fr","sentence":"Je voudrais des fiches de révision qui me font revoir un mot juste avant de l'oublier.","gloss":"spaced-repetition flashcards","expect":["anki","memrise","remnote","quizlet"]}
+{"id":"pos-14","lang":"ru","sentence":"Хочу сохранять статьи, чтобы прочитать их позже без рекламы.","gloss":"save articles to read later without ads","expect":["wallabag","instapaper","raindrop-io"]}
+{"id":"pos-15","lang":"ar","sentence":"أريد دمج عدة ملفات PDF في ملف واحد وتقسيم ملف آخر","gloss":"merge several PDFs into one and split another","expect":["stirling-pdf","pdf24","ilovepdf","pdfsam-basic"]}

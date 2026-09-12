@@ -1,0 +1,647 @@
+{
+  "schema": "foundit-recording/1",
+  "name": "n20-json-newprompt-1",
+  "recordedAt": "2026-09-12T02:54:42.915Z",
+  "plan": "shipped",
+  "rerank": {
+    "model": "gpt-5-nano",
+    "topN": 20,
+    "judged": 348,
+    "missing": 5,
+    "refused": 0,
+    "recorded": 348,
+    "failed": 5,
+    "tokensIn": 782534,
+    "tokensOut": 69542,
+    "note": "the reranker failed on one sentence (timed out after 4000 ms)"
+  },
+  "coverage": {
+    "judged": 348,
+    "searches": 353
+  },
+  "overall": {
+    "queries": 60,
+    "recallAt10": 0.757222222222222,
+    "ndcgAt10": 0.8807463157923487,
+    "meanLatencyMs": 49.237144999999146,
+    "p95LatencyMs": 60.75489999999991,
+    "zeroResultQueries": 0
+  },
+  "slices": [
+    {
+      "slice": "all",
+      "queries": 60,
+      "recallAt10": 0.757222222222222,
+      "ndcgAt10": 0.8807463157923487,
+      "meanLatencyMs": 49.237144999999146,
+      "p95LatencyMs": 60.75489999999991,
+      "zeroResultQueries": 0
+    },
+    {
+      "slice": "english",
+      "queries": 50,
+      "recallAt10": 0.7436666666666667,
+      "ndcgAt10": 0.8763838255496229,
+      "meanLatencyMs": 49.13721999999951,
+      "p95LatencyMs": 61.624600000010105,
+      "zeroResultQueries": 0
+    },
+    {
+      "slice": "non-english",
+      "queries": 10,
+      "recallAt10": 0.825,
+      "ndcgAt10": 0.9025587670059775,
+      "meanLatencyMs": 49.73676999999734,
+      "p95LatencyMs": 58.87180000002263,
+      "zeroResultQueries": 0
+    },
+    {
+      "slice": "constrained",
+      "queries": 15,
+      "recallAt10": 0.8233333333333334,
+      "ndcgAt10": 0.8785787739279568,
+      "meanLatencyMs": 43.8934866666658,
+      "p95LatencyMs": 62.89439999999013,
+      "zeroResultQueries": 0
+    },
+    {
+      "slice": "unconstrained",
+      "queries": 45,
+      "recallAt10": 0.7351851851851853,
+      "ndcgAt10": 0.8814688297471458,
+      "meanLatencyMs": 51.01836444444359,
+      "p95LatencyMs": 60.75489999999991,
+      "zeroResultQueries": 0
+    }
+  ],
+  "reference": {
+    "queries": 60,
+    "recallAt10": 0.736388888888889,
+    "ndcgAt10": 0.7617865297885186,
+    "meanLatencyMs": 49.6107749999981,
+    "p95LatencyMs": 74.04810000001453,
+    "zeroResultQueries": 0
+  },
+  "negatives": {
+    "queries": 30,
+    "empty": 21,
+    "emptyRate": 0.7,
+    "meanLeaked": 0.6333333333333333,
+    "maxLeaked": 6,
+    "byKind": {
+      "far": {
+        "queries": 15,
+        "empty": 13
+      },
+      "near": {
+        "queries": 15,
+        "empty": 8
+      },
+      "nonen": {
+        "queries": 0,
+        "empty": 0
+      }
+    },
+    "meanLatencyMs": 31.32151999999866,
+    "p95LatencyMs": 53.673099999985425
+  },
+  "heldOut": {
+    "queries": 25,
+    "empty": 17,
+    "emptyRate": 0.68,
+    "meanLeaked": 0.76,
+    "maxLeaked": 6,
+    "byKind": {
+      "far": {
+        "queries": 10,
+        "empty": 7
+      },
+      "near": {
+        "queries": 10,
+        "empty": 5
+      },
+      "nonen": {
+        "queries": 5,
+        "empty": 5
+      }
+    },
+    "meanLatencyMs": 44.17371999999741,
+    "p95LatencyMs": 67.1480000000447
+  },
+  "heldOut2": {
+    "queries": 25,
+    "empty": 21,
+    "emptyRate": 0.84,
+    "meanLeaked": 0.96,
+    "maxLeaked": 15,
+    "byKind": {
+      "far": {
+        "queries": 8,
+        "empty": 8
+      },
+      "near": {
+        "queries": 17,
+        "empty": 13
+      },
+      "nonen": {
+        "queries": 0,
+        "empty": 0
+      }
+    },
+    "meanLatencyMs": 24.39003599999938,
+    "p95LatencyMs": 57.353000000002794
+  },
+  "positives": {
+    "queries": 15,
+    "rankOne": 15,
+    "onThePage": 15,
+    "empty": 0
+  },
+  "perturbed": {
+    "variants": 240,
+    "empty": 0
+  },
+  "violations": 0,
+  "queries": [
+    {
+      "id": "q001",
+      "lang": "en",
+      "ndcgAt10": 0.7436344454105757,
+      "recallAt10": 1,
+      "resultCount": 11,
+      "reranked": true
+    },
+    {
+      "id": "q002",
+      "lang": "en",
+      "ndcgAt10": 0.9116730277265138,
+      "recallAt10": 1,
+      "resultCount": 11,
+      "reranked": true
+    },
+    {
+      "id": "q003",
+      "lang": "en",
+      "ndcgAt10": 0.8866762329169353,
+      "recallAt10": 1,
+      "resultCount": 18,
+      "reranked": true
+    },
+    {
+      "id": "q004",
+      "lang": "en",
+      "ndcgAt10": 0.927073494288537,
+      "recallAt10": 0.6,
+      "resultCount": 8,
+      "reranked": true
+    },
+    {
+      "id": "q005",
+      "lang": "en",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 4,
+      "reranked": true
+    },
+    {
+      "id": "q006",
+      "lang": "en",
+      "ndcgAt10": 0.9905050044732624,
+      "recallAt10": 1,
+      "resultCount": 12,
+      "reranked": true
+    },
+    {
+      "id": "q007",
+      "lang": "fr",
+      "ndcgAt10": 0.9052598568324595,
+      "recallAt10": 0.5,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q008",
+      "lang": "en",
+      "ndcgAt10": 0.9788167285762264,
+      "recallAt10": 1,
+      "resultCount": 9,
+      "reranked": true
+    },
+    {
+      "id": "q009",
+      "lang": "he",
+      "ndcgAt10": 0.9116059753800713,
+      "recallAt10": 1,
+      "resultCount": 13,
+      "reranked": true
+    },
+    {
+      "id": "q010",
+      "lang": "en",
+      "ndcgAt10": 0.6435448983481542,
+      "recallAt10": 0.6,
+      "resultCount": 3,
+      "reranked": true
+    },
+    {
+      "id": "q011",
+      "lang": "en",
+      "ndcgAt10": 0.7132360317350512,
+      "recallAt10": 0.8,
+      "resultCount": 11,
+      "reranked": true
+    },
+    {
+      "id": "q012",
+      "lang": "en",
+      "ndcgAt10": 0.9797454373022318,
+      "recallAt10": 1,
+      "resultCount": 13,
+      "reranked": true
+    },
+    {
+      "id": "q013",
+      "lang": "en",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 6,
+      "reranked": true
+    },
+    {
+      "id": "q014",
+      "lang": "en",
+      "ndcgAt10": 0.8838695436828513,
+      "recallAt10": 0.6666666666666666,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q015",
+      "lang": "en",
+      "ndcgAt10": 0.9409942346984062,
+      "recallAt10": 0.75,
+      "resultCount": 6,
+      "reranked": true
+    },
+    {
+      "id": "q016",
+      "lang": "en",
+      "ndcgAt10": 0.8926928669065709,
+      "recallAt10": 0.6666666666666666,
+      "resultCount": 18,
+      "reranked": true
+    },
+    {
+      "id": "q017",
+      "lang": "en",
+      "ndcgAt10": 0.9651194532279319,
+      "recallAt10": 0.75,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q018",
+      "lang": "he",
+      "ndcgAt10": 0.9959510427091864,
+      "recallAt10": 1,
+      "resultCount": 12,
+      "reranked": true
+    },
+    {
+      "id": "q019",
+      "lang": "en",
+      "ndcgAt10": 0.5669308506056828,
+      "recallAt10": 0.25,
+      "resultCount": 1,
+      "reranked": true
+    },
+    {
+      "id": "q020",
+      "lang": "en",
+      "ndcgAt10": 0.7768062610832323,
+      "recallAt10": 0.5,
+      "resultCount": 5,
+      "reranked": true
+    },
+    {
+      "id": "q021",
+      "lang": "en",
+      "ndcgAt10": 0.9391922122233461,
+      "recallAt10": 0.75,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q022",
+      "lang": "en",
+      "ndcgAt10": 0.8216212264723879,
+      "recallAt10": 0.5,
+      "resultCount": 4,
+      "reranked": true
+    },
+    {
+      "id": "q023",
+      "lang": "es",
+      "ndcgAt10": 0.942301081014368,
+      "recallAt10": 0.75,
+      "resultCount": 8,
+      "reranked": true
+    },
+    {
+      "id": "q024",
+      "lang": "en",
+      "ndcgAt10": 0.9316348402922772,
+      "recallAt10": 1,
+      "resultCount": 13,
+      "reranked": true
+    },
+    {
+      "id": "q025",
+      "lang": "en",
+      "ndcgAt10": 0.7125794632086186,
+      "recallAt10": 0.25,
+      "resultCount": 1,
+      "reranked": true
+    },
+    {
+      "id": "q026",
+      "lang": "en",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 5,
+      "reranked": true
+    },
+    {
+      "id": "q027",
+      "lang": "ru",
+      "ndcgAt10": 0.7142221296584441,
+      "recallAt10": 1,
+      "resultCount": 8,
+      "reranked": true
+    },
+    {
+      "id": "q028",
+      "lang": "en",
+      "ndcgAt10": 0.8533231967712098,
+      "recallAt10": 0.8,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q029",
+      "lang": "en",
+      "ndcgAt10": 0.8524185088691892,
+      "recallAt10": 0.75,
+      "resultCount": 9,
+      "reranked": true
+    },
+    {
+      "id": "q030",
+      "lang": "en",
+      "ndcgAt10": 0.882808018370203,
+      "recallAt10": 0.6666666666666666,
+      "resultCount": 8,
+      "reranked": true
+    },
+    {
+      "id": "q031",
+      "lang": "pt-BR",
+      "ndcgAt10": 0.8614122292143941,
+      "recallAt10": 0.75,
+      "resultCount": 12,
+      "reranked": true
+    },
+    {
+      "id": "q032",
+      "lang": "en",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q033",
+      "lang": "es",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q034",
+      "lang": "en",
+      "ndcgAt10": 0.862970438176485,
+      "recallAt10": 1,
+      "resultCount": 6,
+      "reranked": true
+    },
+    {
+      "id": "q035",
+      "lang": "en",
+      "ndcgAt10": 0.7549787836402746,
+      "recallAt10": 0.5,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q036",
+      "lang": "en",
+      "ndcgAt10": 0.9360153136886911,
+      "recallAt10": 1,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q037",
+      "lang": "en",
+      "ndcgAt10": 0.9284946163333048,
+      "recallAt10": 0.75,
+      "resultCount": 12,
+      "reranked": true
+    },
+    {
+      "id": "q038",
+      "lang": "en",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q039",
+      "lang": "en",
+      "ndcgAt10": 0.9173194127129571,
+      "recallAt10": 0.5,
+      "resultCount": 10,
+      "reranked": true
+    },
+    {
+      "id": "q040",
+      "lang": "en",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 5,
+      "reranked": true
+    },
+    {
+      "id": "q041",
+      "lang": "en",
+      "ndcgAt10": 0.7125794632086186,
+      "recallAt10": 0.25,
+      "resultCount": 1,
+      "reranked": true
+    },
+    {
+      "id": "q042",
+      "lang": "en",
+      "ndcgAt10": 0.7984848580994974,
+      "recallAt10": 0.6666666666666666,
+      "resultCount": 6,
+      "reranked": true
+    },
+    {
+      "id": "q043",
+      "lang": "en",
+      "ndcgAt10": 0.6298989693877386,
+      "recallAt10": 0.6666666666666666,
+      "resultCount": 8,
+      "reranked": true
+    },
+    {
+      "id": "q044",
+      "lang": "en",
+      "ndcgAt10": 0.8124242481930318,
+      "recallAt10": 0.6666666666666666,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q045",
+      "lang": "en",
+      "ndcgAt10": 0.7564210732898291,
+      "recallAt10": 0.5,
+      "resultCount": 5,
+      "reranked": true
+    },
+    {
+      "id": "q046",
+      "lang": "en",
+      "ndcgAt10": 0.9288473628259656,
+      "recallAt10": 0.75,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q047",
+      "lang": "en",
+      "ndcgAt10": 0.7452525342261976,
+      "recallAt10": 0.3333333333333333,
+      "resultCount": 1,
+      "reranked": true
+    },
+    {
+      "id": "q048",
+      "lang": "en",
+      "ndcgAt10": 0.9838988741111756,
+      "recallAt10": 1,
+      "resultCount": 7,
+      "reranked": true
+    },
+    {
+      "id": "q049",
+      "lang": "en",
+      "ndcgAt10": 0.9521511920423338,
+      "recallAt10": 0.75,
+      "resultCount": 4,
+      "reranked": true
+    },
+    {
+      "id": "q050",
+      "lang": "en",
+      "ndcgAt10": 0.8652750624676083,
+      "recallAt10": 0.5,
+      "resultCount": 5,
+      "reranked": true
+    },
+    {
+      "id": "q051",
+      "lang": "en",
+      "ndcgAt10": 0.9282773778342694,
+      "recallAt10": 0.8,
+      "resultCount": 9,
+      "reranked": true
+    },
+    {
+      "id": "q052",
+      "lang": "en",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q053",
+      "lang": "en",
+      "ndcgAt10": 0.9173194127129571,
+      "recallAt10": 0.5,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q054",
+      "lang": "en",
+      "ndcgAt10": 0.9421945763140684,
+      "recallAt10": 1,
+      "resultCount": 11,
+      "reranked": true
+    },
+    {
+      "id": "q055",
+      "lang": "en",
+      "ndcgAt10": 0.938506417451168,
+      "recallAt10": 0.6666666666666666,
+      "resultCount": 16,
+      "reranked": true
+    },
+    {
+      "id": "q056",
+      "lang": "en",
+      "ndcgAt10": 0.7452525342261976,
+      "recallAt10": 0.3333333333333333,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q057",
+      "lang": "he",
+      "ndcgAt10": 0.9822558920422334,
+      "recallAt10": 1,
+      "resultCount": 17,
+      "reranked": true
+    },
+    {
+      "id": "q058",
+      "lang": "en",
+      "ndcgAt10": 0.9677327793493801,
+      "recallAt10": 0.75,
+      "resultCount": 4,
+      "reranked": true
+    },
+    {
+      "id": "q059",
+      "lang": "ar",
+      "ndcgAt10": 0.7125794632086186,
+      "recallAt10": 0.25,
+      "resultCount": 2,
+      "reranked": true
+    },
+    {
+      "id": "q060",
+      "lang": "fr",
+      "ndcgAt10": 1,
+      "recallAt10": 1,
+      "resultCount": 6,
+      "reranked": true
+    }
+  ]
+}

@@ -43,12 +43,18 @@
 -- HOW TO LOAD IT, if you want to reproduce the measurement:
 --
 --   node db/apply.mjs --file db/seed/generated_statements.sql
---   node --env-file=.env.local scripts/embed.mjs --from-fixture
+--   node --env-file=.env.local scripts/embed.mjs          # NEEDS A KEY
 --   node --env-file=.env.local eval/run.mjs --no-rerank
 --
--- The vectors are already in db/seed/embeddings.fixture.json, keyed by the
--- sha256 of each statement, so the second step needs no key and the third
--- reproduces 0.7508 exactly.
+-- **The second step needs a key, and it did not for one commit.** The vectors
+-- for these 363 statements were recorded into db/seed/embeddings.fixture.json
+-- so that the 0.7508 reproduced offline, and the Phase 5 review was right that
+-- half a megabyte of vectors for rows nobody loads is dead weight in a file
+-- every clone carries: the fixture exists so that CI can measure the SHIPPED
+-- search with no key, and these are not part of it. They are pruned, and
+-- reproducing the reverted measurement now costs one embedding run — about
+-- 5,900 tokens, well under a cent, and the number comes back the same because
+-- the statements below are byte for byte what was embedded.
 --
 -- HOW TO UNDO IT:
 --

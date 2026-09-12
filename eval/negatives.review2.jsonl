@@ -1,0 +1,25 @@
+{"id":"neg-far-01","kind":"far","lang":"en","sentence":"My dog keeps limping after long walks and I do not know if it is serious."}
+{"id":"neg-far-02","kind":"far","lang":"en","sentence":"I want to learn to sail a small boat somewhere near the coast this summer."}
+{"id":"neg-far-03","kind":"far","lang":"en","sentence":"The lemon tree in the garden drops all its fruit before it ripens."}
+{"id":"neg-far-04","kind":"far","lang":"en","sentence":"I need somebody to take the sofa away, it will not fit down the stairs."}
+{"id":"neg-far-05","kind":"far","lang":"en","sentence":"My landlord has not fixed the boiler in six weeks and I want to know my rights."}
+{"id":"neg-far-06","kind":"far","lang":"en","sentence":"I would like to find a choir that takes people who cannot read music."}
+{"id":"neg-far-07","kind":"far","lang":"en","sentence":"There is damp coming through the bedroom wall every winter."}
+{"id":"neg-far-08","kind":"far","lang":"en","sentence":"My mother is turning eighty and I have no idea what to give her."}
+{"id":"neg-near-01","kind":"near","lang":"en","overlaps":"budgeting/money tools","wants":"a person","sentence":"I need an accountant who understands freelance income in two countries."}
+{"id":"neg-near-02","kind":"near","lang":"en","overlaps":"photo tools","wants":"a person","sentence":"Looking for a photographer who can shoot a small wedding on a Tuesday."}
+{"id":"neg-near-03","kind":"near","lang":"en","overlaps":"scanning/OCR/document tools","wants":"a local service","sentence":"Where can I get a box of old family slides scanned by somebody who will not lose them?"}
+{"id":"neg-near-04","kind":"near","lang":"en","overlaps":"PDF signing tools","wants":"a person","sentence":"I want a lawyer to read this contract before I sign it."}
+{"id":"neg-near-05","kind":"near","lang":"en","overlaps":"audio noise-removal tools","wants":"a physical object","sentence":"Which noise-cancelling headphones actually work on a building site?"}
+{"id":"neg-near-06","kind":"near","lang":"en","overlaps":"translation tools","wants":"a person","sentence":"I need a translator who can sit in the room for a two-hour medical appointment."}
+{"id":"neg-near-07","kind":"near","lang":"en","overlaps":"notes apps","wants":"a physical object","sentence":"What is a good paper notebook that lies flat and takes fountain pen ink?"}
+{"id":"neg-near-08","kind":"near","lang":"en","overlaps":"focus/quiet tools","wants":"a place","sentence":"Is there a co-working space in Lisbon with decent chairs and a quiet room?"}
+{"id":"neg-near-09","kind":"near","lang":"en","overlaps":"fitness tracking tools","wants":"a person","sentence":"I want a personal trainer who works with people recovering from a back injury."}
+{"id":"neg-near-10","kind":"near","lang":"en","overlaps":"backup tools","wants":"hardware","sentence":"Which external drive should I buy for backing up ten years of video?"}
+{"id":"neg-near-11","kind":"near","lang":"en","overlaps":"budgeting tools","wants":"financial advice","sentence":"I want advice on whether to pay off my mortgage early or invest the money."}
+{"id":"neg-near-12","kind":"near","lang":"en","overlaps":"audio tools","wants":"a repair shop","sentence":"Who can repair a scratched vinyl record player cartridge in north London?"}
+{"id":"neg-nonen-01","kind":"near","lang":"he","overlaps":"none, but domestic-need phrasing","wants":"a plumber","sentence":"אני מחפש שרברב שיכול להגיע היום לדירה בתל אביב"}
+{"id":"neg-nonen-02","kind":"near","lang":"es","overlaps":"language-learning tools","wants":"a teacher","sentence":"Busco un profesor de guitarra que dé clases a domicilio los fines de semana."}
+{"id":"neg-nonen-03","kind":"near","lang":"fr","overlaps":"health tools","wants":"a doctor","sentence":"Je cherche un médecin généraliste qui accepte de nouveaux patients près de Lyon."}
+{"id":"neg-nonen-04","kind":"near","lang":"ru","overlaps":"translation tools","wants":"a certified human translator","sentence":"Мне нужен человек, который переведёт мои документы и заверит перевод у нотариуса."}
+{"id":"neg-nonen-05","kind":"near","lang":"ar","overlaps":"none, repair phrasing","wants":"a workshop","sentence":"أبحث عن ورشة تصلح دراجتي الكهربائية في عمّان"}

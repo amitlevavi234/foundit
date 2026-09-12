@@ -86,6 +86,26 @@ const NEGATIVES_PATH = path.join(EVAL_DIR, 'negatives.jsonl');
 /** The held-out negatives: written by a reviewer, never tuned against. */
 const HELD_OUT_PATH = path.join(EVAL_DIR, 'negatives.review.jsonl');
 /**
+ * The SECOND held-out negatives file, written by the Phase 5 reviewer before
+ * reading anything, and spent the moment it is tuned against — same rule as the
+ * first, one review later. 25 sentences: 8 far, 17 near.
+ */
+const HELD_OUT2_PATH = path.join(EVAL_DIR, 'negatives.review2.jsonl');
+/**
+ * And 15 sentences that DO have answers, with the slugs a person would accept.
+ *
+ * Every other file here asks "does the search stop showing things it should
+ * not". This one asks the opposite and is the reason it exists: a reranker that
+ * empties more pages scores better on every negatives file and worse at the
+ * job. Reported, never gated — it is held out, and gating on it would spend it.
+ */
+const POSITIVES_PATH = path.join(EVAL_DIR, 'positives.review.jsonl');
+/**
+ * Where a recording's summary is written, so a number in eval/baselines.md has
+ * something behind it other than a sentence saying it happened.
+ */
+const RECORDINGS_DIR = path.join(EVAL_DIR, 'recordings');
+/**
  * A negative is far from anything the catalogue does, a near miss, or
  * non-English. The held-out file uses the third; both files are read exactly
  * as their authors wrote them and neither is ever edited here.
@@ -513,11 +533,18 @@ export function parseNegatives(text) {
       return;
     }
     seenIds.add(obj.id);
-    // "query" in eval/negatives.jsonl, "q" in the held-out review file. Both
-    // are read; neither file is rewritten to suit this parser.
-    const text = typeof obj.query === 'string' ? obj.query : obj.q;
+    // "query" in eval/negatives.jsonl, "q" in the first held-out review file,
+    // "sentence" in the second. All three are read; NO FILE IS EVER REWRITTEN
+    // TO SUIT THIS PARSER — a held-out set edited to fit the harness is a
+    // held-out set the harness has touched.
+    const text =
+      typeof obj.query === 'string'
+        ? obj.query
+        : typeof obj.q === 'string'
+          ? obj.q
+          : obj.sentence;
     if (typeof text !== 'string' || text.trim() === '') {
-      errors.push(`line ${lineNo} (${obj.id}): missing "query" (or "q")`);
+      errors.push(`line ${lineNo} (${obj.id}): missing "query" (or "q", or "sentence")`);
       return;
     }
     if (
@@ -576,6 +603,92 @@ export function parseNegatives(text) {
   });
 
   return { queries, errors };
+}
+
+/**
+ * Parse a positives file: a sentence, and the slugs a person would accept.
+ *
+ * `expect` is a LIST because more than one tool can be a right answer — five
+ * expense splitters all answer "who paid for what". What is scored is whether
+ * ANY of them is first, and whether any is on the page at all.
+ */
+export function parsePositives(text) {
+  const queries = [];
+  const errors = [];
+  const seen = new Set();
+
+  text.split(/\r?\n/).forEach((raw, index) => {
+    const lineNo = index + 1;
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) return;
+
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (err) {
+      errors.push(`line ${lineNo}: not valid JSON — ${err.message}`);
+      return;
+    }
+    if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+      errors.push(`line ${lineNo}: expected a JSON object`);
+      return;
+    }
+    if (typeof obj.id !== 'string' || obj.id === '') {
+      errors.push(`line ${lineNo}: missing "id"`);
+      return;
+    }
+    if (seen.has(obj.id)) {
+      errors.push(`line ${lineNo}: duplicate id "${obj.id}"`);
+      return;
+    }
+    seen.add(obj.id);
+    const sentence =
+      typeof obj.sentence === 'string' ? obj.sentence : typeof obj.query === 'string' ? obj.query : obj.q;
+    if (typeof sentence !== 'string' || sentence.trim() === '') {
+      errors.push(`line ${lineNo} (${obj.id}): missing "sentence"`);
+      return;
+    }
+    if (!Array.isArray(obj.expect) || obj.expect.length === 0 || obj.expect.some((s) => typeof s !== 'string')) {
+      errors.push(`line ${lineNo} (${obj.id}): "expect" must be a non-empty array of slugs`);
+      return;
+    }
+
+    queries.push({
+      id: obj.id,
+      query: sentence,
+      lang: typeof obj.lang === 'string' && obj.lang ? obj.lang : 'en',
+      expect: obj.expect.map(String),
+      // So the same scoring code can run over them: a positive has no graded
+      // map, and nothing here is scored with nDCG.
+      relevant: {},
+      constraints: {},
+      kind: 'positive',
+      line: lineNo,
+    });
+  });
+
+  return { queries, errors };
+}
+
+/**
+ * What the positives say: is an acceptable answer first, and is one there at
+ * all.
+ *
+ * Two numbers rather than one, because they fail differently. A tool that slips
+ * from rank 1 to rank 3 is a worse page; a tool that leaves the page is a
+ * person who does not find it. The reranker can do both — it reorders and it
+ * drops.
+ */
+export function aggregatePositives(entries) {
+  const first = entries.filter((e) => e.results.length > 0 && e.query.expect.includes(e.results[0].slug));
+  const anywhere = entries.filter((e) => e.results.some((r) => e.query.expect.includes(r.slug)));
+  const empty = entries.filter((e) => e.results.length === 0);
+  return {
+    queries: entries.length,
+    rankOne: first.length,
+    onThePage: anywhere.length,
+    empty: empty.length,
+  };
 }
 
 /**
@@ -737,6 +850,10 @@ export function parseBaselines(markdown) {
       // Two gates besides nDCG, both read off the same row. Blank on rows
       // recorded before the relevance floor, and a blank gate is skipped
       // rather than invented.
+      // What share of the searches in that run had a reranker judgement. A row
+      // recorded at 96% and a run at 60% are measuring different amounts of
+      // Phase 5, and without this the second passes quietly.
+      rerankCoverage: parseCountOf(cell('rerank coverage'), 'the Rerank coverage column'),
       zeroResult: parseCountOf(cell('zero-result'), 'the Zero-result column'),
       negativesEmpty: parseCountOf(cell('negatives empty'), 'the Negatives empty column'),
       heldOutEmpty: parseCountOf(cell('held-out empty'), 'the Held-out empty column'),
@@ -847,6 +964,39 @@ export function checkPerturbationGate(currentEmpty, baseline, vectorsUsed) {
   };
 }
 
+/**
+ * How much of this run was actually Phase 5.
+ *
+ * A sentence with no recorded judgement measures the Phase 4 order. That is the
+ * honest fallback and it is printed — and it was printed and nothing else, so a
+ * fixture that had lost half its judgements would have produced a number
+ * somewhere between the two phases with a green gate over it.
+ *
+ * Five percentage points, not zero, because a judgement is allowed to go
+ * missing: a sentence added to an eval file has none until somebody records
+ * one, and the run should say so rather than fail. Losing a twentieth of them
+ * is a different thing and it fails.
+ */
+export const COVERAGE_TOLERANCE = 0.05;
+
+export function checkCoverageRegression(current, baseline) {
+  const recorded = baseline?.rerankCoverage;
+  if (!recorded || !recorded.total) return null;
+  const recordedRate = recorded.count / recorded.total;
+  if (!current || !current.searches) {
+    return { regressed: true, missing: true, recordedRate, recorded };
+  }
+  const rate = current.judged / current.searches;
+  return {
+    regressed: rate < recordedRate - COVERAGE_TOLERANCE - 1e-12,
+    missing: false,
+    rate,
+    recordedRate,
+    recorded,
+    current,
+  };
+}
+
 function checkEmptyRateRegression(current, recorded) {
   if (!recorded || !recorded.total) return null;
   const recordedRate = recorded.count / recorded.total;
@@ -947,6 +1097,10 @@ function parseArgs(argv) {
     negativesExplicit: false,
     heldOut: HELD_OUT_PATH,
     heldOutExplicit: false,
+    heldOut2: HELD_OUT2_PATH,
+    positives: POSITIVES_PATH,
+    /** Write a summary of this run into eval/recordings/<name>.json. */
+    record: null,
     /**
      * How the headline pass reads each sentence.
      *
@@ -1021,6 +1175,9 @@ function parseArgs(argv) {
       opts.heldOut = path.resolve(process.cwd(), arg.slice(11));
       opts.heldOutExplicit = true;
     }
+    else if (arg.startsWith('--held-out2=')) opts.heldOut2 = path.resolve(process.cwd(), arg.slice(12));
+    else if (arg.startsWith('--positives=')) opts.positives = path.resolve(process.cwd(), arg.slice(12));
+    else if (arg.startsWith('--record=')) opts.record = arg.slice(9);
     else return { error: `unknown argument: ${arg}` , opts };
   }
   if (!Number.isInteger(opts.limit) || opts.limit < K) {
@@ -1571,6 +1728,116 @@ async function warmRerankCache(client, fixture, redact) {
 }
 
 /**
+ * Record every judgement this run will need, BEFORE it measures anything.
+ *
+ * Two reasons, and the second is the one that matters.
+ *
+ * It is four times faster. Recording used to happen inside the measured pass,
+ * one sentence at a time, because that is where the candidates are — and a full
+ * recording took half an hour, which is long enough that "record five times and
+ * freeze the middle" stops being something anybody does. Four calls in flight
+ * turns it into minutes.
+ *
+ * And **a measured pass should not be making API calls at all**. When it did,
+ * the latency column of a recording run was the model's rather than the
+ * database's, and the run that produced a number was not the same shape as the
+ * run that reproduced it. Now the recording is a separate phase with its own
+ * counts, and every measured pass reads from the cache exactly as a keyless
+ * run on CI does.
+ *
+ * It re-uses the cache: a sentence whose candidate set already has a judgement
+ * costs nothing, so a second pass fills only what the first one's timeouts
+ * missed.
+ */
+async function prerecordJudgements(client, sets, plan, reranker, opts, redact) {
+  const wanted = new Map();
+  const fetchLimit = Math.max(opts.limit, reranker.n);
+
+  for (const q of sets) {
+    const planned = plan(q);
+    if (planned.asksForSoftware === false) continue;
+    if (String(planned.text ?? '').trim() === '') continue;
+
+    const constraints = planned.constraints ?? {};
+    let rows;
+    try {
+      ({ rows } = await client.query(SEARCH_SQL, [
+        planned.text,
+        constraints.pricing ?? null,
+        constraints.platforms ?? null,
+        constraints.flags ?? null,
+        constraints.languages ?? null,
+        fetchLimit,
+        planned.vector ?? null,
+      ]));
+    } catch (err) {
+      reranker.stats.note = `a pre-recording search failed (${redact(err?.message ?? err)})`;
+      continue;
+    }
+    if (rows.length === 0) continue;
+
+    const candidates = reranker.lib.rerankCandidates(
+      rows.map((r) => ({
+        slug: String(r.slug),
+        name: reranker.listings.get(String(r.slug))?.name ?? String(r.name),
+        summary: reranker.listings.get(String(r.slug))?.summary ?? '',
+        statements: reranker.listings.get(String(r.slug))?.statements ?? [],
+      })),
+      reranker.n,
+    );
+    const hash = reranker.lib.candidatesHash(candidates.map((c) => c.slug));
+    const key = `${normalizedKey(q.query)}\n${hash}`;
+    if (wanted.has(key)) continue;
+
+    const { rows: cached } = await client.query(QUERY_RERANK_SQL, [q.query, hash]);
+    if (cached[0]?.judgement) continue;
+    wanted.set(key, { sentence: q.query, hash, candidates });
+  }
+
+  const work = [...wanted.values()];
+  process.stdout.write(`  recording: ${work.length} judgement(s) to fetch.\n`);
+  if (work.length === 0) return;
+
+  // Four at a time. The application makes ONE call per search and this is not a
+  // model of that — it is a recording session, and the same reasoning as
+  // scripts/read.mjs's CONCURRENCY: kept low because the provider answers a
+  // burst of six with 429s.
+  const CONCURRENCY = 4;
+  let done = 0;
+  const fetchOne = async ({ sentence, hash, candidates }) => {
+    try {
+      const fresh = await reranker.rerankOrThrow(sentence, candidates);
+      reranker.stats.recorded += 1;
+      reranker.stats.tokensIn += fresh.tokensIn;
+      reranker.stats.tokensOut += fresh.tokensOut;
+      reranker.fixture[`${normalizedKey(sentence)}\n${hash}`] = fresh.judgement;
+      try {
+        await client.query(STORE_QUERY_RERANKS_SQL, [
+          [normalizedKey(sentence)],
+          [hash],
+          [JSON.stringify(fresh.judgement)],
+          reranker.model,
+        ]);
+      } catch {
+        // The cache is a convenience while recording; the fixture is the record.
+      }
+    } catch (err) {
+      reranker.stats.failed += 1;
+      reranker.stats.note = `the reranker failed on one sentence (${redact(err?.message ?? err)})`;
+    }
+    done += 1;
+    if (done % 50 === 0) process.stdout.write(`    ${done} of ${work.length}\n`);
+  };
+
+  for (let i = 0; i < work.length; i += CONCURRENCY) {
+    await Promise.all(work.slice(i, i + CONCURRENCY).map(fetchOne));
+  }
+  process.stdout.write(
+    `  recorded: ${reranker.stats.recorded}, failed ${reranker.stats.failed}.\n`,
+  );
+}
+
+/**
  * Thrown to abandon a run from inside a helper. `main` opens the pool in a
  * `try/finally`, so a helper cannot simply `return EXIT.DATABASE` — it has to
  * unwind through that `finally` and hand the exit code back at the top.
@@ -2034,6 +2301,33 @@ async function main(argv) {
     return EXIT.USAGE;
   }
 
+  // --- The Phase 5 reviewer's two files -----------------------------------
+  // 25 more negatives, written before they read anything, and 15 sentences that
+  // DO have answers. The second is the one that keeps the first honest: a
+  // reranker that empties more pages scores better on every negatives file and
+  // worse at the job.
+  let heldOut2 = [];
+  if (existsSync(opts.heldOut2)) {
+    const parsed = parseNegatives(await readFile(opts.heldOut2, 'utf8'));
+    if (parsed.errors.length > 0) {
+      process.stderr.write(`ERROR: ${parsed.errors.length} problem(s) in ${opts.heldOut2}:\n`);
+      for (const e of parsed.errors) process.stderr.write(`  ${e}\n`);
+      return EXIT.USAGE;
+    }
+    heldOut2 = parsed.queries.map((q) => ({ ...q, id: `r2-${q.id}` }));
+  }
+
+  let positives = [];
+  if (existsSync(opts.positives)) {
+    const parsed = parsePositives(await readFile(opts.positives, 'utf8'));
+    if (parsed.errors.length > 0) {
+      process.stderr.write(`ERROR: ${parsed.errors.length} problem(s) in ${opts.positives}:\n`);
+      for (const e of parsed.errors) process.stderr.write(`  ${e}\n`);
+      return EXIT.USAGE;
+    }
+    positives = parsed.queries;
+  }
+
   // --- The perturbations --------------------------------------------------
   const perturbed = perturbedQueries(queries);
 
@@ -2100,6 +2394,8 @@ async function main(argv) {
   let writtenNegPerQuery = null;
   /** The held-out negatives, and the golden set's mechanical variants. */
   let heldPerQuery = null;
+  let held2PerQuery = null;
+  let positivesPerQuery = null;
   let perturbedPerQuery = null;
   /** Phase 5's reranker, or null when it is off or could not be loaded. */
   let reranker = null;
@@ -2140,7 +2436,7 @@ async function main(argv) {
     // come out of it, so the vectors that have to be warmed are not known until
     // it has run. Loaded from the fixture, read back through the definer
     // function, and never fetched from the provider here.
-    const everySentence = [...queries, ...negatives, ...heldOut, ...perturbed].map((q) => q.query);
+    const everySentence = [...queries, ...negatives, ...heldOut, ...heldOut2, ...positives, ...perturbed].map((q) => q.query);
     let readings = { wanted: 0, loaded: 0, available: 0, missing: 0, note: null, readings: new Map() };
     if (opts.plan === 'shipped') {
       try {
@@ -2250,7 +2546,7 @@ async function main(argv) {
     try {
       const texts = [];
       const embedTexts = [];
-      for (const q of [...queries, ...negatives, ...heldOut, ...perturbed]) {
+      for (const q of [...queries, ...negatives, ...heldOut, ...heldOut2, ...positives, ...perturbed]) {
         const authored = AUTHORED_PLAN(q);
         texts.push(authored.text);
         embedTexts.push(authored.embedText);
@@ -2311,6 +2607,22 @@ async function main(argv) {
         '  NOTE: --record-reranks, so this session is NOT read-only and this run calls a\n' +
           '        paid API. It is a recording, not a measurement — re-run without it.\n',
       );
+      if (reranker) {
+        // Everything the measured passes will need, fetched first and in
+        // parallel. After this, the passes below read from the cache exactly as
+        // a keyless run on CI does — which is what makes a recording run's
+        // latency column mean the same thing as a measurement's.
+        await prerecordJudgements(
+          client,
+          [...queries, ...negatives, ...heldOut, ...heldOut2, ...positives, ...perturbed],
+          headlinePlan,
+          reranker,
+          opts,
+          redact,
+        );
+        reranker.record = false;
+        await client.query('set session characteristics as transaction read only');
+      }
     }
 
     // --- Run every query, sequentially ------------------------------------
@@ -2340,6 +2652,12 @@ async function main(argv) {
     if (heldOut.length > 0) {
       heldPerQuery = await runPass(client, heldOut, opts, headlinePlan, redact, reranker);
     }
+    if (heldOut2.length > 0) {
+      held2PerQuery = await runPass(client, heldOut2, opts, headlinePlan, redact, reranker);
+    }
+    if (positives.length > 0) {
+      positivesPerQuery = await runPass(client, positives, opts, headlinePlan, redact, reranker);
+    }
     // 240 more searches, and the only thing read off them is whether each came
     // back empty. Since Phase 4 they go through the headline plan, so the gate
     // asks of the reader what it already asked of the floor: does a full stop
@@ -2359,6 +2677,8 @@ async function main(argv) {
           ...(negPerQuery ?? []),
           ...(writtenNegPerQuery ?? []),
           ...(heldPerQuery ?? []),
+          ...(held2PerQuery ?? []),
+          ...(positivesPerQuery ?? []),
           ...(perturbedPerQuery ?? []),
         ].flatMap((r) => r.results.map((x) => x.slug)),
       ),
@@ -2392,7 +2712,7 @@ async function main(argv) {
     // A negative that leaks is a quality failure. A negative that leaks a tool
     // its own constraints excluded is a WHERE clause leaking, and fails the run
     // exactly as a golden query would.
-    for (const entry of [...(negPerQuery ?? []), ...(heldPerQuery ?? []), ...(perturbedPerQuery ?? [])]) {
+    for (const entry of [...(negPerQuery ?? []), ...(heldPerQuery ?? []), ...(held2PerQuery ?? []), ...(positivesPerQuery ?? []), ...(perturbedPerQuery ?? [])]) {
       allViolations.push(
         ...checkConstraints({ id: entry.query.id, constraints: entry.constraints }, entry.results, factsBySlug),
       );
@@ -2470,14 +2790,54 @@ async function main(argv) {
     process.stdout.write(`\nHELD OUT: ${path.relative(ROOT, opts.heldOut).split(path.sep).join('/')} not found — not measured.\n`);
   }
 
+  const held2Overall = held2PerQuery ? aggregateNegatives(held2PerQuery) : null;
+  if (held2Overall) {
+    process.stdout.write(
+      `${buildNegativesReport({
+        overall: held2Overall,
+        perQuery: held2PerQuery,
+        title: 'HELD OUT, SECOND FILE: the Phase 5 reviewer\'s own negatives',
+        label: 'as the shipped reader reads it',
+        note:
+          'Written by the Phase 5 reviewer before reading any of ours, and spent the\n' +
+          'moment anything is tuned against it — same rule as the first file, one\n' +
+          'review later. 8 far, 17 near, and the near ones are the point.',
+      })}\n`,
+    );
+  }
+
+  const positivesOverall = positivesPerQuery ? aggregatePositives(positivesPerQuery) : null;
+  if (positivesOverall) {
+    process.stdout.write(`${buildPositivesReport(positivesOverall, positivesPerQuery)}\n`);
+  }
+
   const perturbedEmpty = (perturbedPerQuery ?? []).filter((e) => e.results.length === 0).length;
   if (perturbedPerQuery) {
     process.stdout.write(`${buildPerturbationReport(perturbedPerQuery)}\n`);
   }
 
   // --- The reranker, measured ------------------------------------------------
+  /** How much of this run was Phase 5 rather than Phase 4. Gated below. */
+  let coverage = null;
   if (reranker) {
-    process.stdout.write(`${buildRerankReport(reranker, [perQuery, negPerQuery, heldPerQuery, perturbedPerQuery])}\n`);
+    const searched = [perQuery, negPerQuery, heldPerQuery, held2PerQuery, positivesPerQuery, perturbedPerQuery]
+      .filter(Boolean)
+      .flat()
+      .filter((e) => !e.refusedAsNotSoftware && e.results.length + (e.judgement?.length ?? 0) > 0);
+    coverage = { judged: reranker.stats.judged, searches: searched.length };
+    process.stdout.write(
+      `${buildRerankReport(reranker, [perQuery, negPerQuery, heldPerQuery, held2PerQuery, positivesPerQuery, perturbedPerQuery])}\n`,
+    );
+    if (reranker.stats.missing > 0) {
+      // The same shape of note the vector path prints when a sentence has no
+      // recorded vector: say what is missing and what it measured instead,
+      // rather than leaving a reader to infer it from a number that moved.
+      process.stdout.write(
+        `  NOTE: ${reranker.stats.missing} sentence(s) have no recorded judgement in\n` +
+          '        db/seed/embeddings.fixture.json, so they measured the Phase 4 order.\n' +
+          '        Re-record: node eval/run.mjs --record-reranks (this one spends money).\n',
+      );
+    }
 
     // Recording is the only thing here that writes the fixture, and it EXTENDS
     // rather than re-records, for the same reason scripts/read.mjs does: this
@@ -2662,6 +3022,29 @@ async function main(argv) {
           }
         }
 
+        const cover = checkCoverageRegression(coverage, latest);
+        if (cover) {
+          process.stdout.write(
+            cover.missing
+              ? `          rerank coverage: NOT MEASURED (recorded ${cover.recorded.count} of ` +
+                  `${cover.recorded.total}) — REGRESSION\n`
+              : `          rerank coverage: ${cover.current.judged} of ${cover.current.searches}` +
+                  ` (${pctOf(cover.rate)}) now, ${cover.recorded.count} of ${cover.recorded.total}` +
+                  ` (${pctOf(cover.recordedRate)}) recorded, tolerance ${(COVERAGE_TOLERANCE * 100).toFixed(0)} points` +
+                  ` — ${cover.regressed ? 'REGRESSION' : 'ok'}\n`,
+          );
+          if (cover.regressed) {
+            process.stdout.write(
+              '\nFAIL: fewer searches were judged than the recorded row was measured with.\n' +
+                'A sentence with no judgement measures the PHASE 4 order, so a run that has\n' +
+                'lost its judgements reports a number somewhere between the two phases while\n' +
+                'looking like a measurement of this one. Re-record, or record a new row that\n' +
+                'says what this build actually covers.\n',
+            );
+            if (exitCode === EXIT.OK) exitCode = EXIT.REGRESSION;
+          }
+        }
+
         const perturbation = checkPerturbationGate(perturbedEmpty, latest, vectorsUsed);
         if (perturbation) {
           process.stdout.write(
@@ -2680,6 +3063,57 @@ async function main(argv) {
         }
       }
     }
+  }
+
+  // --- The recording's own summary ------------------------------------------
+  //
+  // `eval/baselines.md` cites recordings — "the middle of five", "0.8515 to
+  // 0.8713" — and until the Phase 5 review those numbers existed only in the
+  // sentence citing them. A spread nobody can open is a spread nobody can
+  // check, and the fixture holds only the recording that was kept.
+  //
+  // So a run may write its own summary into eval/recordings/, which is
+  // committed: the headline, every slice, the per-query nDCG and recall, what
+  // each negatives file did, how much of the run was judged, and the tokens. It
+  // is small (a few tens of kB), it is the evidence for one row, and it is
+  // written only when asked for by name.
+  if (opts.record) {
+    const safe = String(opts.record).replace(/[^A-Za-z0-9._-]/g, '-');
+    const summary = {
+      schema: 'foundit-recording/1',
+      name: safe,
+      recordedAt: startedAt.toISOString(),
+      plan: opts.plan,
+      rerank: reranker
+        ? { model: reranker.model, topN: reranker.n, ...reranker.stats }
+        : null,
+      coverage,
+      overall,
+      slices,
+      reference: writtenPerQuery ? aggregate(writtenPerQuery) : null,
+      negatives: negOverall,
+      heldOut: heldOverall,
+      heldOut2: held2Overall,
+      positives: positivesOverall,
+      perturbed: perturbedPerQuery
+        ? { variants: perturbedPerQuery.length, empty: perturbedEmpty }
+        : null,
+      violations: allViolations.length,
+      queries: perQuery.map((e) => ({
+        id: e.query.id,
+        lang: e.query.lang,
+        ndcgAt10: e.ndcg,
+        recallAt10: e.recall,
+        resultCount: e.resultCount,
+        reranked: Boolean(e.reranked),
+      })),
+    };
+    await mkdir(RECORDINGS_DIR, { recursive: true });
+    const where = path.join(RECORDINGS_DIR, `${safe}.json`);
+    await writeFile(where, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+    process.stdout.write(
+      `\nRECORDING written to ${path.relative(ROOT, where).split(path.sep).join('/')}\n`,
+    );
   }
 
   // --- Machine-readable -----------------------------------------------------
@@ -2705,7 +3139,7 @@ async function main(argv) {
         ? {
             model: reranker.model,
             topN: reranker.n,
-            recording: reranker.record,
+            recording: opts.recordReranks,
             ...reranker.stats,
           }
         : null,
@@ -3191,6 +3625,47 @@ export function buildNegativesReport({
  * sentences had no recorded judgement is a run measuring half of Phase 5 and
  * half of Phase 4, and the only way to see that is to print it.
  */
+/**
+ * The sentences that DO have answers.
+ *
+ * This is the counterweight to every negatives file in this directory. Each of
+ * those rewards a search for showing less, and a reranker is a machine for
+ * showing less — so a change that empties more near misses and also drops the
+ * right answer on a real question scores BETTER on four files out of five. This
+ * is the fifth.
+ *
+ * Two numbers, because they fail differently. "Rank one" is the page a person
+ * reads first. "On the page" is whether they find it at all. The reranker can
+ * move a tool down and it can remove it, and only the second is unrecoverable.
+ */
+export function buildPositivesReport(overall, perQuery) {
+  const out = [];
+  out.push('');
+  out.push(`=== The reviewer's answerable sentences ${'='.repeat(36)}`);
+  out.push('Fifteen sentences with an expected answer, written by the Phase 5 reviewer');
+  out.push('before reading anything of ours. Reported, never gated: it is held out, and');
+  out.push('a set that is gated on has been tuned against.');
+  out.push('');
+  out.push(`  an expected tool FIRST      ${overall.rankOne} of ${overall.queries}`);
+  out.push(`  an expected tool anywhere   ${overall.onThePage} of ${overall.queries}`);
+  out.push(`  came back EMPTY             ${overall.empty} of ${overall.queries}`);
+  out.push('');
+
+  const missed = perQuery.filter((e) => !e.results.some((r) => e.query.expect.includes(r.slug)));
+  if (missed.length === 0) {
+    out.push('Every one of them has an acceptable answer on the page.');
+  } else {
+    out.push(`--- The ${missed.length} the search did not answer ${'-'.repeat(30)}`);
+    for (const e of missed) {
+      out.push(`  ${e.query.id}  ${e.query.lang}  n=${String(e.results.length).padStart(2)}  ${e.query.query}`);
+      out.push(`        wanted any of: ${e.query.expect.join(', ')}`);
+      out.push(`        got: ${e.results.slice(0, 5).map((r) => `${r.rank}.${r.slug}`).join('  ') || '(nothing)'}`);
+    }
+  }
+  out.push('');
+  return out.join('\n');
+}
+
 export function buildRerankReport(reranker, passes) {
   const out = [];
   const s = reranker.stats;
@@ -3198,6 +3673,12 @@ export function buildRerankReport(reranker, passes) {
     .filter(Boolean)
     .flat()
     .filter((e) => !e.refusedAsNotSoftware);
+  // The same denominator the Rerank coverage gate uses, and it has to be: two
+  // numbers for "how much of this run was Phase 5" that disagree by fifteen
+  // searches is how a reader stops believing either. A search that came back
+  // with nothing at all had no candidates to judge, so counting it as an
+  // unjudged search would blame the reranker for an empty result set.
+  const judgeable = searched.filter((e) => e.results.length + (e.judgement?.length ?? 0) > 0);
   const reranked = searched.filter((e) => e.reranked);
   const emptied = reranked.filter((e) => e.results.length === 0).length;
   const dropped = reranked.reduce(
@@ -3211,7 +3692,7 @@ export function buildRerankReport(reranker, passes) {
   out.push(`${reranker.model} and graded 0 to 3. Anything graded 0 is dropped.`);
   out.push('');
   out.push(`  candidates judged per search  top ${reranker.n}`);
-  out.push(`  searches with a judgement     ${s.judged} of ${searched.length}`);
+  out.push(`  searches with a judgement     ${s.judged} of ${judgeable.length}`);
   out.push(`  searches with none recorded   ${s.missing}  (these measure the Phase 4 order)`);
   out.push(`  recorded judgements refused   ${s.refused}`);
   if (reranker.record) {
