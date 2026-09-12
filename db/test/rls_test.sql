@@ -283,8 +283,15 @@ $$;
 do $$
 declare n integer;
 begin
-  insert into public.search_events (query_text, query_hash, result_count, had_good_match)
-  values ('a test query', 'hash-test', 3, true);
+  -- `match_judged` joined this row in 0010. It is not what this check is about
+  -- — the subject here is who may READ the log — but the CHECK added with that
+  -- column refuses `had_good_match` without it, on purpose: "not judged but
+  -- good" is not a state the definition in docs/product-decisions.md §17 can
+  -- produce. So the fixture says both, which is what the application now
+  -- writes.
+  insert into public.search_events
+    (query_text, query_hash, result_count, had_good_match, match_judged)
+  values ('a test query', 'hash-test', 3, true, true);
 
   perform pg_temp.be('dev_person');
   select count(*) into n from public.search_events;

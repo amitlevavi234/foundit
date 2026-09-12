@@ -158,6 +158,20 @@ test('each request goes to one hardcoded address and can go nowhere else', () =>
 });
 
 test('the reader sends the sentence and six settings — nothing else', () => {
+  // UPDATED DELIBERATELY IN PHASE 5, and the reason matters more than the diff.
+  //
+  // Phase 5 adds three more calls to the same endpoint: a reranker over the
+  // candidates, a generator that writes problem statements, and a verifier that
+  // checks each one. Writing three more `fetch` calls would have meant three
+  // more places to arm a timeout wrongly, three more bodies to check, and a
+  // third entry in OUTBOUND above — which is the rule this file exists to hold.
+  //
+  // So there is now ONE request site in this file, `callResponses`, and its body
+  // takes its model, instructions, input, schema and ceilings from a typed
+  // argument. The two assertions that used to name READER_MODEL and `capped`
+  // therefore move: the KEYS are still exactly these seven, `store: false` is
+  // still hardcoded rather than passed, and the cap is now asserted at each
+  // entry point instead of at the body.
   const source = read(join(ROOT, READER_FILE));
 
   const body = /body:\s*JSON\.stringify\(\{([\s\S]*?)\n      \}\)/.exec(source);
@@ -169,18 +183,32 @@ test('the reader sends the sentence and six settings — nothing else', () => {
     ['input', 'instructions', 'max_output_tokens', 'model', 'reasoning', 'store', 'text'].sort(),
     'seven fields: the model, the instructions, the sentence, the schema, the effort, the ceiling, and store:false',
   );
-  assert.match(body[1], /model:\s*READER_MODEL/);
-  // `capped` is the sentence after MAX_READER_INPUT has been applied. The raw
-  // argument must not be what goes out — the 200-character ceiling is what
-  // bounds what a stranger can make this cost.
-  assert.match(body[1], /input:\s*capped/, 'the capped sentence is sent, not the caller’s string');
+  assert.match(body[1], /model:\s*request\.model/, 'the model comes from the typed request');
+  assert.match(body[1], /input:\s*request\.input/, 'and so does the input');
+
+  // The 200-character ceiling is what bounds what a stranger can make this
+  // cost, so every entry point has to apply it BEFORE the request is built.
+  // `capText` counts code points, because a cap that counts UTF-16 units hands
+  // the API half a surrogate pair.
   assert.match(
     source,
-    /const capped = points\.slice\(0, MAX_READER_INPUT\)\.join\(''\);/,
-    'and `capped` must be exactly that',
+    /export function capText\(text: unknown, limit: number\): string \{\r?\n  return Array\.from\(String\(text \?\? ''\)\)\.slice\(0, limit\)\.join\(''\);/,
+    'capText must be exactly a code-point slice',
   );
+  assert.match(
+    source,
+    /const capped = capText\(sentence, MAX_READER_INPUT\);/,
+    'the reader caps its sentence before it calls',
+  );
+  for (const [file, expected] of [
+    ['lib/generate.ts', /capText\(statement, MAX_STATEMENT\)/],
+  ]) {
+    assert.match(read(join(ROOT, file)), expected, `${file} must cap what it sends`);
+  }
+
   // The provider keeps a response by default. The sentence somebody typed is
-  // the text search_events refuses to attach to a person.
+  // the text search_events refuses to attach to a person. It is hardcoded here
+  // rather than taken from the request, so no caller can turn it off.
   assert.match(body[1], /store:\s*false/, 'the provider must not retain the sentence');
 
   // Nothing about the visitor, the request or the catalogue may travel with it.
@@ -192,7 +220,10 @@ test('the reader sends the sentence and six settings — nothing else', () => {
     );
   }
 
-  // And no catalogue: the model is reading a sentence, not choosing an answer.
+  // And no catalogue in the body's own text. The READER is reading a sentence
+  // and must see no catalogue at all; the RERANKER is shown candidates on
+  // purpose, and what it may see is fixed by the `RerankCandidate` type rather
+  // than by this assertion — the test below is the one that holds it.
   for (const forbidden of ['slug', 'catalogue', 'catalog', 'tools', 'candidates']) {
     assert.doesNotMatch(
       body[1],

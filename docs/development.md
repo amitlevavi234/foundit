@@ -215,6 +215,31 @@ can never delete an answer.
 Two calls, together, is about $0.00028 a search against a ceiling of $0.002, and
 a cached sentence costs neither.
 
+## Writing problem statements (Phase 5, and reverted)
+
+```bash
+node --env-file=.env.local scripts/generate-statements.mjs --dry-run   # the two prompts
+node --env-file=.env.local scripts/generate-statements.mjs --limit=3   # three tools
+node --env-file=.env.local scripts/generate-statements.mjs             # the queue
+```
+
+`gpt-5-mini` writes problem statements for published tools that carry fewer than
+`public.statements_wanted()`, and `gpt-5-nano` checks every candidate against
+the tool's own name and summary before it is stored. Five gates, listed in
+`lib/generate.ts`.
+
+It connects as **`foundit_embed`**, from `DATABASE_URL_EMBED`, and touches no
+table: the queue is `public.statement_work()`, the dedupe is
+`public.statement_similarity()` — the arithmetic happens in PostgreSQL and one
+number comes out — and the write is `public.store_generated_statement()`, which
+has no argument that could write any `source` but `'generated'`.
+
+**The rows it produced are not loaded, and that is a measurement rather than an
+oversight.** 363 statements made nDCG@10 fall from 0.7755 to 0.7508 while
+recall@10 rose from 0.7636 to 0.7800: easier to reach, harder to order. They are
+recorded in `db/seed/generated_statements.sql`, whose header holds the numbers
+and the two commands that load or undo them.
+
 ## Running the search evaluation
 
 ```bash

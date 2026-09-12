@@ -400,7 +400,15 @@ export interface ReaderResult {
   tokensOut: number;
 }
 
-/** Raised inside this module. Carries a short reason and never the sentence. */
+/**
+ * Raised inside this module. Carries a short reason and never the sentence.
+ *
+ * One error type for every call this file makes — the reader, the reranker and
+ * the two halves of the statement generator — because every one of them fails
+ * the same way and must report the same amount: a shape, never a body. The
+ * name stays `ReaderError` because ten tests and two callers use it, and
+ * renaming it would be churn dressed as tidiness.
+ */
 export class ReaderError extends Error {
   constructor(reason: string) {
     super(reason);
@@ -616,26 +624,82 @@ function outputText(payload: ResponsesPayload): string {
   return '';
 }
 
-/**
- * Ask the model to read one sentence. Throws `ReaderError` on anything that is
- * not a well-formed 2xx response carrying a valid reading.
+/* ===========================================================================
+ * The transport, and why there is only one of it
  *
- * The sentence is capped here rather than by the caller, so the 200-character
- * ceiling holds whoever is calling — the same arrangement, and the same
- * reason, as `embedTexts`.
- */
-export async function readSentenceOrThrow(sentence: string): Promise<ReaderResult> {
-  const points = Array.from(String(sentence ?? ''));
-  const capped = points.slice(0, MAX_READER_INPUT).join('');
-  if (capped.trim() === '') throw new ReaderError('the sentence is empty');
+ * Phase 5 adds three more model calls to the two Phase 4 had: a reranker over
+ * the top candidates, a generator that writes problem statements for tools
+ * with too few, and a verifier that checks each generated statement against
+ * the tool it is about. Every one of them is the same request to the same
+ * address with a different prompt and a different schema.
+ *
+ * They all go through `callResponses` below, and that is a rule rather than a
+ * convenience. `tests/markup.test.mjs` says exactly two files in the
+ * application may open a socket at all, that each holds exactly one literal
+ * URL, and that `fetch` is called with that constant and nothing else. A third
+ * fetch site — even in this file — would be a second place for a timeout to be
+ * armed wrongly, a second place for `store: false` to be forgotten, and a
+ * second body for a reviewer to check. So the feature modules (lib/rerank.ts,
+ * lib/generate.ts) hold prompts, schemas and validators, import this, and
+ * cannot reach the network any other way.
+ *
+ * What the caller may vary: the model, the instructions, the input, the
+ * schema, the timeout and the output ceiling. What it may not vary: the
+ * address, `store: false`, the key's source, how the timeout is armed, and the
+ * fact that no error ever carries a response body.
+ * ======================================================================== */
 
+/** One request to the Responses API. Every field is required on purpose. */
+export interface ResponsesRequest {
+  /** The model, which the answer is then checked against. */
+  model: string;
+  /** The system prompt. */
+  instructions: string;
+  /** The user text. Already capped by the caller — see `capText` below. */
+  input: string;
+  /** A name for the schema, for the provider's own error messages. */
+  schemaName: string;
+  /** A strict, closed JSON schema. */
+  schema: object;
+  /** How long to wait, INCLUDING the body read. */
+  timeoutMs: number;
+  /** The ceiling on output tokens, reasoning tokens included. */
+  maxOutputTokens: number;
+}
+
+/** What one call produced, before anything has validated its shape. */
+export interface ResponsesAnswer {
+  /** The parsed JSON the model returned. Unvalidated: the caller checks it. */
+  parsed: unknown;
+  model: string;
+  tokensIn: number;
+  /** Output tokens, reasoning tokens included — the provider bills both. */
+  tokensOut: number;
+}
+
+/**
+ * Cap a string at `limit` CODE POINTS, not UTF-16 units.
+ *
+ * `String.slice` counts UTF-16 units, so a string of emoji capped that way
+ * hands the API half a surrogate pair. Every cap in this codebase counts code
+ * points; this is the one place that does it for this file.
+ */
+export function capText(text: unknown, limit: number): string {
+  return Array.from(String(text ?? '')).slice(0, limit).join('');
+}
+
+/**
+ * Make one request. Throws `ReaderError` on anything that is not a well-formed
+ * 2xx response carrying parseable JSON from the model that was asked.
+ */
+export async function callResponses(request: ResponsesRequest): Promise<ResponsesAnswer> {
   const key = apiKey();
 
   // AbortController rather than AbortSignal.timeout so the timer is cleared on
   // the success path too: a pending timer keeps a short-lived process alive,
   // and scripts/read.mjs is a short-lived process.
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), READER_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), request.timeoutMs);
 
   // The timer is cleared in ONE place, after the body has been read, and that
   // is a fix rather than a tidy-up. `fetch` resolves when the HEADERS arrive;
@@ -654,24 +718,24 @@ export async function readSentenceOrThrow(sentence: string): Promise<ReaderResul
         authorization: `Bearer ${key}`,
         'content-type': 'application/json',
       },
-      // Seven fields, and not one of them is about the visitor, the request,
-      // the session or the catalogue. `store: false` is one of the seven: the
-      // provider keeps a response by default, and the sentence somebody typed
-      // is the text search_events refuses to attach to a person.
+      // Seven fields, and not one of them is about the visitor, the request or
+      // the session. `store: false` is one of the seven: the provider keeps a
+      // response by default, and the sentence somebody typed is the text
+      // search_events refuses to attach to a person.
       body: JSON.stringify({
-        model: READER_MODEL,
-        instructions: READER_INSTRUCTIONS,
-        input: capped,
+        model: request.model,
+        instructions: request.instructions,
+        input: request.input,
         text: {
           format: {
             type: 'json_schema',
-            name: 'query_reading',
+            name: request.schemaName,
             strict: true,
-            schema: READER_SCHEMA,
+            schema: request.schema,
           },
         },
         reasoning: { effort: 'minimal' },
-        max_output_tokens: 900,
+        max_output_tokens: request.maxOutputTokens,
         store: false,
       }),
       signal: controller.signal,
@@ -689,7 +753,7 @@ export async function readSentenceOrThrow(sentence: string): Promise<ReaderResul
       // An abort DURING the body read arrives here rather than at the fetch,
       // so the timeout has to be recognised in both places.
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new ReaderError(`timed out after ${READER_TIMEOUT_MS} ms`);
+        throw new ReaderError(`timed out after ${request.timeoutMs} ms`);
       }
       throw new ReaderError('response was not JSON');
     }
@@ -698,14 +762,15 @@ export async function readSentenceOrThrow(sentence: string): Promise<ReaderResul
     // The provider's error strings can carry the request, so only the shape of
     // the failure is reported.
     const aborted = error instanceof Error && error.name === 'AbortError';
-    throw new ReaderError(aborted ? `timed out after ${READER_TIMEOUT_MS} ms` : 'request failed');
+    throw new ReaderError(aborted ? `timed out after ${request.timeoutMs} ms` : 'request failed');
   } finally {
     clearTimeout(timer);
   }
 
-  const model = typeof payload.model === 'string' && payload.model ? payload.model : READER_MODEL;
-  if (!model.startsWith(READER_MODEL)) {
-    throw new ReaderError(`provider answered with model ${model}`);
+  const answered =
+    typeof payload.model === 'string' && payload.model ? payload.model : request.model;
+  if (!answered.startsWith(request.model)) {
+    throw new ReaderError(`provider answered with model ${answered}`);
   }
 
   const text = outputText(payload);
@@ -721,14 +786,44 @@ export async function readSentenceOrThrow(sentence: string): Promise<ReaderResul
     throw new ReaderError('the response text was not JSON');
   }
 
-  const checked = validateReading(parsed, capped);
+  return {
+    parsed,
+    model: request.model,
+    tokensIn: Number(payload.usage?.input_tokens ?? 0),
+    tokensOut: Number(payload.usage?.output_tokens ?? 0),
+  };
+}
+
+/**
+ * Ask the model to read one sentence. Throws `ReaderError` on anything that is
+ * not a well-formed 2xx response carrying a valid reading.
+ *
+ * The sentence is capped here rather than by the caller, so the 200-character
+ * ceiling holds whoever is calling — the same arrangement, and the same
+ * reason, as `embedTexts`.
+ */
+export async function readSentenceOrThrow(sentence: string): Promise<ReaderResult> {
+  const capped = capText(sentence, MAX_READER_INPUT);
+  if (capped.trim() === '') throw new ReaderError('the sentence is empty');
+
+  const answer = await callResponses({
+    model: READER_MODEL,
+    instructions: READER_INSTRUCTIONS,
+    input: capped,
+    schemaName: 'query_reading',
+    schema: READER_SCHEMA,
+    timeoutMs: READER_TIMEOUT_MS,
+    maxOutputTokens: 900,
+  });
+
+  const checked = validateReading(answer.parsed, capped);
   if ('error' in checked) throw new ReaderError(`schema: ${checked.error}`);
 
   return {
     reading: checked.reading,
     model: READER_MODEL,
-    tokensIn: Number(payload.usage?.input_tokens ?? 0),
-    tokensOut: Number(payload.usage?.output_tokens ?? 0),
+    tokensIn: answer.tokensIn,
+    tokensOut: answer.tokensOut,
   };
 }
 

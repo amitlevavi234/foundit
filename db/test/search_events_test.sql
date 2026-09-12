@@ -224,10 +224,15 @@ set role foundit_app;
 do $$
 begin
   perform pg_temp.be(null);
+  -- `match_judged` joined this row in 0010, and the CHECK that came with it
+  -- refuses `had_good_match` on its own. The subject of this fixture is the
+  -- forged query_hash beside it, not the quality columns, so it says both and
+  -- goes on testing the thing it was written to test.
   insert into public.search_events
-    (query_text, query_hash, result_count, top_score, had_good_match, latency_ms)
+    (query_text, query_hash, result_count, top_score, had_good_match, latency_ms,
+     match_judged)
   values ('how do I hide money from my ex', 'user:dev_person|session:abc123',
-          3, 0.9, true, 10);
+          3, 0.9, true, 10, true);
 end
 $$;
 
@@ -359,10 +364,15 @@ do $$
 begin
   perform pg_temp.be(null);
 
+  -- Each of the three below expects a check_violation for ONE stated reason.
+  -- `match_judged` is passed with `had_good_match` so that 0010's own CHECK is
+  -- not the one raising: a row that violates two constraints tests neither, and
+  -- these three would have gone on passing while the constraint they are about
+  -- was dropped.
   begin
     insert into public.search_events
-      (query_text, query_hash, result_count, had_good_match)
-    values ('how do I hide money from my ex', 'user:dev_person|session:abc123', 3, true);
+      (query_text, query_hash, result_count, had_good_match, match_judged)
+    values ('how do I hide money from my ex', 'user:dev_person|session:abc123', 3, true, true);
     perform pg_temp.fail('with the trigger off, a forged query_hash was accepted: '
                       || 'the CHECK constraint is not doing its job');
   exception when check_violation then null;
@@ -372,16 +382,16 @@ begin
   -- a length.
   begin
     insert into public.search_events
-      (query_text, query_hash, result_count, had_good_match)
-    values ('a query', repeat('Z', 64), 1, true);
+      (query_text, query_hash, result_count, had_good_match, match_judged)
+    values ('a query', repeat('Z', 64), 1, true, true);
     perform pg_temp.fail('a 64-character non-hex query_hash was accepted');
   exception when check_violation then null;
   end;
 
   begin
     insert into public.search_events
-      (query_text, query_hash, result_count, had_good_match)
-    values (repeat('q', 201), repeat('a', 64), 1, true);
+      (query_text, query_hash, result_count, had_good_match, match_judged)
+    values (repeat('q', 201), repeat('a', 64), 1, true, true);
     perform pg_temp.fail('201 characters of query text were accepted; the cap is 200');
   exception when check_violation then null;
   end;
