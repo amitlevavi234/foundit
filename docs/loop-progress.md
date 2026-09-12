@@ -1289,6 +1289,133 @@ fixture disagree.
   times over. Saying 120 honestly is better than saying 320 from a model that
   was wrong.
 
+## Phase 6 — accounts — **built, awaiting its adversarial review**
+
+Better Auth 1.7.4 inside the Next.js process against plain PostgreSQL, database
+sessions, Google and a 6-digit emailed code. Two migrations, two new SQL
+suites, six new unit suites, eleven screens or controls, and one defect found by
+doing the thing rather than by reading the schema.
+
+| | What landed | Where |
+| --- | --- | --- |
+| The second role and the second schema | `auth_core` owned by `foundit_owner`, reached by `foundit_auth` alone; `foundit_app` holds nothing there and it holds nothing in `public` | `0013_accounts.sql`, `lib/auth-db.ts` |
+| Identity per request | one transaction, one client, `set_config('request.jwt.claims', $1, true)`; absent, empty, malformed and stale all read as nobody | `lib/identity.ts`, `lib/db.ts` |
+| `auth.uid()` hardened | a claim that is not JSON was raising 22P02 from inside a policy; it is now null, like the other three | `0013_accounts.sql` §4 |
+| Sharing | a 128-bit token replaces `is_public` as the permission, revocable, with a CHECK keeping the flag honest | `0013_accounts.sql` §5 |
+| Removing a review | an admin may take one down and may not change a word: a policy, a BEFORE UPDATE trigger, and a RESTRICTIVE policy a later migration cannot forget | `0013_accounts.sql` §6–7 |
+| Deleting an account | one delete on one row, and `0001`'s cascades; sessions killed first | `0013`, `lib/deletion.ts` |
+| The counters | three trigger functions became definers behind one narrow policy, and a like stopped counting as an edit | `0014_counters.sql` |
+| The screens | `/sign-in`, `/sign-in/code`, `/saved`, `/saved/[collection]`, `/c/[token]`, `/u/[handle]`, `/settings`, `/settings/delete`, the gate, the save menu, the like control, the review form | `app/`, `components/` |
+
+### What is proved, and by what
+
+| Claim | Evidence |
+| --- | --- |
+| `foundit_auth` reaches five tables and nothing else | `information_schema.role_table_grants`: five rows, all `auth_core`; `has_schema_privilege('foundit_auth','public','usage')` is **false** |
+| `foundit_app` reaches nothing in `auth_core` | same query, zero rows; `has_schema_privilege('foundit_app','auth_core','usage')` is **false** |
+| It fails closed | nine claim shapes against a live database: `(never set)`, `(empty)`, `nonsense`, `{`, `[1,2]`, `{"sub":null}`, `{"nope":1}` and a deleted user all see 0 collections, 0 likes, 0 search events and are not admins; `dev_person` sees 2 and 9 |
+| A tool's owner cannot touch a review of their listing | `db/test/accounts_test.sql` §5 — edit, re-rate, remove, hard-delete, and record a removal reason: five refusals as `dev_maker`, who maintains Receiptly |
+| An admin removes but does not edit | §6 — an edit refused, an edit wearing a removal's clothes refused, a removal with no reason refused, a reason in somebody else's name refused, then the real thing, with the body byte-identical afterwards |
+| A shared link is the whole permission | §4 — no token, wrong token and revoked token all see nothing; the right one sees the collection and its items, signed out |
+| Deletion leaves nothing | before/after across 12 tables; `search_events` unchanged at 8 rows because it never held the id |
+| The 6th code is refused | `tests/rate-limit.test.mjs` with a controlled clock, and live: five codes, then "That is enough codes for now. Try again in about 10 minutes." |
+| Production cannot print a code | `tests/email.test.mjs` — `NODE_ENV=production` with `AUTH_DEV_CODE_TO_LOG=1` logs nothing and sends nothing |
+| The gate appears only at the moment | `grep` for the gate's URL: the save control, the like control, the review form, and the three account screens that redirect. Not the homepage, not browse, not top, not the tool page's body |
+| The prompt never precedes the first results | `foundit_results_seen=1` on the first results page and no banner; `=2` on the second and the banner appears |
+| Sign-in works with no JavaScript | a plain multipart POST carrying the form's own `$ACTION_ID` field: 303 to `/sign-in/code` with two httpOnly cookies |
+
+### Sign-in, end to end, on the development machine
+
+Driven through the browser against `next dev` on a database rebuilt from
+scratch, with no email provider and no Google client:
+
+1. `/results` signed out — every Save is a link to
+   `/sign-in?next=%2Fresults%3Fq%3D…&intent=save`.
+2. Clicking it opens the gate over the dimmed results: "Save Splitwise to your
+   collection", Google disabled with its reason, the email field live.
+3. The code goes to the server log, not to an inbox.
+4. Six boxes, the wrong code first: *"That code isn't right. You get 3 tries
+   before a code is thrown away."* Then the right one.
+5. Back on the exact results page, signed in, avatar in the header.
+6. Save → a new collection and a note; Like; then a review on the tool page.
+   `like_count` 3 → 4, `save_count` 1 → 2, `review_count` 1 → 2,
+   `rating_sum` 5 → 10.
+7. Share → `http://localhost:3001/c/3782e266b67214e617906ff39a79ede0`, which
+   opens with no cookies at all and refuses two wrong tokens.
+8. `/u/noa` shows the handle, the join month, 0 tools added, 1 review — and no
+   likes, no collections and no address.
+9. `/settings/delete` → "Delete @noa?" with what goes and what stays, counted
+   from the database. After: 0 rows everywhere, `search_events` still 8.
+
+A stale session proved itself on the way: the database was rebuilt under a
+browser holding a valid-looking cookie, and the next page was the signed-out
+page rather than an error.
+
+### The defect this phase found
+
+Within a minute of the first Like, Splitwise had four like rows and a count of
+three. The AFTER trigger ran as the person who liked; `tools_update` is
+`using (tool_is_mine(id))`; row-level security **filters** rather than refusing,
+so the update matched nothing and said nothing. It had never shown up because
+nothing but a migration had ever written one of those rows.
+
+`0014_counters.sql` and `db/test/counters_test.sql` are the fix and the test —
+and the second half of the same defect, `updated_at` being stamped by a like,
+which made every embedded summary stale the moment somebody pressed a heart.
+`docs/product-decisions.md` §18 has the reasoning.
+
+`db/apply.mjs --fresh` had the matching gap: it dropped `public`, `auth` and
+`infra` and left `auth_core` standing, so a rebuilt database had no profile for
+a user who still had a live session. The application repaired itself, which is
+what it is built to do, but "drop the schema and apply everything" has to mean
+all of it.
+
+### Known weaknesses, stated rather than hidden
+
+- **Google sign-in is wired but has never run.** There is no OAuth client to
+  run it with, so what is proved is the configuration path: absent credentials
+  draw the control disabled and say so, present ones build the provider, and
+  the redirect URI is `${BETTER_AUTH_URL}/api/auth/callback/google`. The first
+  real Google sign-in will happen on the owner's machine, with the console
+  steps now written out in `docs/development.md`.
+- **The emailed code has never been emailed.** Same shape: `lib/email.ts` is
+  exercised against a stubbed fetch — one POST, one address, four body fields,
+  the key only ever in a header, a timeout, a provider error — and the live
+  flow ran through the development log path. Nothing has reached an inbox and
+  no DNS record exists yet.
+- **The per-address limit is a token bucket, so "five an hour" is not "five in
+  a row for ever".** It refills continuously at one per twelve minutes, and the
+  live run got six codes over about that long before the sixth was refused. The
+  unit test pins the deterministic case; the live one is the same rule with a
+  real clock.
+- **The rate limiter is per process and the buckets are in memory.** A restart
+  forgets everybody, which is the design (nothing about a visitor is written
+  down) and also means a deploy resets an attacker's count. Better Auth's own
+  limiter is database-backed and covers the same paths from the other side.
+- **`/saved` has no search-within, no sort and no Duplicate.** The artboard
+  draws all three. They are list ergonomics on a list that holds four things
+  today, and none of them is a rule.
+- **The rate-and-review form builds three of the artboard's six fields.** The
+  stars, the words and taking it down are real; "what did you use it for", the
+  recommend-for chips and the three sliders are not, because two of those write
+  columns the schema does not have and the third is a moderation queue
+  `docs/product-decisions.md` §5 says does not exist.
+- **A removed review does not yet tell its author why.** `review_removals`
+  records the reason, the admin and the time, and the author can read their own
+  row — but nothing renders it. The DSA route needs the author told, and that
+  is Phase 8's half.
+- **There is no admin screen for removing a review.** The policy, the trigger
+  and the table are in and tested; the only way to use them today is SQL. That
+  is deliberate — `/admin` is Phase 8 — but it means the DSA route exists in
+  the database and not yet in the product.
+- **Every page carrying the header is now dynamic.** Thirteen unwritten pages
+  and the component sheet were static and are not any more. The catalogue reads
+  under them are still cached for a minute, so the cost is a render rather than
+  a query, but it is a real change to how the site is served.
+- **Sessions are 30 days absolute with a 7-day rolling refresh, and there is no
+  "sign out everywhere".** `research/09` §7 asks for one and it is one
+  statement; it needs a screen, and Settings did not get one this phase.
+
 ## Tried and rejected
 
 - **Docker on the owner's laptop.** Docker Desktop crashes on an orphaned

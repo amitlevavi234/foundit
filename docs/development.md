@@ -68,6 +68,7 @@ load-bearing rather than tidiness:
 | `DATABASE_URL` | `foundit_app` | nothing, no `BYPASSRLS` | the web app, `eval/run.mjs` |
 | `DATABASE_URL_OWNER` | `foundit_owner` | the schema | `db/apply.mjs` only |
 | `DATABASE_URL_EMBED` | `foundit_embed` | nothing, two function grants | `scripts/embed.mjs` only |
+| `DATABASE_URL_AUTH` | `foundit_auth` | nothing, five tables in `auth_core` | Better Auth only |
 
 **There is deliberately no fallback between any of them.** If the app could
 quietly reach for the owner connection when its own was missing, every
@@ -86,6 +87,17 @@ back the order — an adversarial review did exactly that, recovering 16 of 16
 sign bits as `foundit_app`. So the write half moved to a role of its own, the
 application lost it, and no role has both. `db/migrations/0005_embed_role.sql`
 has the long version; `db/test/vectors_test.sql` proves the separation.
+
+`foundit_auth` is the fourth, added by Phase 6, and it is the same idea pointing
+the other way. Better Auth keeps its own `user`, `session`, `account`,
+`verification` and `rateLimit` tables; they live in the `auth_core` schema and
+this role is the only thing that may touch them. It holds **nothing** in
+`public` — not the catalogue, not reviews, not the search log — and
+`foundit_app` holds **nothing** in `auth_core`. So a SQL-injection bug in the
+catalogue cannot read a session token, and a bug in the authentication library
+cannot read a review: two incidents rather than one.
+`db/migrations/0013_accounts.sql` has the long version and
+`db/test/accounts_test.sql` proves it from both sides.
 
 The eval harness connects as `foundit_app` for the same reason: measured as the
 owner, latency reads about four times faster than a visitor will ever see it.
@@ -316,6 +328,140 @@ node eval/run.mjs --rerank-n=20     # judge twenty candidates rather than the sh
 Every one of those was run before the defaults were chosen, and the table is in
 `eval/baselines.md`. None of them is a knob to turn when the number is
 disappointing; they are how the number was arrived at.
+
+## Signing in, locally
+
+```bash
+docker compose -f db/docker-compose.dev.yml up -d
+node db/apply.mjs --fresh --seed
+npm run dev
+```
+
+Then open `/sign-in`. With nothing configured, both controls are drawn disabled
+and say which one is missing — that is the honest state, not a broken one, and
+the rest of the site works exactly as it did before Phase 6.
+
+To sign in for real on your own machine you need **two lines in `.env.local`**
+and nothing else:
+
+```bash
+DATABASE_URL_AUTH=postgresql://foundit_auth:local_development_only_auth@127.0.0.1:5433/foundit
+BETTER_AUTH_SECRET=<32 random characters>
+AUTH_DEV_CODE_TO_LOG=1
+```
+
+Generate the secret on the machine and do not print it anywhere:
+
+```bash
+openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32
+```
+
+`AUTH_DEV_CODE_TO_LOG=1` is what makes this work with no email account at all:
+the 6-digit code is **printed to the server log** instead of being sent. It is
+generated, hashed, stored, expired after five minutes and thrown away after
+three wrong guesses exactly as it would be in production — only the delivery is
+a console line:
+
+```
+[development] sign-in code for noa@example.com: 482915 — printed because AUTH_DEV_CODE_TO_LOG=1 and this is not production
+```
+
+**That path cannot be reached in production.** `lib/email.ts` requires
+`NODE_ENV` to be something other than `production` *and* the variable to be
+exactly `1`, and `tests/email.test.mjs` asserts the pairing — a deployment that
+sets it by mistake still sends nothing and prints nothing. Never set it on the
+server.
+
+If the dev container already exists, the role's password has to be set by hand
+once, because the init script only runs on an empty data directory:
+
+```bash
+docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
+  -c "alter role foundit_auth login noinherit password 'local_development_only_auth'"
+```
+
+## What the owner must create
+
+Two accounts, neither of which an agent can make for you, and both of which the
+application is written to work without. Until they exist the matching control
+says "not set up yet" rather than failing after somebody clicks it.
+
+### 1. A Google OAuth client
+
+You are not a developer and this page is designed for people who are, so here
+is exactly what to press.
+
+1. Go to **console.cloud.google.com** and sign in with the Google account that
+   should own this.
+2. Top left, the project dropdown → **New project**. Call it `Foundit`. Create
+   it, then make sure it is the project selected in that dropdown.
+3. Left menu → **APIs & Services** → **OAuth consent screen**.
+   - User type: **External**. Create.
+   - App name: `Foundit`. User support email: your own address.
+   - **App domain**: home page `https://foundit.tools`, privacy policy
+     `https://foundit.tools/privacy`, terms of service
+     `https://foundit.tools/terms`. Google *requires* the last two before it
+     will let the screen out of testing, and both of those pages exist and say
+     plainly that they are unwritten (`docs/product-decisions.md` §14) — which
+     is a gap to close before launch, not a reason to invent a policy now.
+   - Developer contact: your own address. Save and continue.
+   - Scopes: add **`openid`**, **`.../auth/userinfo.email`** and
+     **`.../auth/userinfo.profile`**, and nothing else. Foundit asks for a name
+     and an email address and has no use for anything more.
+   - While the app is in **Testing**, only addresses you add under **Test
+     users** can sign in. Add your own. Publishing it is a separate step and
+     needs the two URLs above to be real pages.
+4. Left menu → **Credentials** → **Create credentials** → **OAuth client ID**.
+   - Application type: **Web application**. Name: `Foundit web`.
+   - **Authorised redirect URIs** → Add URI. This must match to the character,
+     including the scheme and with no trailing slash:
+     - for your laptop: `http://localhost:3000/api/auth/callback/google`
+     - for the server: `https://foundit.tools/api/auth/callback/google`
+   - Google allows `http` only for `localhost`; everything else must be
+     `https`, and a raw IP address is refused.
+   - Create. It shows a **Client ID** and a **Client secret**.
+5. Put them in `.env.local` (laptop) or `/root/.foundit/app.env` (server) as
+   `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, and set `BETTER_AUTH_URL` to
+   the address you registered the redirect URI under. **The redirect URI is
+   built from `BETTER_AUTH_URL`**, so if the two disagree Google refuses the
+   sign-in with `redirect_uri_mismatch` and nothing else is wrong.
+
+The secret is a secret: it goes in a file git does not track, it is never
+pasted into a chat window, and if it ever leaks you press **Reset secret** on
+that credentials page and replace it.
+
+### 2. Resend, and the DNS records that stop the codes going to Spam
+
+Resend sends the 6-digit codes. Free tier at the time of writing: 3,000 emails
+a month, 100 a day (`research/09` §6), which is far more than a directory's
+early traffic.
+
+1. **resend.com** → create an account.
+2. **Domains** → **Add domain**. Use a **subdomain**, not the root:
+   `mail.foundit.tools`. Reputation then stays isolated — a bad month for
+   transactional mail never poisons anything else on the domain.
+3. Resend shows a list of DNS records. Add each one in Cloudflare exactly as
+   shown. There will be three kinds, and each does a different job:
+   - **SPF** (a `TXT` record on `mail.foundit.tools`) says which servers may
+     send as this domain. **Exactly one SPF record per name** — two is a
+     permanent error and a permanent error is a hard fail, not a soft one.
+   - **DKIM** (`CNAME` records) lets the receiver check the mail was not
+     altered. Copy the values verbatim.
+   - **DMARC** (a `TXT` record on `_dmarc.foundit.tools`) says what to do when
+     the first two fail. **Start at `p=none`**:
+     `v=DMARC1; p=none; rua=mailto:you@foundit.tools; adkim=s; aspf=s`
+4. Wait for Resend to show the domain as **Verified**.
+5. **API Keys** → **Create API Key**, sending permission only. Put it in
+   `RESEND_API_KEY`, and set `EMAIL_FROM` to an address on the verified
+   subdomain — `Foundit <no-reply@mail.foundit.tools>`. **Both are required**:
+   a key with an unverified sender fails at the far end where nobody is
+   watching, so `lib/email.ts` treats a missing sender as "not configured".
+6. Register the domain in **Google Postmaster Tools**. It is the only place you
+   can see your actual Gmail spam rate, and Gmail's own threshold is 0.3%.
+7. Watch the DMARC reports for two to four weeks, confirm all your legitimate
+   mail passes, and only then move `p=none` → `p=quarantine` → `p=reject`.
+   Going straight to `p=reject` is how people silently blackhole their own
+   sign-in emails.
 
 ## Rules that are not negotiable
 

@@ -193,9 +193,18 @@ try {
   } else {
     if (args.has('--fresh')) {
       console.log('Wiping the schema...');
+      // FOUR schemas, and the fourth is here because it was missed. `auth_core`
+      // holds Better Auth's user, session and account rows (0013). Left
+      // standing, `--fresh` produced a database with no profile for a user who
+      // still had a live session — so the next request arrived signed in as
+      // somebody the catalogue had never heard of. The application repaired
+      // itself, which is what it is built to do, but "drop the schema and apply
+      // everything" has to mean all of it or the state it leaves behind is one
+      // nobody designed.
       await client.query(`
         drop schema if exists public cascade;
         drop schema if exists auth cascade;
+        drop schema if exists auth_core cascade;
         drop schema if exists infra cascade;
         create schema public;
       `);

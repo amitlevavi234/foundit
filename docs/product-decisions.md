@@ -5,7 +5,7 @@ design phase. Where this disagrees with `product-spec.md`, **this file wins** �
 spec was written first, under the earlier name "Solvd", and parts of it were
 deliberately cut afterwards.
 
-Last updated: 11 September 2026.
+Last updated: 12 September 2026.
 
 ---
 
@@ -542,3 +542,125 @@ column, no session column and no foreign key to anything that has one, and
 `log_search_event` still takes no identity and returns no row id.
 `match_judged` is a boolean about a search, and there is nothing in this row
 that could ever say whose.
+
+## 18. What accounts actually do, and the nine things Phase 6 had to decide (added 12 September 2026)
+
+§2 settled that there are accounts and when we ask for one. Building them
+raised nine questions it did not answer. Each is recorded here rather than only
+in a code comment, because each is a product decision wearing an implementation
+hat, and the next person to touch this will want to know it was decided rather
+than defaulted.
+
+**1. Sharing a collection is a LINK, not a flag.** `0001_init.sql` gave a
+collection an `is_public` boolean and a policy that made a public one readable
+by anybody who could reach the database — enumerable by id, one guess at a time.
+That is a wider promise than anyone made. A shared collection is now readable by
+whoever holds a **128-bit token in the URL** and by nobody else: the token is
+the whole of the permission, the policy compares it to the column, and revoking
+a share sets it back to null so the old link stops working immediately. The
+flag stays because the Share control needs something to be on or off, and a
+CHECK makes the two impossible to disagree. `/c/<token>` is `noindex` for the
+same reason: a link somebody sent to one person is not a page a search engine
+should hand to everybody.
+
+**2. A shared collection is therefore NOT listed on a public profile.** The
+artboard counts "3 public collections" on `ProfilePublic`. Listing them would
+publish the tokens, which would turn "anybody with the link" into "anybody". The
+public profile shows what somebody did in public — listings they added, reviews
+they wrote — and nothing that is only theirs.
+
+**3. A review's byline is the @name and nothing else.** A display name is a
+string a person chooses and can change to anybody else's; a review is the one
+place in this product where who wrote it has to be the same string as the
+profile it points at. So the tool page prints `@handle`, and the artboard's
+"Priya Raman" over the review is not built.
+
+**4. An @name is derived from the address, and never transliterated.** Nobody is
+asked to choose a handle during sign-in, because the sign-in screen is two
+controls and a sentence and that is the whole of its value. It comes from the
+local part of the address, sanitised to the CHECK `0001` already carries, and
+deduplicated with a number by the unique index rather than by a guess. A name in
+another script produces `friend`, `friend2`, `friend3` — **not** a guess at how
+it looks in Latin letters, because a wrong transliteration of somebody's name is
+worse than no name. Settings is where anybody changes it, and a handle that is
+refused is refused out loud rather than quietly turned into something else.
+
+**5. No avatar is ever fetched.** Google hands us a picture URL with the
+profile. Storing it would mean every page carrying the header asks Google's CDN
+for a file — a visitor's browser telling a third party where they are, on every
+page, for a decoration. The avatar is an initial on a coloured ground, drawn by
+us. §12's rule is about our server fetching a URL; this is the neighbouring
+question and the answer has the same shape.
+
+**6. Deleting an account kills the session FIRST.** The rows live in two schemas
+reached by two roles through two pools, and PostgreSQL cannot make that one
+transaction, so the order is chosen by what a half-completed deletion leaves
+behind. Sessions go first: from that instant the cookie in their browser opens
+nothing, and everything that can fail afterwards fails on an account nobody can
+sign into. Then the profile — one row, and `0001`'s cascades take the reviews,
+likes, collections, saved items and claims with it. Then the account itself.
+The brief this phase was written from asked for the opposite order, and the
+opposite order leaves a window in which the profile is gone and the session
+still works: a signed-in person with no profile, whose next request would create
+them a new one and quietly undelete the account they had just closed.
+`tests/deletion.test.mjs` fails each step in turn and checks what is left.
+
+**7. There is no foreign key from `profiles` to Better Auth's `user` table.**
+Phase 1 left a note asking for one. It is not added, and the reason is the
+boundary this phase exists to draw: referential-integrity actions **bypass
+row-level security by design**, so a cascade from `auth_core` would be a delete
+path into `public` for the one role that is supposed to hold nothing there. The
+invariant it would enforce — a profile belongs to a real account — is enforced
+instead at the two places that can break it: one code path creates a profile (at
+first sign-in), and one ordered deletion destroys it, both with tests.
+
+**8. Settings shows three sections and builds two.** Notifications is not drawn
+at all, because nothing in this product sends anybody anything except a sign-in
+code, and five toggles over columns labelled Email and In-app would be five
+promises nobody made. "Download my data" is not built: an export is a real
+obligation and a real piece of work, and a button producing a partial file is
+worse than no button. "Use my searches to improve matching" is not drawn either
+— there is nothing to toggle, because search text is never attached to a person
+in the first place, and consent to something that does not happen is a false
+statement about the site in exactly the way §14 says a cookie banner would be.
+
+**9. Every page that carries the header is now rendered per visitor.** The
+header shows an avatar or a Sign in button, so a page carrying it cannot be one
+static file served to everybody. The catalogue reads underneath are still cached
+for a minute (`lib/db.ts`) and **nothing that ran under somebody's identity may
+ever enter that cache** — the signed-in overlay on a results page or a tool page
+is a separate statement, under a claim, outside the cache. The two places that
+cannot ask who is looking are the loading skeleton and the 404, and both draw
+the signed-out header on purpose.
+
+### The counter defect this phase found, and what it says about the last four
+
+Phase 6 is the first phase in which somebody other than a migration writes a
+row, and within a minute of the first Like it produced a listing with four likes
+and a count of three.
+
+`tools.like_count` is maintained by an AFTER INSERT trigger that ran **as the
+person who liked** — and `tools_update` is `using (tool_is_mine(id))`, so the
+update matched no rows. No error and no warning: row-level security *filters*,
+it does not refuse. The same silence covered `save_count` and every column the
+review counter maintains. It had never shown up because the seed inserts as the
+owner, and the owner bypasses RLS wherever it is not forced.
+
+`0014_counters.sql` moves the three counter functions to `SECURITY DEFINER`
+behind one narrow policy — scoped to `foundit_owner`, which the application role
+is neither a member of nor able to become, and gated on a setting the functions
+turn on for the length of their own update. The result is stricter than what
+shipped in `0001`: the only way to move these numbers is to insert or delete the
+row they count, which is not true of a maintainer editing their own listing
+today.
+
+It also found the second half of the same defect: `updated_at` was being stamped
+by a like, so `tool_problems.embedded_at < tools.updated_at` became true for any
+listing anybody liked, and the embedding job's own rule for "this text changed"
+started firing on a number. `tools_touch` now names the columns that are the
+listing. **A like is not an edit**, and the two had been the same thing for five
+phases.
+
+The lesson is not about counters. It is that a rule which has only ever been
+exercised by the migration that wrote it has not been exercised at all, and that
+the way to find out is to do the thing rather than to read the schema.
