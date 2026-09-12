@@ -2,7 +2,7 @@
 
 Read at the start of every tick, updated before the end of it.
 
-**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended twice — by the owner's review (a relevance floor, calmer cards, page speed) and by an adversarial review of that floor, which it did not pass (summary vectors, a column-level revoke, and a floor that is honest about refusing only 40% of what it should); **4 built and measured, awaiting its adversarial review**; all awaiting Amit's sign-off
+**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended twice — by the owner's review (a relevance floor, calmer cards, page speed) and by an adversarial review of that floor, which it did not pass (summary vectors, a column-level revoke, and a floor that is honest about refusing only 40% of what it should); 4 built and measured; **5 built and measured — the reranker ships, the generated statements were measured and reverted, the fit score stays as bands with the reason written down — awaiting its adversarial review**; all awaiting Amit's sign-off
 **Server:** `foundit-prod`, Hetzner CX23, Falkenstein, `167.233.217.138`, Ubuntu 24.04.4
 
 ## Phase 0b — the machine
@@ -844,6 +844,207 @@ pretending: no vector leg ran, so the heading claims words rather than meaning.
   sentence added. It is still the thing that lets CI measure the real search
   with no key, and freezing it is now also what fixes WHICH of five recordings
   the number came from.
+- **Every number here is from this laptop**, against Docker through WSL2. The
+  server is the gate, at deploy.
+
+## Phase 5 — ranking, and an honest fit score — **built; one of three reverted**
+
+Three deliverables, three commits, three separate measurements. One of them
+made the search worse and was taken out again, which is the outcome
+`docs/build-phases.md` asks for rather than the one it hopes for.
+
+| Deliverable | Shipped? | nDCG@10 | What it was |
+| --- | --- | --- | --- |
+| A — generated problem statements | **no, reverted** | 0.7755 → 0.7508 (**−0.0247**) | 363 statements written by `gpt-5-mini` and checked by `gpt-5-nano` |
+| B — the reranker | **yes**, `67006e5` | 0.7755 → **0.8605** (**+0.0850**) | `gpt-5-nano` reads the sentence against each candidate and grades it 0–3 |
+| C — the fit score | bands, with the reason written down | — | no human-judged pairs exist, so no percentage may be drawn |
+| D — "a good match" | **yes** | — | defined in `docs/product-decisions.md` §17 and written from that alone |
+
+### The shipped number, and everything it is gated on
+
+| | Phase 4 | Phase 5 | |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.7755 | **0.8605** | +0.0850 |
+| recall@10 | 0.7636 | 0.7800 | +0.0164 |
+| english | 0.7665 | 0.8550 | +0.0885 |
+| non-English | 0.8207 | 0.8877 | +0.0670 |
+| constrained (15) | 0.7895 | 0.8275 | +0.0380 |
+| unconstrained (45) | 0.7708 | 0.8715 | +0.1007 |
+| golden queries empty | 0 of 60 | 0 of 60 | — |
+| perturbed empty | 0 of 240 | 0 of 240 | — |
+| constraint violations | 0 | 0 | — |
+| `eval/negatives.jsonl` empty | 13 of 30 | **22 of 30** | far 11→14, near **2→8** |
+| `eval/negatives.review.jsonl` empty | 11 of 25 | **20 of 25** | far 7→9, near **1→6**, non-English 3→5 |
+| cost per search | $0.000246 | $0.000434 | ceiling $0.002 |
+| candidates judged | — | top 20 | measured against 30 and 50 |
+
+Reproduced with **no API key at all** on a database whose three caches were
+emptied first: 393 query vectors and 329 judgements loaded from
+`db/seed/embeddings.fixture.json`, 0 requests made, 0.8605 to four decimals.
+
+### A: the statements were generated, measured, and deleted
+
+204 published tools carried fewer than four problem statements. `gpt-5-mini`
+wrote 791 candidates; 48 were refused by the mechanical gate in
+`lib/generate.ts` (a product word, a tool's name, a rephrasing of the summary,
+not English), 124 by the second model, 0 as near-duplicates, and 358 were
+stored — 363 with a three-tool trial run. The whole run cost about **$0.09**.
+
+**And nDCG@10 fell 0.0247 while recall@10 rose 0.0164.** More statements give
+more tools a way into a result set, so more judged tools turn up somewhere in
+the top twenty and more unjudged ones turn up above them. A statement that is
+true about a tool is not a statement that should rank it first.
+
+So the rows were deleted and reverting restored 0.7755 to four decimals. They
+are kept in `db/seed/generated_statements.sql` with the numbers and the three
+commands that reproduce them; their vectors are still in the fixture. The
+tooling — the migration, the two prompts, the five gates, the job, the tests —
+is kept, and is not what failed.
+
+### B: the reranker
+
+Over the top N candidates the Phase 4 search returned, `gpt-5-nano` is shown
+the sentence and each candidate's **slug, name, summary and problem statements
+— and nothing else**: no score, no rank, no rating, no like count, no price.
+It grades each 0 to 3; anything graded 0 is dropped; what is left is ordered by
+grade and then by the order the search already chose.
+
+It is the first thing in five phases that can empty a page because nothing
+FITS rather than because nothing is CLOSE, which is the distinction
+`eval/baselines.md` spent two reviews establishing could not be made with a
+cosine threshold. "A recording studio that rents by the hour" really is about
+recording.
+
+**What it may not do, and how each is made impossible rather than discouraged:**
+
+| | |
+| --- | --- |
+| name a tool that was not a candidate | the schema's `slug` is an `enum` of exactly the candidate slugs, so the provider will not emit another; `validateJudgement` refuses one anyway |
+| see a tool a constraint excluded | it is handed the SQL's own result, and the SQL applied the WHERE clause |
+| see the golden set | nothing in `lib/rerank.ts` opens `eval/`; the harness calls the same function with the same arguments as the application |
+| drop a result silently | a missing candidate, a duplicate or a grade outside 0–3 refuses the whole judgement, and the Phase 4 order stands |
+| cost more than it is allowed | one request per judgement, counted against `MAX_RERANK_CALLS_PER_DAY` |
+
+**On any failure the page is the Phase 4 page.** A timeout at 4 s (covering the
+body, not just the headers), a non-2xx, malformed JSON, a schema failure, a
+cached judgement that no longer validates, no key, the daily cap: each is
+`null`, one log line with no sentence in it, and the order we already had.
+`tests/rerank.test.mjs` puts nine kinds of broken transport through it and
+asserts the order comes out unchanged every time.
+
+**The number is the middle of five recordings, not the best**: 0.8515, 0.8585,
+**0.8605**, 0.8620, 0.8713, mean 0.86076. Only the golden set's judgements were
+re-recorded between them, exactly as Phase 4 re-recorded only the restatements,
+so the negatives and the perturbations are identical in all five and the spread
+is the golden set's alone. The range is 0.0198 — wider than Phase 4's 0.0155 —
+and unlike Phase 4 every one of the five would have cleared the gate.
+
+### C: the fit score stays as bands, and /ranking says why
+
+No human-judged pairs exist. `eval/golden.jsonl` was graded by an agent and is
+the TEST set; fitting a calibration on it and then reporting a score against it
+is reporting a number about itself. So:
+
+- **Bands, not a percentage.** Where the reranker ran they are its judgement —
+  3 Strong, 2 Possible, 1 Loose — and where it did not they are what they have
+  been since Phase 3: a location, naming which of a listing's texts the words
+  turned up in. Two different claims, worded differently, with the line above
+  the results saying which is on the page.
+- **The designed fit bar stays out.** `tests/markup.test.mjs` still fails if a
+  `fit` reaches a `ToolCard`.
+- **`/ranking` now has two written paragraphs** where a placeholder sentence
+  used to say the fit score "is not built". They say what the bands mean and
+  what a percentage would require, because somebody reading a ranked list is
+  entitled to know which kind of number they are looking at.
+- **`eval/calibrate.mjs` is the command that fits the curve the day the
+  judgements exist.** Given `eval/judged.jsonl` — `{query, slug, label, judge,
+  judged_at}` — it places each pair by (reranker relevance, Phase 4 rank), fits
+  a logistic regression, and prints the fitted probability beside the observed
+  rate in each cell. It refuses to fit on fewer than 200 pairs, on pairs that
+  are all one label, or on pairs the search never showed.
+  `tests/calibrate.test.mjs` generates data from coefficients it chose and
+  checks the fitter recovers them.
+
+### D: what counts as a good match
+
+`search_events.had_good_match` has held a constant `false` since `0001`. It now
+holds something, and only where something judged: **the reranker ran, and
+graded at least one result that was actually shown at 2 or 3.**
+`docs/product-decisions.md` §17 is the definition and the application writes
+from it and from nothing else.
+
+`0010` adds `search_events.match_judged`, because without it a `false` means
+both "nothing fitted" and "nobody looked" and a dashboard reads the second as
+the first. A CHECK refuses the fourth combination — "not judged but good" is
+not a state the definition can produce — and `log_search_event` grew a sixth
+argument with a default, so every existing five-argument call still works and
+records "nobody looked".
+
+### Known weaknesses, stated rather than hidden
+
+- **A search is now THREE blocking round trips and six statements.** The
+  prefetch, the search, and the rerank cache — and the third could not have
+  ridden on the first, because the cache is keyed on the candidate list and the
+  candidate list does not exist until the search has run. Then, after the
+  response has gone out, `log_search_event`, `touch_query_embedding`,
+  `touch_query_reading` and `touch_query_rerank`. The 150 ms target was set on
+  one round trip in Phase 3 and is now being asked of three, and the gate is
+  still settled on the server at deploy rather than on this laptop.
+- **A first-ever sentence now waits for the reranker after everything else has
+  finished.** The reader and the embedder overlap; the reranker cannot, because
+  it needs the search's output. Measured live on this laptop: a cached sentence
+  answers in 250–350 ms and a fresh one in about 3 s, nearly all of it the
+  judgement. The 4-second timeout is the ceiling on that, and it is the
+  visitor's whole page.
+- **Two of 341 sentences have no recorded judgement** and measure the Phase 4
+  order, because the model missed the 4-second timeout while the fixture was
+  being recorded. At the first pass it was 12; a second `--record-reranks` pass
+  filled the gap, which is legitimate because a timeout is a transport failure
+  rather than an answer — but it does mean the fixture is the better of two
+  attempts at those sentences. At N=50 it was 28 of 341. A run's honesty about
+  this is a printed line — "searches with none recorded" — rather than a gate.
+- **The reranker is not deterministic, and the number is one recording of
+  five.** Same finding as Phase 4's reader, same procedure: record five times,
+  measure each, freeze the one nearest the mean. The spread is in the table
+  above and in `eval/baselines.md`.
+- **recall@10 is the least favourable thing in this result.** Across the five
+  recordings it ran 0.7300 to 0.7800 against Phase 4's 0.7636, so in two of the
+  five the reranker COST recall — it drops results, and a judged tool it grades
+  0 leaves the page. The frozen recording is the top of that range, so the
+  +0.0164 recorded is the most favourable reading of the five and the honest
+  summary is "recall is unchanged to a few hundredths and nDCG is up a tenth".
+- **The near-miss negatives moved a long way, and four still leak.** Held-out
+  near misses went 1 of 10 to 6 of 10 and our own 2 of 15 to 7 of 15. What is
+  left is the shape of what a reranker cannot fix either: "I need a lawyer to
+  actually read the contract before I sign it" still returns two e-signature
+  tools, because signing a contract IS what they do and the person's actual
+  requirement — a human who reads it — is not a thing the catalogue has a word
+  for.
+- **`hadGoodMatch` is a model's opinion, and the dashboard will read it as a
+  measurement.** It is the honest best available — nothing else in the system
+  has read the pair — but Phase 8's "searches that found nothing good" panel
+  should say, on the page, that the judge is `gpt-5-nano` and not a person.
+- **Relevance 1 counts as a result and not as a good match**, which means a page
+  of three Loose results reads as a success to the visitor and a failure to the
+  dashboard. That is deliberate — see §17 — but it is a place where the product
+  and the metric deliberately disagree, and somebody will eventually ask why.
+- **The fixture is now about 2.9 MB** — 867 statement vectors (363 of them for
+  the reverted generated statements), 223 summaries, 562 sentences, 355
+  readings and 329 judgements. It holds only the SHIPPED candidate count's
+  judgements: the N=30 and N=50 recordings were measured, written down and then
+  cleared, because keeping three sets in one file also blurs the per-search cost
+  it is the source of. It is still the thing that lets CI measure the real
+  search with no key — proved by emptying all three caches, unsetting the key,
+  and getting 0.8605 back with zero requests.
+- **`MAX_READER_CALLS_PER_DAY` fell from 1,200 to 640.** The reranker is a
+  third paid call and the dearest per request, and the $5 ceiling did not move,
+  so the three caps are now set together from one number: 320 first-ever
+  searches a day. That is a small product's traffic, and the thing to revisit
+  when there is real traffic is `MAX_MONTHLY_SPEND`, on purpose.
+- **The generated statements are kept but unloaded**, so
+  `db/seed/generated_statements.sql` and 363 fixture entries are dead weight
+  until somebody decides otherwise. Keeping them is what makes the −0.0247
+  reproducible; it is still 363 rows of SQL nobody runs.
 - **Every number here is from this laptop**, against Docker through WSL2. The
   server is the gate, at deploy.
 

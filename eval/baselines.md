@@ -78,6 +78,8 @@ size of the set noted.
 | 2026-09-11 | 5c002ff | 3 | yes | 60 | 0.7364 | 0.7618 | 84.6 | 119.8 | 0 of 60 | 10 of 30 | 10 of 25 | 0 of 240 | **Tool summaries embedded** (`0007`), and the floor re-tuned against a held-out negatives file and 240 perturbations. The summaries are the gain: nDCG 0.7035 → 0.7618, recall 0.6719 → 0.7364, non-English 0.6025 → 0.6516. **The negatives share falls, 26 of 30 → 10 of 30, and that is the honest direction**: the old value was fitted to that file, and on the held-out file — which nobody had tuned against — the old floor and this one both refuse 40%. The relative gate the review asked for was built first and refuses nothing at all; see "Phase 3 amended again" below. |
 | 2026-09-12 | 0ffd091 | 4 | yes | 60 | 0.7719 | 0.7763 | 70.0 | 103.2 | 0 of 60 | 13 of 30 | 11 of 25 | 0 of 240 | **WITHDRAWN — see "Phase 4, withdrawn" below.** Not a baseline. The numbers are real and describe a code path no visitor ran: the harness embedded the model's English restatement and the application embedded the rules residual, so the non-English figure belonged to nobody's search. Kept because deleting it would hide what happened. Originally recorded as: **The sentence, read.** `gpt-5-nano` through the Responses API with a strict schema, merged behind the rules pass, which keeps the last word. **The headline is now the SHIPPED path** — what a visitor gets — rather than the golden set's own constraints; the reference pass on the same run still reads 0.7618, so the instrument did not move. Nearly all the gain is non-English (0.6516 → 0.8254), from embedding the model's English restatement instead of the sentence. Against what a visitor got in Phase 3 (`--plan=rules`, 0.7411) it is +0.0352, and the reader's divergence goes from −0.0183 to **+0.0145**. The model may fill ONE dimension, pricing: flags and interface languages were measured and both made the search worse. A refusal needs two samples to agree, because one in seven called a question about splitting a bill "not software" — `eval/perturb.mjs` caught it. $0.000232 a search. See "Phase 4" below. |
 | 2026-09-12 | 4f30bab | 4 | yes | 60 | 0.7636 | 0.7755 | 65.8 | 110.8 | 0 of 60 | 13 of 30 | 11 of 25 | 0 of 240 | **The sentence, read — re-measured after the review.** Replaces the withdrawn row above, which described a search the application did not run: `lib/reading.ts` computed the text to embed and `app/results/page.tsx` embedded the rules residual, so the non-English figure belonged to nobody's path. One function, `planSearch`, now returns every string a search needs and both callers use it; `tests/parity.test.mjs` holds them to it, and the six non-English golden queries return identical tools in identical order from the running application and from the harness on a cold cache. **This is the MEAN-NEAREST of five live recordings**, not the best: nDCG mean 0.7714, range 0.7620–0.7775; non-English mean 0.7963, range 0.7395–0.8329. The worst of the five would not have cleared the gate, so the claim is "beats Phase 3 by about a hundredth, four times out of five". Non-English 0.6516 → 0.8207; against the reader a visitor had in Phase 3 (`--plan=rules`, 0.7411) it is +0.0344. $0.000246 a search, and the daily caps now cost $4.21 a month at worst. See "Phase 4, re-measured" below. |
+| 2026-09-12 | 48ee798 | 5 | yes | 60 | 0.7800 | 0.7508 | 126.4 | 183.8 | 0 of 60 | 13 of 30 | 11 of 25 | 0 of 240 | **REVERTED — see "Phase 5, deliverable A" below.** Not a baseline: the rows it measures were deleted and the code that wrote them writes nothing today. **363 generated problem statements**, written by `gpt-5-mini` for the 204 published tools carrying fewer than four, each checked against that tool's own name and summary by `gpt-5-nano` before storage. 791 candidates, 48 refused by the mechanical gate, 124 by the verifier, 0 as near-duplicates. nDCG@10 falls 0.7755 → 0.7508 while recall@10 rises 0.7636 → 0.7800: more statements give more tools a way into a result set, so more judged tools turn up somewhere in the top twenty and more unjudged ones turn up above them. Reverting restored 0.7755 to four decimals. The rows are kept in `db/seed/generated_statements.sql` and their vectors in the fixture, so the number reproduces; the tooling is kept and is not what failed. |
+| 2026-09-12 | 67006e5 | 5 | yes | 60 | 0.7800 | 0.8605 | 62.3 | 105.7 | 0 of 60 | 22 of 30 | 20 of 25 | 0 of 240 | **The reranker.** Over the top TWENTY candidates the Phase 4 search returns, `gpt-5-nano` is shown the sentence and each candidate's own slug, name, summary and problem statements — and no score, rank, rating, like count or price — and grades each 0 to 3; 0 is dropped, the rest order by grade and then by the search's own order. **+0.0850 of nDCG**, and the near misses are the headline: held-out near misses 1 of 10 → 6 of 10 and ours 2 of 15 → 8 of 15, which is what the relevance floor could never do because "a recording studio that rents by the hour" really is about recording. Non-English 0.8207 → 0.8877. Twenty was measured against 30 and 50 and wins on the number, the money and the clock. **This is the MIDDLE of five live recordings** — 0.8515, 0.8585, **0.8605**, 0.8620, 0.8713, mean 0.86076 — not the best, and unlike Phase 4 the worst of the five would still have cleared the gate. Recall ran 0.7300–0.7800 across them, so the +0.0164 here is the most favourable reading of the five. $0.000434 a search against a $0.002 ceiling; the three daily caps are re-costed together to $4.05 a month. See "Phase 5, deliverable B" below. |
 
 ### Phase 2, by slice
 
@@ -137,6 +139,151 @@ non-English slice in particular is the one Phase 4 exists to move.
 > Only the first table drives `--baseline`. The parser reads columns by name and
 > only accepts a table whose header carries both `Commit` and `nDCG@10`, so this
 > one is ignored no matter what is filled into it.
+
+## Phase 5, deliverable A: the generated problem statements — REVERTED
+
+`gpt-5-mini` wrote problem statements for the 204 published tools carrying
+fewer than four, and `gpt-5-nano` checked each candidate against that tool's
+own name and summary before it was stored. The job is
+`scripts/generate-statements.mjs`; the two prompts are in `lib/generate.ts` and
+neither contains a word of `eval/golden.jsonl`.
+
+| | count |
+| --- | --- |
+| tools under the ceiling | 204 |
+| statements generated | 791 |
+| refused by the mechanical gate | 48 |
+| refused by the verifier | 124 |
+| refused as a near-duplicate (cosine ≥ 0.92) | 0 |
+| refused by the database | 0 |
+| **stored** | **358** (363 with a three-tool trial run) |
+| generator | 204 calls, 149,578 in / 18,977 out |
+| verifier | 482 calls, 153,191 in / 23,023 out |
+| cost of the whole run | about **$0.09** |
+
+**And it made the search worse**, measured on the shipped path with the
+reranker off, which is the Phase 4 search exactly:
+
+| | before | after | change |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.7755 | **0.7508** | **−0.0247** |
+| recall@10 | 0.7636 | **0.7800** | +0.0164 |
+| non-English nDCG@10 | 0.8207 | 0.8178 | −0.0029 |
+| negatives empty | 13 of 30 | 13 of 30 | — |
+| held-out empty | 11 of 25 | 11 of 25 | — |
+| rows leaked per negative | 4.1 | 4.8 | worse |
+| golden empty / perturbed empty / violations | 0 / 0 / 0 | 0 / 0 / 0 | — |
+
+Recall up and nDCG down is the whole finding, and the two together say what
+happened: more statements give more tools a way into a result set, so more
+judged tools appear somewhere in the top twenty — and more unjudged ones appear
+above them. **A statement that is true about a tool is not a statement that
+should rank it first.** 363 more true sentences across 204 listings made the
+catalogue easier to reach and harder to order.
+
+`docs/build-phases.md`: *"Anything that does not move the number is reverted,
+not kept out of politeness."* The rows were deleted, the number is recorded
+here, and reverting restored 0.7755 to four decimals. The rows themselves are
+in `db/seed/generated_statements.sql`, their vectors are still in the fixture,
+and the header of that file holds the three commands that reproduce the 0.7508.
+
+The tooling is kept and is not what failed. The day the catalogue is real
+rather than seeded — where two hand-written statements per tool is a genuine
+shortage rather than a development convenience — this re-runs in a minute.
+
+## Phase 5, deliverable B: the reranker
+
+### How many candidates to judge
+
+Measured, not chosen. Three full runs of the golden set, both negatives files
+and the 240 perturbations, at three candidate counts, each recording its own
+judgements because the cache is keyed on the candidate SET and a different N is
+a different question:
+
+| N | nDCG@10 | recall@10 | negatives empty | held-out empty | perturbed empty | violations | unjudged | $/search |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **20** | **0.8682** | 0.7611 | 21 of 30 | 21 of 25 | 0 of 240 | 0 | 9 of 341 | 0.000433 |
+| 30 | 0.8579 | 0.7633 | 22 of 30 | 21 of 25 | 0 of 240 | 0 | 7 of 341 | 0.000463 |
+| 50 | 0.8477 | 0.7519 | 22 of 30 | 21 of 25 | 0 of 240 | 0 | 28 of 341 | 0.000487 |
+
+**Twenty ships.** It wins on the number, on the money and on the clock, and it
+is the only one of the three that is not also worse at answering: 30 and 50
+empty one more of our own negatives and neither empties one more of the
+held-out file, which is the number that says whether anything generalises.
+
+`docs/build-phases.md` names fifty, and fifty is measurably the worst of the
+three. The reason is legible in the run rather than mysterious: a longer
+candidate list is a longer prompt, and at 50 the four-second timeout was missed
+on **28 of 341** sentences against 9 at 20 — and every missed one measures the
+Phase 4 order, so the pass is part Phase 5 and part Phase 4 in a way that gets
+worse as N grows. The `$/search` column is the whole pipeline (reader +
+embedding + reranker) from the providers' own usage fields.
+
+*The `$/search` figures in this table are averaged over a fixture that held all
+three recordings at once, so they are a little blurred between the three rows.
+The shipped figure below is measured on a fixture holding the shipped N alone —
+the 20, 30 and 50 judgements were cleared afterwards, because three sets in one
+file also blur the cost the file is the source of.*
+
+### The spread, and why the number is the middle one
+
+Same finding as Phase 4's reader and the same procedure: `gpt-5-nano` has no
+temperature control, so one recording of it is not a measurement. Record five
+times, measure each, freeze the one nearest the MEAN — not the best.
+
+Only the GOLDEN SET's judgements were re-recorded between them. The negatives,
+the held-out file and the 240 perturbations were recorded once and are identical
+in all five, which is why those columns do not move: the spread below is the
+golden set's alone, exactly as Phase 4's was the restatement's alone.
+
+| recording | nDCG@10 | recall@10 | negatives | held-out | perturbed empty |
+| --------- | ------- | --------- | --------- | -------- | --------------- |
+| 1 | 0.8515 | 0.7300 | 22 of 30 | 20 of 25 | 0 of 240 |
+| 2 | 0.8585 | 0.7494 | 22 of 30 | 20 of 25 | 0 of 240 |
+| **3 — frozen** | **0.8605** | **0.7800** | **22 of 30** | **20 of 25** | **0 of 240** |
+| 4 | 0.8620 | 0.7500 | 22 of 30 | 20 of 25 | 0 of 240 |
+| 5 | 0.8713 | 0.7611 | 22 of 30 | 20 of 25 | 0 of 240 |
+
+Mean 0.86076; recording 3 is 0.00026 from it and recording 4 is 0.00124, so 3 is
+the one that ships. The range is 0.0198 of nDCG — **wider than Phase 4's
+0.0155**, and every one of the five beats the Phase 4 row by more than a
+twentieth, which is the honest shape of this result: unlike Phase 4, the worst
+recording would still have cleared the gate comfortably.
+
+### What the reranker cost the recall
+
+| | Phase 4 | Phase 5 | change |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.7755 | **0.8605** | **+0.0850** |
+| recall@10 | 0.7636 | 0.7800 | +0.0164 |
+| non-English nDCG@10 | 0.8207 | 0.8877 | +0.0670 |
+| constrained nDCG@10 | 0.7895 | 0.8275 | +0.0380 |
+| negatives empty | 13 of 30 | **22 of 30** | far 11→14, near **2→8** |
+| held-out empty | 11 of 25 | **20 of 25** | far 7→9, near **1→6**, non-English 3→5 |
+| golden empty | 0 of 60 | 0 of 60 | — |
+| perturbed empty | 0 of 240 | 0 of 240 | — |
+| constraint violations | 0 | 0 | — |
+| cost per search | $0.000246 | $0.000434 | ceiling $0.002 |
+
+**The near misses are the headline.** They are what Phase 3's relevance floor
+could not touch and what Phase 4's reader barely moved: held-out near misses
+went 1 of 10 to 6 of 10 and our own 2 of 15 to 8 of 15. A cosine threshold
+cannot separate "a recording studio that rents by the hour" from recording
+software, because the sentence really is about recording. A reading of the pair
+can.
+
+Recall went UP here, which is worth stating because it need not have: the
+reranker DROPS results, and a judged tool it grades 0 disappears from the page
+and from recall@10. Across the five recordings recall ran 0.7300 to 0.7800 —
+below the Phase 4 row in two of them. The frozen recording is the top of that
+range, so the +0.0164 is the most favourable recall reading of the five, and the
+honest summary is "recall is unchanged to a few hundredths and nDCG is up a
+tenth".
+
+18 pages were emptied by the judgement and 3,666 results were dropped as "not
+for this" across 341 searches. Neither number is a quality claim on its own; put
+beside 0 golden empties and 0 perturbed empties, they are what a floor that
+finally works looks like.
 
 ## Targets each later phase has to clear
 
