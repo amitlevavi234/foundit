@@ -742,3 +742,132 @@ test('the reduced-motion block and the canvas it came from say the same five thi
     assert.match(artboard, rule, 'the artboards were not regenerated after RM changed');
   }
 });
+
+/* ===========================================================================
+ * Phase 7: the ten new screens
+ *
+ * The rules above already cover these files — SOURCES walks app/ recursively,
+ * so a new page is in scope for the fetch allow-list, the no-target rule, the
+ * no-Apple rule and the rest the moment it exists. What this section adds is
+ * the ONE thing a recursive walk cannot check: that each page the phase
+ * promised is actually there, with the rules that particular screen turns on.
+ *
+ * The list is explicit on purpose. tests/links.test.mjs proves every link
+ * resolves to a route; it cannot prove a route that should exist does.
+ * ======================================================================== */
+
+const PHASE_7_PAGES = [
+  'app/submit/page.tsx',
+  'app/submit/url/page.tsx',
+  'app/submit/details/page.tsx',
+  'app/submit/problems/page.tsx',
+  'app/submit/constraints/page.tsx',
+  'app/submit/preview/page.tsx',
+  'app/submit/done/page.tsx',
+  'app/claim/page.tsx',
+  'app/maker/page.tsx',
+  'app/maker/[slug]/page.tsx',
+  'app/maker/[slug]/edit/page.tsx',
+];
+
+test('every screen this phase promised exists, and none of them is indexable', () => {
+  for (const path of PHASE_7_PAGES) {
+    const source = read(join(ROOT, path));
+    assert.ok(source.length > 0, `${path} is missing`);
+    // Every one of them is either a form carrying what somebody typed in its
+    // query string or a per-person dashboard. Neither belongs in a search
+    // index, and the four unwritten pages set the same flag for the same
+    // reason.
+    assert.match(
+      source,
+      /robots:\s*\{[^}]*\bindex:\s*false/,
+      `${path} must set robots: { index: false } — it is a form or a private page`,
+    );
+    // Reading the session makes the page per-person, so it cannot be a static
+    // file served to everybody.
+    assert.match(source, /export const dynamic = 'force-dynamic'/, `${path} must be dynamic`);
+  }
+});
+
+test('the submit flow never fetches what somebody typed, and says so', () => {
+  // The fetch allow-list above already proves the first half over every file.
+  // This is the second half: the two screens that PROMISE not to, because the
+  // artboards draw a "Read the page" button and a favicon slot, have to be
+  // the ones that say it out loud rather than quietly doing nothing.
+  const url = read(join(ROOT, 'app/submit/url/page.tsx'));
+  assert.match(url, /we do not open it|never opened by us|do not read the page/i,
+    'app/submit/url/page.tsx must say that the address is not fetched');
+
+  for (const path of ['app/submit/url/page.tsx', 'app/claim/page.tsx', 'lib/submit.ts']) {
+    const source = read(join(ROOT, path));
+    assert.doesNotMatch(source, /(^|[^.\w])fetch\s*\(/, `${path} must not fetch`);
+    // No favicon, no logo download, no image proxy — the neighbouring version
+    // of the same rule, which components/SiteHeader.tsx already writes down
+    // about a Google avatar.
+    assert.doesNotMatch(
+      source,
+      /favicon.*\$\{|google\.com\/s2\/favicons/i,
+      `${path} must not build an icon URL`,
+    );
+  }
+});
+
+test('the required tick is disabled in the HTML and works with no JavaScript', () => {
+  const tick = read(join(ROOT, 'components/RequiredTick.tsx'));
+
+  // Disabled, not styled. docs/product-decisions.md §3 and the Phase 7 gate.
+  assert.match(tick, /disabled=\{!ticked\}/, 'Continue must carry the disabled attribute');
+  // ...which means it starts disabled on the server-rendered HTML, because the
+  // initial state is false.
+  assert.match(tick, /useState\(false\)/, 'and must start disabled');
+
+  // And the three layers that stop that from being a dead end.
+  assert.match(tick, /required/, 'the checkbox is required, so no-JS browsers refuse the form');
+  assert.match(tick, /<noscript>/, 'and a no-JS Continue is drawn');
+
+  // The server refuses it too, with the tick's own sentence.
+  const actions = read(join(ROOT, 'app/submit/actions.ts'));
+  assert.match(
+    actions,
+    /formData\.get\('made'\)[^;]*!==\s*'yes'/,
+    'the action must refuse a POST without the tick',
+  );
+  assert.match(actions, /problem=tick/, 'and send them back to the tick');
+});
+
+test('no screen decides who may edit a listing', () => {
+  // The rule lib/accounts.ts states and this phase inherits: there is no
+  // `if (tool.ownerId === me)` anywhere, because that check is the database's
+  // and an application that makes it will eventually make it wrong.
+  for (const path of [...PHASE_7_PAGES, 'lib/maker.ts', 'lib/tool-sql.ts', 'app/submit/actions.ts']) {
+    const source = read(join(ROOT, path));
+    assert.doesNotMatch(
+      source,
+      /\bowner(?:Id|_id)\s*===\s*(?!true|false)/,
+      `${path} compares an owner id; public.tool_is_mine is what decides`,
+    );
+    assert.doesNotMatch(
+      source,
+      /\bsubmitted(?:By|_by)\s*===\s*(?!true|false)/,
+      `${path} compares a submitter id; public.tool_is_mine is what decides`,
+    );
+  }
+});
+
+test('the maker dashboard never decides the query-text threshold itself', () => {
+  // The five-event rule is public.maker_query_threshold() and the CASE inside
+  // public.maker_search_demand. If this page ever computed it, a future edit
+  // could reveal a sentence one person typed once — which is the one thing the
+  // panel must not do.
+  const page = read(join(ROOT, 'app/maker/[slug]/page.tsx'));
+  assert.doesNotMatch(page, /searches\s*>=?\s*\d/, 'the page must not compare a search count to a number');
+  assert.match(page, /row\.shown/, 'it draws the answer the database gave it');
+
+  const sql = read(join(ROOT, 'lib/tool-sql.ts'));
+  assert.match(sql, /public\.maker_search_demand/, 'and the demand comes from that function');
+  assert.doesNotMatch(
+    sql,
+    /from public\.search_event_tools[\s\S]{0,400}group by/,
+    'lib must not aggregate the join table itself; the threshold lives in the function',
+  );
+});

@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import { signOut } from '@/app/sign-in/actions';
 import { currentViewer } from '@/lib/accounts';
 
-import { ButtonLink, GhostButton } from './Button';
+import { ButtonLink } from './Button';
 import { Icon } from './Icon';
 import { Wordmark } from './Logo';
 
@@ -12,13 +12,16 @@ import { Wordmark } from './Logo';
  * The header, from `header()` in design/canvas/build.mjs. 84px tall, the
  * wordmark at 30px on the left, four targets on the right.
  *
- * THREE OF THE FOUR WERE DISABLED UNTIL THIS PHASE and two of them are now
- * real. `Saved` and `Sign in` have screens behind them; `Add a tool` is Phase 7
- * and keeps the drawn-but-disabled treatment with its "Soon" badge, which is
- * what docs/product-decisions.md §14 settled: a control whose screen is a later
- * phase stays drawn and is disabled in place, because taking it out would hide
- * a plan that is real and a control that cannot be clicked beats one that can
- * be clicked and breaks.
+ * ALL FOUR ARE REAL NOW. Three of them were disabled in place until Phase 6,
+ * and `Add a tool` was the last one left — it kept the "Soon" badge
+ * docs/product-decisions.md §14 specified for a control whose screen is a later
+ * phase. Phase 7 built the screen, so the badge is gone and the control is a
+ * link, and the `NotYet` helper that drew it is gone with it — a dead
+ * component is not documentation. §14's rule still stands and the shape it
+ * asks for is in this file's history: a `<button disabled>` rather than a
+ * `<span>`, so it is announced as a disabled control and left out of the tab
+ * order, with a `Soon` badge for sighted readers and an `sr-only` sentence for
+ * everybody else.
  *
  * SIGNED IN, THE RIGHT-HAND CONTROL BECOMES THE AVATAR MENU the artboards draw
  * — and it is a native `<details>`, so it opens from the keyboard, announces
@@ -58,7 +61,9 @@ export async function SiteHeader({ active, anonymous = false }: SiteHeaderProps)
           Browse problems
         </NavLink>
 
-        <NotYet note="Adding a tool arrives with the maker dashboard.">Add a tool</NotYet>
+        <NavLink href="/submit" active={active === 'add'}>
+          Add a tool
+        </NavLink>
 
         <NavLink href="/saved" active={active === 'saved'}>
           <Icon name="bookmark" size={18} />
@@ -153,27 +158,5 @@ function AccountMenu({ handle, displayName }: { handle: string; displayName: str
         </form>
       </div>
     </details>
-  );
-}
-
-/**
- * A header target whose screen has not been built yet.
- *
- * A `<button disabled>` and not a `<span>`: it is announced as a disabled
- * control rather than as stray text, it is left out of the tab order instead
- * of being a focus stop that does nothing, and it picks up `.ghost[disabled]`,
- * which the design already defines. The badge is the sighted reader's version
- * of the sentence and the `sr-only` line is everybody else's, so exactly one
- * of the two is read out.
- */
-function NotYet({ note, children }: { note: string; children: ReactNode }) {
-  return (
-    <GhostButton disabled>
-      {children}
-      <span className="soon" aria-hidden="true">
-        Soon
-      </span>
-      <span className="sr-only">— not built yet. {note}</span>
-    </GhostButton>
   );
 }

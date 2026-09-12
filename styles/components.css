@@ -1922,3 +1922,299 @@ dl.facts dd {
   outline: 3px solid var(--c-violet);
   outline-offset: 2px;
 }
+
+/* ===========================================================================
+ * Phase 7: adding a tool
+ *
+ * The classes the ten submit, claim, edit and dashboard artboards use that no
+ * earlier screen needed. The artboard boilerplate defines `.step` and a sticky
+ * save bar; everything else on those screens is `.field`, `.pill`, `.card`,
+ * `.slab`, `.panel`, `.check` and `.tile`, which already live above.
+ * ======================================================================== */
+
+/* --- the strip under the header: Back, the rail, the autosave note -------- */
+.submitstrip {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 0 28px;
+}
+
+.submitstrip-back {
+  justify-self: start;
+}
+
+.submitstrip-saved {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--c-violet);
+  font-size: var(--t-micro);
+  font-weight: var(--fw-medium);
+  min-height: 20px;
+}
+
+/* --- the five-node rail --------------------------------------------------- */
+.step {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--t-micro);
+  color: var(--c-faint);
+}
+
+/* The connector. Solid ink before the current node, quiet after it, which is
+   what makes the rail readable without colour alone. */
+.step-node + .step-node::before {
+  content: '';
+  display: block;
+  width: 34px;
+  height: 2px;
+  margin: 0 10px;
+  background: var(--c-rule);
+}
+
+.step-node.done + .step-node::before,
+.step-node.now + .step-node::before {
+  background: var(--c-ink);
+}
+
+.step-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: var(--border);
+  border-radius: var(--r-pill);
+  background: var(--c-surface);
+  font-size: var(--t-micro-sm);
+  font-weight: var(--fw-heading);
+  font-variant-numeric: tabular-nums;
+}
+
+.step-node.done .step-dot {
+  background: var(--c-lime);
+  color: var(--c-ink);
+}
+
+.step-node.now .step-dot {
+  background: var(--c-coral);
+  color: var(--c-on-fill);
+  box-shadow: var(--sh-pill);
+}
+
+.step-node.done,
+.step-node.now {
+  color: var(--c-ink);
+  font-weight: var(--fw-medium);
+}
+
+.submit-eyebrow {
+  margin: 0 0 10px;
+}
+
+/* --- the footer row on every numbered step -------------------------------- */
+.submitfoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 36px;
+  padding-top: 24px;
+  border-top: var(--border-soft);
+  flex-wrap: wrap;
+}
+
+/* --- a numbered problem-statement row ------------------------------------- */
+.statementrow {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.statementrow-n {
+  font-family: var(--font-display);
+  font-size: var(--t-display-sm);
+  font-weight: var(--fw-display);
+  color: var(--c-faint);
+  line-height: 1.2;
+}
+
+/* --- the ownership band on EditListing ------------------------------------ */
+.ownerband {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 0;
+  margin-bottom: 28px;
+  border-top: var(--border);
+  border-bottom: var(--border);
+  background: var(--c-tint);
+  font-size: var(--t-meta);
+  font-weight: var(--fw-medium);
+}
+
+.ownerband > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 20px;
+}
+
+.ownerband a {
+  padding: 0 20px;
+}
+
+/* --- the four metric cards on the maker dashboard ------------------------- */
+.metricgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 18px;
+  margin: 28px 0 40px;
+}
+
+.metric {
+  border: var(--border);
+  border-radius: var(--r-xl);
+  background: var(--c-surface);
+  padding: 18px 20px 20px;
+  box-shadow: var(--sh-card);
+}
+
+.metric-n {
+  display: block;
+  font-family: var(--font-display);
+  font-size: var(--t-display-lg);
+  font-weight: var(--fw-display);
+  letter-spacing: var(--ls-display);
+  line-height: var(--lh-display);
+}
+
+.metric-label {
+  display: block;
+  margin-top: 10px;
+  font-weight: var(--fw-heading);
+  font-size: var(--t-body-sm);
+}
+
+.metric-sub {
+  display: block;
+  margin-top: 4px;
+  color: var(--c-muted);
+  font-size: var(--t-micro);
+}
+
+/* --- one row of the "what people searched to find you" table ------------- */
+.demandrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px 18px;
+  padding: 14px 0;
+  border-bottom: var(--border-quiet);
+}
+
+.demandrow:last-child {
+  border-bottom: 0;
+}
+
+.demandrow-q {
+  font-family: var(--font-display);
+  font-size: var(--t-body-lg);
+  font-weight: var(--fw-semibold);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.demandrow-q.withheld {
+  font-family: var(--font-body);
+  font-size: var(--t-body-sm);
+  font-weight: var(--fw-regular, 400);
+  color: var(--c-muted);
+}
+
+.demandrow-n {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-micro);
+  color: var(--c-muted);
+  white-space: nowrap;
+}
+
+.demandrow-bar {
+  grid-column: 1 / -1;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--c-track);
+  overflow: hidden;
+}
+
+.demandrow-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--c-violet);
+}
+
+.demandrow-bar.weak > span {
+  background: var(--c-faint);
+}
+
+/* --- the sticky save bar on EditListing ----------------------------------- */
+.savebar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 44px;
+  padding: 16px 0;
+  background: var(--c-surface);
+  border-top: var(--border);
+}
+
+/* --- a field that was refused, and the sentence saying why ---------------- */
+.field.wrong,
+.field.area.wrong {
+  border-color: var(--c-red);
+}
+
+.wrongnote {
+  display: block;
+  margin: 8px 0 0;
+  color: var(--c-red);
+  font-size: var(--t-micro);
+  font-weight: var(--fw-medium);
+}
+
+/* --- the submit and maker page shells ------------------------------------- */
+.submitpage {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 4px 24px 96px;
+}
+
+.submitpage.wide {
+  max-width: 1180px;
+}
+
+.makerpage {
+  padding: 20px 24px 96px;
+}
