@@ -56,7 +56,8 @@ export const LOG_SEARCH_EVENT_SQL = `
     p_result_count   => $2::int,
     p_top_score      => $3::real,
     p_had_good_match => $4::boolean,
-    p_latency_ms     => $5::int
+    p_latency_ms     => $5::int,
+    p_match_judged   => $6::boolean
   )`;
 
 /** The database's own ceiling, and the application's. All three layers agree. */
@@ -170,8 +171,13 @@ export function logSearchEventParams(event: SearchEvent): unknown[] {
     event.query,
     event.resultCount,
     event.topScore ?? null,
-    event.hadGoodMatch ?? false,
+    // "Good" is only meaningful where something judged it. The database says
+    // the same thing again — `had_good_match and match_judged` on the way in,
+    // and a CHECK that refuses the pair — but a caller that gets this wrong
+    // should not be relying on being caught.
+    (event.hadGoodMatch ?? false) && (event.matchJudged ?? false),
     event.latencyMs ?? null,
+    event.matchJudged ?? false,
   ];
 }
 

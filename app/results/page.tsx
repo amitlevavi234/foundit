@@ -51,6 +51,7 @@ import {
   RERANK_TOP_N,
   applyRerank,
   candidatesHash,
+  hadGoodMatch,
   relevanceBand,
   relevanceOf,
   rerank,
@@ -608,23 +609,28 @@ async function Answer({
     // and `public.search_events` has no user column.
     after(() => {
       logSearchEvent({
-        // `had_good_match` is deliberately not passed — still, and for one more
-        // commit. The reranker above now produces the judgement the definition
-        // will be written from, but the definition is not written yet, and a
-        // column filled from something nobody has defined is the thing this
-        // comment has been protecting since Phase 2.
+        // `had_good_match` IS passed now, and it is written from one definition
+        // and nothing else: docs/product-decisions.md §17 — the reranker ran,
+        // and judged at least one result that is actually on this page at
+        // relevance 2 or 3 ("fits" or "clearly fits").
         //
-        // db/migrations/0002_search.sql calls it a quality metric and says a
-        // caller that omits it under-reports success, "which is the safe
-        // direction for a quality metric to fail in". Passing
-        // `results.length > 0` redefined it as "the page was not empty", which
-        // is `result_count > 0` under a name that promises more, and that would
-        // empty the one panel on the operator dashboard that is worth having
-        // (docs/product-decisions.md §10) by filling it with successes nobody
-        // measured.
+        // Phases 2 to 4 passed nothing, and the comment that used to stand here
+        // said why at length: the only value available was `results.length > 0`,
+        // which is `result_count > 0` under a name that promises more, and it
+        // would have filled the operator dashboard's most valuable panel with
+        // successes nobody measured.
+        //
+        // What changed is not that we became more confident. It is that
+        // something now judges. Where it did not run — no key, a timeout, the
+        // daily cap, a fallback — `matchJudged` is false and `hadGoodMatch` is
+        // false WITH IT, which the schema reads as "nobody looked" rather than
+        // as "nothing fitted". The two must be read together and the database
+        // refuses the pair the other way round.
         query,
         resultCount: results.length,
         topScore: top ? top.score : null,
+        hadGoodMatch: hadGoodMatch(relevance, results.map((r) => r.slug)),
+        matchJudged: judged,
         latencyMs,
       });
     });

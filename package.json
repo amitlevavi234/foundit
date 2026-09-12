@@ -18,6 +18,7 @@
     "eval:json": "node eval/run.mjs --json",
     "eval:baseline": "node eval/run.mjs --baseline --json",
     "eval:read-query": "node eval/run.mjs --read-query",
+    "calibrate": "node eval/calibrate.mjs",
     "eval:no-rerank": "node eval/run.mjs --no-rerank",
     "test:unit": "node --test tests/*.test.mjs",
     "test": "node eval/scoring.test.mjs && node --test tests/*.test.mjs && node eval/run.mjs --baseline",

@@ -135,6 +135,42 @@ it is empty, and it is still too often not empty when it should be. The full
 frontier is in `eval/baselines.md`; a calibrated score in Phase 5 is what fixes
 it properly.
 
+**Amended 12 September 2026, by Phase 5.** Two changes, and one thing that
+deliberately did not change.
+
+*The band on a result now comes from a reading of that result, where there was
+one.* Phase 5 added a reranker: over the top candidates the search returned,
+`gpt-5-nano` is shown the sentence and each candidate's own name, summary and
+problem statements — and nothing else, not its price, its rating, its like
+count or the rank the search gave it — and grades each one 0 to 3. **Where that
+ran, the band is the grade**: 3 is *Strong*, 2 is *Possible*, 1 is *Loose*, and
+0 is not shown at all. **Where it did not run** — no key, a timeout, a
+malformed answer, the daily cap spent — the band is what it has been since
+Phase 3: a *location*, naming which of a listing's texts the words turned up
+in. The two are different claims and are worded differently, and the line above
+the results says which of the two the page is showing. That line is also the
+first in five phases allowed to use the word *fits*, because for the first time
+something has read the pair and formed a view.
+
+*A page can now be empty because nothing fitted, rather than because nothing was
+close.* That is the state the relevance floor could never reach, and the reason
+is written up in `eval/baselines.md`: "a recording studio that rents by the
+hour" really is about recording, so no cosine threshold separates it from the
+recording software without emptying real questions too. A reading does. The copy
+on that page says which of the two happened.
+
+*What did not change is the percentage: there still is not one.* The designed
+fit bar stays out. A calibrated number means something specific — of the results
+shown at 80%, about eighty in a hundred are what the person wanted — and it can
+only be fitted against pairs that PEOPLE have judged. `eval/golden.jsonl` was
+graded by an agent and is the test set; fitting a score on it and then reporting
+a score against it is reporting a number about itself. So the bands stay until
+there are at least 200 judged pairs in `eval/judged.jsonl`, each with the name
+of whoever judged it and the date. `eval/calibrate.mjs` is the command that
+fits the curve the day they exist, and it refuses to fit on fewer. `/ranking`
+says all of this to a visitor in two paragraphs, because somebody reading a
+ranked list is entitled to know which kind of number they are looking at.
+
 ## 7. Homepage
 
 A single chat-style input, example prompts in several languages, and a "top tools"
@@ -438,3 +474,61 @@ provider's dashboard would undo that at the far end.
 §15 still stands and now covers two calls rather than one: **the privacy notice
 must name the provider and the transfer before a real person uses Foundit.**
 What leaves the server is the same sentence it was; it now leaves twice.
+
+## 17. What counts as a good match (added 12 September 2026)
+
+`search_events.had_good_match` has existed since `0001_init.sql` and has held a
+constant `false` for every row ever written, because nothing in Phases 2 to 4
+could honestly fill it. The application said so in a comment rather than
+guessing: the only value it could have supplied was `result_count > 0`, which
+is a different question wearing this column's name. §10 calls the panel it
+feeds — *searches that returned nothing good* — the most valuable on the
+operator dashboard, and a panel fed by a guess is worse than an empty one,
+because a dashboard reads it as measurement.
+
+**The definition, and it is the whole of it:**
+
+> A search had a good match when **the reranker ran on it and judged at least
+> one result that the person was actually shown at relevance 2 or 3** — "fits"
+> or "clearly fits" on the four-point scale in `lib/rerank.ts`.
+
+Four things follow from it, and each is a decision rather than a detail.
+
+**It requires a reading, not a score.** Not a similarity, not a rank, not a
+count of results. The only thing in this system that has looked at a
+(sentence, tool) pair and formed a view is the reranker, so it is the only
+thing entitled to answer this question. Where it did not run, the question was
+not asked.
+
+**So there are three states, not two, and the schema carries both.**
+`0010_generated_statements.sql` adds `search_events.match_judged`:
+
+| `match_judged` | `had_good_match` | What it means |
+| --- | --- | --- |
+| `false` | `false` | Nobody looked. No key, a timeout, a malformed answer, the daily cap, or a page with nothing on it to judge |
+| `true` | `false` | It was read, and nothing on the page fitted |
+| `true` | `true` | It was read, and something fitted |
+
+The fourth combination is refused by a CHECK constraint, because "not judged
+but good" is not a state this definition can produce. Without
+`match_judged`, a `false` would mean both "nothing fitted" and "nobody looked",
+and the dashboard would read the second as the first — which is the defect the
+column's constant `false` has been protecting the panel from for three phases.
+
+**Relevance 1 is not a good match.** *Loose* means "in the right area rather
+than an answer to it". A search that returned three Loose results and nothing
+better is a search that did not answer the question, and the panel that lists
+those searches is the list of things the catalogue cannot serve yet. Counting
+them as successes would empty the panel, which is precisely the failure the
+column has been left alone to avoid.
+
+**It is about what was SHOWN, not about what was judged.** A result graded 3
+that never reached the page — cut by the twelve-row limit, or removed by a
+category narrowing — did not help the person who searched. `hadGoodMatch()`
+takes the slugs on the page and no others.
+
+**The privacy line in §10 is unaffected.** `search_events` still has no user
+column, no session column and no foreign key to anything that has one, and
+`log_search_event` still takes no identity and returns no row id.
+`match_judged` is a boolean about a search, and there is nothing in this row
+that could ever say whose.

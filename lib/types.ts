@@ -252,14 +252,27 @@ export interface SearchEvent {
   resultCount: number;
   topScore?: number | null;
   /**
-   * Whether the answer was any good. A quality judgement, and nothing in
-   * Phase 3 makes one: `result_count > 0` is a different column, and passing
-   * it here turns the operator dashboard's most useful panel — searches that
-   * returned nothing good — into a list of four empty searches. Leave it unset
-   * until Phase 5 has something judged to set it from; the column defaults to
-   * false, and under-reporting is the safe direction (0002_search.sql).
+   * Whether the answer was any good.
+   *
+   * Phases 2 to 4 deliberately left this unset, because the only value they
+   * could honestly supply was `result_count > 0` — a different question wearing
+   * this column's name, and one that would have filled the operator dashboard's
+   * most useful panel with successes nobody measured.
+   *
+   * Phase 5 defines the word (docs/product-decisions.md §17): the reranker ran,
+   * and judged at least one SHOWN result at relevance 2 or 3. It is written
+   * from that and from nothing else, and only ever together with
+   * `matchJudged` — the database refuses the pair the other way round.
    */
   hadGoodMatch?: boolean;
+  /**
+   * Whether the reranker ran at all on this search.
+   *
+   * The column that tells an unjudged search apart from a judged "no". Without
+   * it, `had_good_match = false` means both "nothing fitted" and "nobody
+   * looked", and a dashboard reads the second as the first.
+   */
+  matchJudged?: boolean;
   latencyMs?: number | null;
 }
 

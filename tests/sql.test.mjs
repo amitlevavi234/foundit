@@ -148,12 +148,37 @@ test('logging a search is one statement and carries nothing identifying', async 
     resultCount: 3,
     topScore: 0.036,
     hadGoodMatch: true,
+    matchJudged: true,
     latencyMs: 12,
   });
   assert.equal(exec.calls.length, 1);
   assert.equal(exec.calls[0].text, LOG_SEARCH_EVENT_SQL);
-  assert.equal(exec.calls[0].values.length, 5, 'five arguments, and there is no sixth to add');
-  assert.deepEqual(exec.calls[0].values, ['split expenses', 3, 0.036, true, 12]);
+  // SIX since 0010, and the sixth is `match_judged`. The count is asserted so
+  // that a seventh has to be argued for here — the thing this test is really
+  // guarding is the one below it, that none of them can be a person.
+  assert.equal(exec.calls[0].values.length, 6, 'six arguments, and there is no seventh to add');
+  assert.deepEqual(exec.calls[0].values, ['split expenses', 3, 0.036, true, 12, true]);
+});
+
+test('a good match is only recorded where something judged it', () => {
+  // docs/product-decisions.md §17. "Good" is defined in terms of the reranker's
+  // judgement, so a caller that claims one without saying the reranker ran has
+  // misread the definition — and the safe reading of that pair is the one that
+  // claims less. The database refuses it outright with a CHECK; this makes the
+  // application send the honest row rather than relying on being caught.
+  assert.deepEqual(
+    logSearchEventParams({ query: 'q', resultCount: 3, hadGoodMatch: true, matchJudged: false }),
+    ['q', 3, null, false, null, false],
+  );
+  assert.deepEqual(
+    logSearchEventParams({ query: 'q', resultCount: 3, hadGoodMatch: true, matchJudged: true }),
+    ['q', 3, null, true, null, true],
+  );
+  // Judged, and nothing fitted — the state that is worth having a column for.
+  assert.deepEqual(
+    logSearchEventParams({ query: 'q', resultCount: 0, hadGoodMatch: false, matchJudged: true }),
+    ['q', 0, null, false, null, true],
+  );
 });
 
 test('log_search_event has no parameter that could carry a person', () => {
@@ -168,5 +193,8 @@ test('log_search_event has no parameter that could carry a person', () => {
 });
 
 test('an unmeasured latency stays unknown rather than becoming zero', () => {
-  assert.deepEqual(logSearchEventParams({ query: 'q', resultCount: 0 }), ['q', 0, null, false, null]);
+  assert.deepEqual(
+    logSearchEventParams({ query: 'q', resultCount: 0 }),
+    ['q', 0, null, false, null, false],
+  );
 });
