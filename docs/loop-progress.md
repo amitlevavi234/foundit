@@ -1415,6 +1415,13 @@ all of it.
 - **Sessions are 30 days absolute with a 7-day rolling refresh, and there is no
   "sign out everywhere".** `research/09` §7 asks for one and it is one
   statement; it needs a screen, and Settings did not get one this phase.
+- **An admin can read a private collection.** `collections_read` has carried
+  `or auth.is_admin()` since `0001`, and this phase kept it rather than
+  quietly tightening it, because `0003` made the same call about likes for the
+  same reason (`docs/product-decisions.md` §10 lists "likes given" as operator
+  data). It is worth somebody deciding on purpose: a private saved list is the
+  same category of sensitive as a like list, and §10's line is that people are
+  visible through what they did **in public**.
 
 ## Tried and rejected
 
