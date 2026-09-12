@@ -2,7 +2,7 @@
 
 Read at the start of every tick, updated before the end of it.
 
-**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended twice — by the owner's review (a relevance floor, calmer cards, page speed) and by an adversarial review of that floor, which it did not pass (summary vectors, a column-level revoke, and a floor that is honest about refusing only 40% of what it should); 4 built and measured; **5 built and measured — the reranker ships, the generated statements were measured and reverted, the fit score stays as bands with the reason written down — awaiting its adversarial review**; all awaiting Amit's sign-off
+**Current phase:** 0b — the machine (part done); 2, 2-UI and 3 built, reviewed and fixed; Phase 3 then amended twice — by the owner's review (a relevance floor, calmer cards, page speed) and by an adversarial review of that floor, which it did not pass (summary vectors, a column-level revoke, and a floor that is honest about refusing only 40% of what it should); 4 built and measured; **5 built and measured — the reranker ships, the generated statements were measured and reverted, the fit score stays as bands with the reason written down — reviewed and fixed**; **6 built, reviewed, and the review's findings closed: an administrator's removal is durable, the writable columns on a profile and a collection are named rather than assumed, an administrator no longer reads a private saved list, the sign-in code is hashed under a key, and the development log switch means log**; all awaiting Amit's sign-off
 **Server:** `foundit-prod`, Hetzner CX23, Falkenstein, `167.233.217.138`, Ubuntu 24.04.4
 
 ## Phase 0b — the machine
@@ -1289,7 +1289,7 @@ fixture disagree.
   times over. Saying 120 honestly is better than saying 320 from a model that
   was wrong.
 
-## Phase 6 — accounts — **built, awaiting its adversarial review**
+## Phase 6 — accounts — **built, reviewed, and the review's findings closed**
 
 Better Auth 1.7.4 inside the Next.js process against plain PostgreSQL, database
 sessions, Google and a 6-digit emailed code. Two migrations, two new SQL
@@ -1317,9 +1317,10 @@ doing the thing rather than by reading the schema.
 | A tool's owner cannot touch a review of their listing | `db/test/accounts_test.sql` §5 — edit, re-rate, remove, hard-delete, and record a removal reason: five refusals as `dev_maker`, who maintains Receiptly |
 | An admin removes but does not edit | §6 — an edit refused, an edit wearing a removal's clothes refused, a removal with no reason refused, a reason in somebody else's name refused, then the real thing, with the body byte-identical afterwards |
 | A shared link is the whole permission | §4 — no token, wrong token and revoked token all see nothing; the right one sees the collection and its items, signed out |
-| Deletion leaves nothing | before/after across 12 tables; `search_events` unchanged at 8 rows because it never held the id |
-| The 6th code is refused | `tests/rate-limit.test.mjs` with a controlled clock, and live: five codes, then "That is enough codes for now. Try again in about 10 minutes." |
-| Production cannot print a code | `tests/email.test.mjs` — `NODE_ENV=production` with `AUTH_DEV_CODE_TO_LOG=1` logs nothing and sends nothing |
+| Deletion leaves nothing | before/after across 12 tables; `search_events` unchanged — the count is whatever the development database happens to hold and the claim is that it does not move, because that table never held the id |
+| The code is not stored in a form a read can use | **corrected after the review.** It is HMAC-SHA256 keyed by `BETTER_AUTH_SECRET` (`lib/auth-options.ts`), so a row read WITHOUT the secret is not a live credential. It does **not** protect against somebody holding both the row and the secret: six digits is a search space of 10^6 and any unkeyed digest of one reverses in about three seconds — which is exactly what `storeOTP: 'hashed'` was, and what the review did. Against that reader the defences are the five-minute expiry and the three-attempt cap, and they always were. `tests/otp-hash.test.mjs` runs all three sweeps |
+| The 6th code is refused | `tests/rate-limit.test.mjs` with a controlled clock, and live: five codes, then "That is enough codes for now. Try again in about 12 minutes." |
+| Production cannot print a code | `tests/email.test.mjs` — `NODE_ENV=production` with `AUTH_DEV_CODE_TO_LOG=1` prints nothing: with no provider it sends nothing either, and with one it sends. Outside production the same flag now forces the log **even with a provider configured**, which is the review's F5 |
 | The gate appears only at the moment | `grep` for the gate's URL: the save control, the like control, the review form, and the three account screens that redirect. Not the homepage, not browse, not top, not the tool page's body |
 | The prompt never precedes the first results | `foundit_results_seen=1` on the first results page and no banner; `=2` on the second and the banner appears |
 | Sign-in works with no JavaScript | a plain multipart POST carrying the form's own `$ACTION_ID` field: 303 to `/sign-in/code` with two httpOnly cookies |
@@ -1345,7 +1346,7 @@ scratch, with no email provider and no Google client:
 8. `/u/noa` shows the handle, the join month, 0 tools added, 1 review — and no
    likes, no collections and no address.
 9. `/settings/delete` → "Delete @noa?" with what goes and what stays, counted
-   from the database. After: 0 rows everywhere, `search_events` still 8.
+   from the database. After: 0 rows everywhere, and `search_events` unchanged.
 
 A stale session proved itself on the way: the database was rebuilt under a
 browser holding a valid-looking cookie, and the next page was the signed-out
@@ -1415,13 +1416,539 @@ all of it.
 - **Sessions are 30 days absolute with a 7-day rolling refresh, and there is no
   "sign out everywhere".** `research/09` §7 asks for one and it is one
   statement; it needs a screen, and Settings did not get one this phase.
-- **An admin can read a private collection.** `collections_read` has carried
-  `or auth.is_admin()` since `0001`, and this phase kept it rather than
-  quietly tightening it, because `0003` made the same call about likes for the
-  same reason (`docs/product-decisions.md` §10 lists "likes given" as operator
-  data). It is worth somebody deciding on purpose: a private saved list is the
-  same category of sensitive as a like list, and §10's line is that people are
-  visible through what they did **in public**.
+- ~~**An admin can read a private collection.**~~ **Closed by the review** —
+  `or auth.is_admin()` is out of `collections_read` and `collection_items_read`
+  (`0015_phase6_review.sql`), and `docs/product-decisions.md` §10 records the
+  decision rather than only this list. See F4 below.
+
+### Review
+
+A fresh Opus 5 subagent that had not seen the work attacked the policies as a
+stranger, a signed-in person, a tool owner and an admin, and as each database
+role; the session wrapper, the code flow, the limiter, the deletion and the
+screens. It ran every attack against the live development database and rolled
+it back. Its own summary of the boundary:
+
+> The row-level-security boundary is strong: as a stranger, a user, a tool owner
+> and an admin, every cross-actor read and write I tried was refused. The
+> findings below are, in order, one moderation control that a review's author can
+> undo, one secret-scanner blind spot for the very provider this phase added, a
+> weak-by-library code hash, and a set of smaller rule-bends and overclaims.
+
+Its findings are pasted below **verbatim**, each followed by what changed and
+the test that proves it. Two migrations, `0015_phase6_review.sql` and
+`0016_deletion_marker.sql`, and three new unit suites.
+
+---
+
+#### F1 — An admin's review removal is not durable: the author can un-remove it, or repost it  [HIGH]
+
+> Where: `db/migrations/0013_accounts.sql` §7 (`reviews_remove_admin`,
+> `reviews_author_or_admin_only`, `reviews_is_not_an_edit`), `reviews_update` in
+> `0001_init.sql`, `reviews_one_live_per_author` partial index.
+>
+> What: docs/product-decisions.md §4 and the gate's item 3 require that an admin
+> can take a review down "whole, with the reason recorded" — the DSA route for an
+> illegal or abusive review. The migration builds a policy, a BEFORE UPDATE
+> trigger and a RESTRICTIVE policy to make "removing is not editing" true. But the
+> removal is a soft-delete (`deleted_at`), and nothing stops the review's own
+> author from setting `deleted_at` back to `null` — `reviews_update` is
+> `author_id = auth.uid()` with no restriction on `deleted_at`, and the
+> `reviews_is_not_an_edit` trigger explicitly lets the author "change whatever they
+> like about their own review." So an admin removal of abusive content survives
+> exactly until the author's next request. The author can also simply insert a
+> fresh identical review, because the unique index is partial
+> (`where deleted_at is null`) and the removed row no longer occupies it. Either
+> way the review — and its rating — comes back, while the `review_removals` row is
+> left orphaned pointing at a now-live review.
+>
+> Reproduce (`a5-undo-removal.sql`, as the author `dev_person` after `dev_admin`
+> removes review id 3 on tool 2):
+> ```
+> >>> [as dev_admin] insert review_removals(3, dev_admin, 'abusive language...'); update reviews set deleted_at=now() where id=3
+>     review id 3 deleted_at = 2026-09-12T10:10:30.888Z ; tools id 2 review_count=0 rating_avg=null
+> >>> [switch claim to dev_person] update public.reviews set deleted_at = null where id = 3
+>     rowCount=1  {"id":"3","deleted_at":null}
+> >>> update public.reviews set body = 'and now I have rewritten it after the removal', rating = 1 where id = 3
+>     rowCount=1  {"id":"3","rating":1,"body":"and now I have rewritten it after the removal"}
+> >>> select review_count, rating_avg from public.tools where id = 2
+>     {"review_count":1,"rating_avg":"1.00"}       <-- the removed review is live and re-counted
+> >>> select * from public.review_removals where review_id = 3
+>     {"id":"16","admin_id":"dev_admin","reason":"abusive language..."}  <-- removal record now lies
+> ```
+> And the repost path (`a6-repost.sql`): after the admin removes id 3, the author
+> runs the app's own `UPSERT_REVIEW_SQL` and lands a new live review id 18 with
+> the same text.
+>
+> Fix: an admin removal must outrank an author edit. Options: a boolean
+> `removed_by_admin` (or the existence of a `review_removals` row) checked in a
+> RESTRICTIVE policy / the trigger so the author cannot clear `deleted_at` on a
+> review that carries a removal, and cannot insert a new live review on the same
+> (tool, author) once one has been removed by an admin. Today the DSA takedown the
+> phase says it built is reversible by the person it was used against.
+
+**Closed**, in the database, three ways — the same overlap `0013` §7 argues for,
+because this is the rule `docs/build-phases.md` puts in bold and one mechanism is
+one thing to get wrong.
+
+- `public.reviews_is_not_an_edit()` gains a first clause: if the row carries a
+  `review_removals` row and the caller is its author, every change is refused
+  with `a review an administrator removed is not its author's to change`. The
+  trigger is where the sentence is said; a policy can only make a row vanish.
+- `reviews_removal_is_not_undone`, RESTRICTIVE, `WITH CHECK` rather than `USING`
+  so the refusal is an error rather than a row quietly not matching: a review
+  that carries a removal may not be written back alive by anybody.
+- `reviews_removal_is_final` (BEFORE INSERT) and `reviews_no_repost_after_removal`
+  (RESTRICTIVE, insert): no new live review on a `(tool, author)` pair where one
+  has already been taken down.
+
+A review its own AUTHOR took down carries no `review_removals` row, so none of
+the three sees it and re-posting is exactly as it was — which is the whole
+difference this turns on.
+
+**The test** is `db/test/accounts_test.sql` §7(a) and §7(b): the reviewer's `a5`
+and `a6` sequences, all three refusals, the counters unchanged across them, and
+the self-deleted review still re-postable. Against the schema as it stood one
+commit earlier, the same three statements are `UPDATE 1`, `UPDATE 1` and a new
+live review, with `review_count` back to 1 and `rating_avg` 1.00.
+
+---
+
+#### F2 — scripts/scan-secrets.sh cannot catch a Resend key — the one secret this phase added  [HIGH]
+
+> Where: `scripts/scan-secrets.sh` (`SECRET_NAMES`, and the absence of any `re_`
+> shape rule).
+>
+> What: Phase 6 introduces Resend and `RESEND_API_KEY` (lib/email.ts, .env.example
+> line 85). The scanner has no shape rule for a Resend key (`re_` + 32 chars), and
+> `RESEND_API_KEY` is not in `SECRET_NAMES`
+> (`BETTER_AUTH_SECRET|OPENAI_API_KEY|EMBEDDINGS_API_KEY|ANTHROPIC_API_KEY|GOOGLE_CLIENT_SECRET|POSTGRES_PASSWORD|PGPASSWORD|DB_PASSWORD|API_KEY|SECRET_KEY|PRIVATE_KEY|ACCESS_TOKEN`).
+> The substring `API_KEY` does not help: rule 4 anchors on `\b(...)` and there is
+> no word boundary between the `_` and the `A` in `RESEND_API_KEY`, so
+> `\bAPI_KEY` does not match inside it. The result: a real Resend key committed as
+> `RESEND_API_KEY=re_...`, or as a bare `re_...` value, is not flagged at all. The
+> brief also asked about `GOCSPX-` (Google) and the Better Auth secret: those are
+> caught only through their named assignment (`GOOGLE_CLIENT_SECRET=` /
+> `BETTER_AUTH_SECRET=`, both in `SECRET_NAMES`); a bare `GOCSPX-…` value with no
+> recognised name is not caught either.
+>
+> Reproduce (patterns lifted verbatim from the script, run over a fixture in my
+> scratch dir — nothing written into the repo):
+> ```
+> === openai shape rule (sk-...) ===
+> fake-secrets.txt:6:OPENAI_API_KEY=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345      <-- caught
+> === is there ANY re_ shape rule?   === 0   (none)
+> === is there ANY GOCSPX shape rule? === 0   (none)
+> === named-secret rule 4 flagged: ===
+>   line 2  GOOGLE_CLIENT_SECRET=GOCSPX-...        <-- caught (named)
+>   line 3  BETTER_AUTH_SECRET=aB3d...             <-- caught (named)
+>   line 6  OPENAI_API_KEY=sk-...                  <-- caught (named)
+>   (line 1  RESEND_API_KEY=re_...                 NOT flagged)
+>   (line 4  a_bare_resend_token = re_...          NOT flagged)
+>   (line 5  a_bare_google_secret = GOCSPX-...     NOT flagged)
+> grep for RESEND in the script: exit 1 (no match — the name appears nowhere)
+> ```
+> `bash scripts/scan-secrets.sh` over the real tree still passes (no real secret
+> is committed; `.env.local` is git-ignored and holds the real keys), so the
+> scanner is not currently failing — it just would not stop the leak it was
+> extended for.
+>
+> Fix: add `RESEND_API_KEY` to `SECRET_NAMES` and a shape rule
+> `scan "resend api key" 're_[A-Za-z0-9]{20,}'`; consider a bare
+> `GOCSPX-[A-Za-z0-9_-]{20,}` rule too.
+
+**Closed.** `RESEND_API_KEY` is named in full, both shape rules are in, and the
+word-boundary escape is gone from rule 4 with a comment saying why — so a name
+ENDING in one of the generic suffixes (`X_API_KEY`, `MY_SECRET_KEY`) is flagged
+the way the list always read as promising. Two false positives that turned up
+were added to `ALLOWED_SECRET_LITERALS` with a reason, which is the escape hatch
+the script documents; one more was a test of ours rewritten to read an
+environment variable through a name in a constant, the shape
+`tests/email.test.mjs` already used.
+
+**The test** is `tests/scan-secrets.test.mjs`, which runs THE REAL SCRIPT — not a
+transcription of its patterns — over a fixture of invented credentials in a
+temporary directory, asserts a finding on every line, and asserts that
+`.env.example`'s placeholders still pass. Nothing credential-shaped is written
+into the repository: every value is assembled at run time out of pieces. Against
+the scanner as it stood one commit earlier, four of the six lines are found by
+nothing at all.
+
+---
+
+#### F3 — The emailed code's "hashed at rest" is unsalted SHA-256 and reverses in ~3 seconds  [MEDIUM]
+
+> Where: `lib/auth-options.ts` (`storeOTP: 'hashed'`), Better Auth
+> `defaultKeyHasher` (`node_modules/better-auth/dist/plugins/email-otp/utils.mjs`),
+> and the claim in `db/migrations/0013_accounts.sql` comment on
+> `auth_core."verification"`.
+>
+> What: `storeOTP: 'hashed'` stores `base64url(sha256(otp))` with **no salt and no
+> work factor** (that is Better Auth's `defaultKeyHasher`). A 6-digit code is a
+> 10^6 search space; anyone who can read one `verification.value` (a backup, a
+> replica, a read as `foundit_auth`/owner) recovers the live code by brute force in
+> seconds, then signs in as whoever is waiting for it. The migration's own comment
+> claims the hash means "anybody with a backup or a read would [NOT] be able to
+> sign in as whoever is waiting for it" — that is not true for an unsalted digest
+> of six digits.
+>
+> ```
+> what the database row holds : SCkM9pHEHLyZsjltLlMTzPupGYezhObY8IuVH6UEXoM
+> recovered from the hash     : 482915
+> time to reverse it          : 2838 ms, on one core, no table precomputed
+> search space                : 10^6
+> ```
+>
+> Fix: either accept and re-state the claim honestly (the hash protects against a
+> casual glance, not a determined read; expiry + attempt cap are the real
+> defence), or supply a keyed/slow hasher via `storeOTP: { hash }` so a leaked row
+> is not a live credential.
+
+**Closed, and the claim re-stated.** `storeOTP` is the object form with a hash of
+ours: HMAC-SHA256 keyed by `BETTER_AUTH_SECRET`, base64url (which matters,
+because Better Auth appends `:<attempts>` to the stored value and splits on the
+last colon). An empty secret is refused rather than used, because an HMAC under
+an empty key is the same unkeyed hash with a better name.
+
+The corrected statement, in full, is in `0015_phase6_review.sql`'s header and in
+the "What is proved" table above: **a row read without the secret is not a live
+credential; a reader holding both the row and the secret is still two seconds
+away from the code, and against them the defences are the five-minute expiry and
+the three-attempt cap, which were always the security of the scheme.** `0013`'s
+comment on `auth_core."verification"` said more than that and was wrong; it is
+replaced by a new `COMMENT` in `0015` rather than by editing an applied
+migration.
+
+**The test** is `tests/otp-hash.test.mjs`, which runs all three sweeps: the
+finding reproduced against the library's own hasher (the code falls out), the
+same sweep of the full 10^6 against the row as it is stored now (nothing), and
+the sweep by somebody who has the secret (the code, in seconds — which is why
+the honest claim is the narrow one).
+
+---
+
+#### F4 — An admin can read any private (unshared) collection and its items  [MEDIUM]
+
+> Where: `db/migrations/0013_accounts.sql` §5 — `collections_read` and
+> `collection_items_read` both carry `or auth.is_admin()`.
+>
+> What: docs/product-decisions.md §18(2) and §10's "privacy line" say a person is
+> visible to the operator only through what they did **in public**, and that a
+> shared collection is never even listed. But `collections_read` grants an admin
+> SELECT on every collection including a private one with no share token, and
+> `collection_items_read` follows it. A private saved list — the same category of
+> sensitive as a like list — is fully readable from an admin session. This is
+> disclosed in loop-progress.md's "known weaknesses" as a deliberate carry-over
+> from 0001, so it is a bent rule stated out loud rather than a hidden one, but it
+> does contradict the §10/§18 promise and should be decided on purpose.
+>
+> Reproduce (`a4-admin.sql`, as `dev_admin`):
+> ```
+> >>> select id, owner_id, name, share_token from public.collections order by id
+>     {"id":"1","owner_id":"dev_person","name":"Trip to Greece","share_token":"0f1e...f0"}
+>     {"id":"2","owner_id":"dev_person","name":"Quiet mornings","share_token":null}   <-- private, still visible
+> >>> select count(*) as private_items_an_admin_sees from public.collection_items
+>     {"private_items_an_admin_sees":"4"}
+> ```
+>
+> Fix: drop `or auth.is_admin()` from `collections_read` / `collection_items_read`
+> (the operator dashboard has no need for a private list's contents), or record the
+> decision to keep it in §10 rather than only in loop-progress.
+
+**Closed, and decided on purpose.** Both policies are recreated in `0015` without
+`or auth.is_admin()` and with nothing else changed.
+`docs/product-decisions.md` §10 now carries a dated paragraph — "a private saved
+list is not operator data", 12 September 2026 — rather than the decision living
+only in a weaknesses list. The dashboard loses nothing it was going to use: the
+figure it wants is a count, and Phase 8 will get counts from a definer function
+that returns numbers rather than rows.
+
+**The test** is `db/test/accounts_test.sql` §7(e): as `dev_admin`, zero
+collections and zero saved items with no link; holding the link, exactly the one
+collection it is for and not the other. Two counts elsewhere in the suite had to
+move to the person whose rows they are, which is the finding showing up in the
+test file rather than a workaround.
+
+---
+
+#### F5 — On this machine the "dev code to log" safety is inert; requesting a code sends a real email  [MEDIUM]
+
+> Where: `lib/email.ts` `sendSignInCode` — the dev-log branch is reached only when
+> `emailConfigured()` is **false**.
+>
+> What: `AUTH_DEV_CODE_TO_LOG=1` is assumed (by the brief's ground rules and by
+> the phase gate) to make code requests log instead of send. But
+> `sendSignInCode` logs only when `emailConfigured()` is false, i.e. when there is
+> no `RESEND_API_KEY`/`EMAIL_FROM`. This `.env.local` has both set (real values),
+> so `emailConfigured()` is true and a code request performs a real POST to
+> `api.resend.com` — an actual email to whatever address is typed. The dev-log
+> path is dead whenever a provider is configured. This is consistent with the
+> comment in lib/email.ts, so it is arguably by design, but it means the "no real
+> email" safety rail the review depends on is not what is active here, and a
+> developer who believes `AUTH_DEV_CODE_TO_LOG=1` is protecting them is wrong.
+>
+> Reproduce (`m1-email-switch.mjs`, run under `--env-file=.env.local`; nothing was
+> sent):
+> ```
+> NODE_ENV                = undefined
+> AUTH_DEV_CODE_TO_LOG    = "1"
+> RESEND_API_KEY present  = true
+> EMAIL_FROM present      = true
+> emailConfigured()       = true
+> devCodeLoggingAllowed() = true
+> sendSignInCode() branch taken = REAL fetch to api.resend.com — an email is sent
+> ```
+>
+> Fix: for a "log, never send" development posture, either let `AUTH_DEV_CODE_TO_LOG`
+> force the log path even when a provider is configured, or leave the Resend
+> variables empty in a dev `.env.local`. (I did not exercise `requestCode` /
+> `sendVerificationOTP` against any real address because of this.)
+
+**Closed, the first way.** The check is the first thing `sendSignInCode` does:
+outside production, with the flag exactly `'1'`, the code is logged and the
+function returns before anything looks at whether a provider exists. Production
+is unreachable as before. `.env.example` and `docs/development.md` both say the
+new thing — set it and nothing leaves the process, leave it empty when you
+actually want to test real delivery.
+
+**The test** is the new case in `tests/email.test.mjs`: a configured provider
+plus the flag, where `fetch` must not be called at all, and the same environment
+under `NODE_ENV=production`, where it must. Then the flow was walked once on
+`:3000` against the real `.env.local` — the code appeared in the server log with
+"nothing was sent", the six boxes took it, and the sign-in completed, which is
+also F3's keyed hash round-tripping through Better Auth for real.
+
+---
+
+#### F6 — No reserved-handle list: `admin`, `settings`, `api`, `saved`, `browse` can be a person's @name  [MEDIUM]
+
+> Where: `lib/handle.ts` (`normalizeHandle`, `handleCandidates`) — the pattern is
+> `^[a-z0-9_]{3,24}$` and nothing else; there is no reserved-name set.
+>
+> What: the brief calls for reserved names (`admin`, `settings`, `api`, `sign-in`,
+> `c`, `u`) to be refused. Of these, `sign-in`, `c` and `u` are refused only
+> incidentally — they fail the pattern (hyphen, or under 3 chars) — while `admin`,
+> `settings`, `api`, `saved` and `browse` are all accepted as handles. A profile
+> at `@admin` (byline on reviews, `/u/admin`) is an impersonation of an operator;
+> it does not collide with a route because public profiles live under `/u/`, so
+> this is impersonation rather than a routing takeover.
+>
+> Reproduce (`m4-handle.mjs`):
+> ```
+> admin      normalizeHandle -> "admin"
+> settings   normalizeHandle -> "settings"
+> api        normalizeHandle -> "api"
+> sign-in    normalizeHandle -> null
+> c          normalizeHandle -> null
+> u          normalizeHandle -> null
+> saved      normalizeHandle -> "saved"
+> browse     normalizeHandle -> "browse"
+> ```
+> Homoglyph / mixed-script / NFKC handling of typed handles is otherwise good:
+> `Аdmin` (Cyrillic А), `ⓐdmin`, full-width `４２ｆｏ`, `admın` (dotless ı) and a
+> zero-width-joined `a​dmin` all normalise to `null`, and unicode addresses
+> are never transliterated (`יוסי@…`, `юра@…` → `friend`).
+>
+> Fix: add a reserved-name deny list to `normalizeHandle` / `handleCandidates`
+> (admin, settings, api, saved, browse, help, about, reports, and the route stems).
+
+**Closed, and the second half of it too** — the brief for this work added one the
+review did not raise: the default handle was derived from the LOCAL PART OF THE
+EMAIL ADDRESS, so `amitlevavi234@gmail.com` was published as `@amitlevavi234` on
+a page strangers read, beside everything that person had reviewed. Nobody chose
+it and nobody was asked. Both are in `lib/handle.ts`:
+
+- `RESERVED_HANDLES` covers the operator (`admin`, `administrator`, `staff`,
+  `support`, `moderator`, `team`), the site (`foundit`, `help`, `about`,
+  `contact`, `security`, `official`), every first path segment under `app/`, the
+  near-misses (`signin` beside `sign-in`, `tool` beside `tools`), and any
+  `admin_…` prefix. `normalizeHandle` returns null for all of them, so Settings
+  says the name cannot be used rather than handing back `admin2`.
+- The default comes from the provider's NAME — Google's, normalised, with a
+  number on collision — and from a neutral word and four digits (`maker_4821`)
+  when there is none, which is every emailed-code sign-in because Better Auth
+  stores an empty name for those. `email` is no longer an argument to
+  `ensureProfile` at all, and `handleStem` refuses anything containing an `@`,
+  so a caller that still passes an address gets a neutral handle rather than
+  `noa_example_com`.
+
+Existing handles are untouched: `ensureProfile` only ever runs for an account
+that has no profile.
+
+**The test** is `tests/handle.test.mjs`: every reserved word refused typed and
+derived; the app directory READ FROM DISK and every route asserted reserved, so
+a route added next month is a failing test rather than something to remember;
+the email local part never appearing in any candidate for any address; and
+collision suffixing, `amit_levavi` → `amit_levavi1` → `amit_levavi2`.
+
+---
+
+#### F7 — `collections_write` places no restriction on `share_token`; only the fixed app statements keep it random  [LOW]
+
+> Where: `db/migrations/0001_init.sql` `collections_write`
+> (`for all using (owner_id = auth.uid())`), `0013` adds only shape/consistency
+> CHECKs.
+>
+> What: the RLS policy that governs a collection lets its owner write **any**
+> column, including `share_token`, to any value that satisfies the
+> `^[0-9a-f]{32}$` CHECK. What actually keeps a share token 128 random bits is
+> that the only statement the application will send is `SHARE_COLLECTION_SQL`,
+> which writes an app-generated `crypto.randomBytes(16)` token, plus the absence of
+> any `query()` escape hatch in lib/db.ts. So a user cannot today set a short,
+> guessable or another user's token (the unique index also blocks duplicates), but
+> the guarantee lives entirely in the application layer, not in a policy or CHECK.
+> If a future statement ever passed a client-supplied token, RLS would not stop it.
+> No exploit today.
+>
+> Fix (optional/defence-in-depth): note the reliance explicitly, or gate
+> `share_token` writes so only a value the database generates is accepted.
+
+**Closed the second way.** `foundit_app`'s blanket UPDATE on `collections` is
+revoked and re-granted column by column — `name`, `description`, `is_public` —
+so `update collections set share_token = …` is `permission denied` before any
+policy is consulted. A BEFORE INSERT OR UPDATE trigger mints the token when
+`is_public` goes true, nulls it when it goes false, and REFUSES a supplied value
+rather than silently replacing it: a caller that built a link out of what it sent
+would otherwise be handed an address that opens nothing.
+
+The value is `replace(gen_random_uuid()::text, '-', '')` — 122 random bits from
+`pg_strong_random` rather than 128, in exactly the 32 hex characters the existing
+CHECK requires, and no new extension on every deployment for one line. The
+application's `crypto.randomBytes` is gone from `lib/accounts.ts`; the statements
+are `is_public = true` and `is_public = false`, and the token comes back in the
+`RETURNING`. The development seed no longer carries a literal token either, so
+the `/c/<token>` address is different on every rebuild.
+
+**The test** is `db/test/accounts_test.sql` §7(d): a chosen token refused on
+update and on insert, both application statements still working, the minted value
+matching `^[0-9a-f]{32}$`, and un-sharing leaving nothing behind — plus §4, which
+now asserts that re-sharing hands back a DIFFERENT address from the one just
+revoked.
+
+---
+
+#### F8 — Partial deletion can leave a re-animatable account shell  [LOW]
+
+> Where: `lib/deletion.ts` `runDeletion` ordering (sessions, publicRows, accounts,
+> codes, user); `lib/accounts.ts` `ensureProfile`.
+>
+> What: deletion spans two pools and cannot be one transaction, which the code
+> handles well: sessions are killed first, so no half-deletion leaves a usable
+> session (verified by `tests/deletion.test.mjs`, which passes). But if a step
+> after `publicRows` fails (accounts / codes / user), the `auth_core."user"` and
+> Google `account` rows survive with the profile already gone. The person can then
+> sign in again with the same Google account; `ensureProfile` creates a fresh
+> profile from the same user id and the "closed" account is re-animated as an empty
+> shell. This is the mirror of the window the chosen order closes, and it is
+> smaller (empty shell vs. a live session over intact data), but it exists.
+>
+> Reproduce: not reproduced end-to-end (no Google client, and forcing a mid-run
+> failure needs code changes); established by reading `runDeletion` +
+> `ensureProfile`. Filed as LOW and listed under "Could not test" for the live half.
+>
+> Fix: on a resumable failure, retry from where it stopped, or delete the `user`
+> row before `publicRows` is considered complete (it cannot re-create a profile
+> without a `user`).
+
+**Closed with a marker rather than a reorder.** `auth_core.deletions`
+(`0016_deletion_marker.sql`) holds one row per account whose deletion has started
+and not finished. `DELETION_ORDER` is now sessions, **mark**, publicRows,
+accounts, codes, user, **unmark**: the marker is written before one row of theirs
+is touched and removed by the last step of a run that got all the way through, so
+a run that STOPPED stays marked and a run that FINISHED leaves nothing at all —
+which matters, because the phase's own gate is "zero rows for that id everywhere"
+and a marker kept for ever would be a row for that id. `ensureProfile` asks the
+marker first, on the auth pool as `foundit_auth`, and refuses to create a profile
+for an id that carries one. It fails CLOSED: a database that will not answer is
+not a reason to create a profile for an account somebody asked us to close.
+
+The reviewer's other option — delete the user row before the public rows — was
+not taken. It closes the same window and opens a worse one: a failure would then
+leave a profile, reviews, likes and saved lists behind with no account able to
+reach them and nobody able to retry, and personal data outliving the promise to
+delete it is a bigger failure than an empty shell.
+
+**The test** is `tests/deletion.test.mjs`, which fails each step in turn and asks
+what is left: after any failure past the marker the account is still marked and
+`accountIsClosing` says so, after a failure at or before it nothing of theirs was
+touched, and a clean run leaves no marker. `db/test/accounts_test.sql` §1 checks
+the sixth table's grants — three verbs, and no UPDATE, because a marker is
+written once and taken away once.
+
+---
+
+#### The defence-in-depth item, same class as F7
+
+> `profiles_update` (from `0001`) is `using/with check (id = auth.uid())` with no
+> column restriction, so at the SQL level a signed-in user's own row can be
+> updated in **any** column, `is_admin` and `plan` included. Reproduced with a raw
+> statement as `foundit_app` carrying a `dev_person` claim (`a1-user-escalation.sql`):
+> `update public.profiles set is_admin = true where id = auth.uid()` succeeds,
+> `auth.is_admin()` then returns true and `search_events` becomes readable.
+>
+> This is **not reachable through the application**: the only write to profiles is
+> `UPDATE_PROFILE_SQL`, which sets `display_name, bio, handle` and nothing else,
+> and there is no `query()` escape hatch, so a user cannot direct an `is_admin`
+> update. It is exactly the same shape as F7 (`share_token`): the guarantee lives
+> in the fixed app statement, not in the policy. It is a `0001` policy, not a
+> Phase-6 change, but Phase 6 is the first phase that lets real users reach
+> `profiles_update`, so it is worth hardening now: constrain the writable columns
+> with `GRANT UPDATE (display_name, bio, handle) ON public.profiles`, or a
+> RESTRICTIVE rule / trigger that refuses a change to `is_admin`/`plan` by a
+> non-admin, so the boundary does not depend on the application never sending the
+> wrong column.
+
+**Closed, exactly as suggested.** `revoke update on public.profiles from
+foundit_app`, then `grant update (display_name, bio, handle)`. `is_admin` carries
+a comment saying it is set by an operator out of band, as the schema owner.
+Treated as HIGH rather than as the LOW it was filed at, because a user who can
+make themselves an administrator is not a small finding — what made it small was
+the application, and that is the thing being removed from the argument.
+
+**The test** is `db/test/accounts_test.sql` §7(c): `is_admin`, `plan` and
+`created_at` each refused with `permission denied for table profiles`,
+`auth.is_admin()` still false afterwards, and `UPDATE_PROFILE_SQL` — the one
+statement Settings sends — still updating exactly one row.
+
+---
+
+#### The overclaims
+
+> - **"The 6th code is refused … 'Try again in about 10 minutes.'"** The live
+>   refusal actually reads **"about 12 minutes"** — `components/SignInPanel.tsx`
+>   computes `Math.ceil(720/60) = 12` from the token bucket's 720 s retry, and the
+>   rendered `/sign-in?problem=too-many&wait=720` page shows "about 12 minutes."
+>   The quoted string in the doc is wrong.
+>
+> - **"The code is HASHED … anybody with a backup or a read would [not] be able to
+>   sign in as whoever is waiting for it"** (0013 comment, echoed in the table's
+>   "hashed at rest" claim). False as stated — the hash is unsalted SHA-256 of six
+>   digits and reverses in ~3 s (F3).
+>
+> - **"Deletion leaves nothing … search_events unchanged at 8 rows"** — a stale
+>   count (the dev DB now holds 14 `search_events` rows); not a substantive
+>   overclaim, but the "8" is dev-run drift. The structural claim (no user column,
+>   nothing to delete) is correct.
+
+All three corrected in the table above. The quoted refusal now reads twelve
+minutes, which is what the page renders. The hash claim is replaced by the
+narrow, true one and appears in three places that agree with each other:
+`0015`'s header, the new `COMMENT` on `auth_core."verification"`, and the table.
+The count is gone — the claim is that `search_events` does not MOVE when an
+account is deleted, and a number from one development run was never part of it.
+
+#### What the review could not test, and still cannot
+
+- **Google sign-in end to end.** The reviewer had no OAuth client. There is one
+  now, and one real Google account row in the development database from a
+  sign-in the owner made at 10:15 on 12 September — which is where the "tokens
+  are stored" half of the token finding was read from, `accessToken` and
+  `idToken` both present. A FRESH Google sign-in is exactly what this work was
+  told not to drive, so the hook that nulls them is proved by driving it
+  directly (`tests/auth-account.test.mjs`) rather than by a row. The first live
+  proof will be the owner's next Google sign-in; the existing row still holds
+  the tokens from before the fix and can be cleared by hand.
+- **A real emailed code.** Now walked, because F5 is closed: see above.
 
 ## Tried and rejected
 

@@ -27,7 +27,11 @@ import { sendSignInCode } from './email.ts';
  * changes what exists in `auth_core`.
  */
 
-/** research/09 §6: six digits, five minutes, three attempts, hashed at rest. */
+/**
+ * research/09 §6: six digits, five minutes, three attempts — and hashed at
+ * rest UNDER A KEY, which is the part the Phase 6 review corrected. The long
+ * version, including what the hash does not buy, is above `hashSignInCode`.
+ */
 export const OTP_LENGTH = 6;
 export const OTP_EXPIRY_SECONDS = 300;
 export const OTP_ALLOWED_ATTEMPTS = 3;

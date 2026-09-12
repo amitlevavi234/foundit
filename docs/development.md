@@ -363,13 +363,21 @@ three wrong guesses exactly as it would be in production — only the delivery i
 a console line:
 
 ```
-[development] sign-in code for noa@example.com: 482915 — printed because AUTH_DEV_CODE_TO_LOG=1 and this is not production
+[development] sign-in code for noa@example.com: 482915 — printed because AUTH_DEV_CODE_TO_LOG=1 and this is not production; nothing was sent
 ```
+
+**It now forces the log even when RESEND_API_KEY and EMAIL_FROM are set**
+(changed 12 September 2026, after the Phase 6 review). The check used to sit
+inside the "there is no provider" branch, so on a machine that had ever tested
+real delivery the variable was inert and asking for a code posted a real email
+to whatever address was typed. So: set it and nothing leaves the process, and
+**leave it empty when you actually want to test real delivery** — that is now
+the only way to send one from your laptop, which is the right way round.
 
 **That path cannot be reached in production.** `lib/email.ts` requires
 `NODE_ENV` to be something other than `production` *and* the variable to be
 exactly `1`, and `tests/email.test.mjs` asserts the pairing — a deployment that
-sets it by mistake still sends nothing and prints nothing. Never set it on the
+sets it by mistake still sends, and still prints nothing. Never set it on the
 server.
 
 If the dev container already exists, the role's password has to be set by hand
@@ -425,6 +433,16 @@ is exactly what to press.
    the address you registered the redirect URI under. **The redirect URI is
    built from `BETTER_AUTH_URL`**, so if the two disagree Google refuses the
    sign-in with `redirect_uri_mismatch` and nothing else is wrong.
+
+   **`BETTER_AUTH_URL` must be the exact origin the browser is on** — scheme,
+   host AND port, with no trailing slash and no path. `http://localhost:3000`
+   and `http://localhost:3001` are two different origins to Google and to
+   `trustedOrigins`, and `http://127.0.0.1:3000` is a third. This is not
+   hypothetical: the first `redirect_uri_mismatch` on this project came from
+   `BETTER_AUTH_URL` still pointing at `:3001` after a test run had taken 3000,
+   with the registered URI, the client id and the secret all correct. If you
+   run the dev server on another port, change this line as well, or register
+   that port's callback URI too — Google accepts several.
 
 The secret is a secret: it goes in a file git does not track, it is never
 pasted into a chat window, and if it ever leaks you press **Reset secret** on

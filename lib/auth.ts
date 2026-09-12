@@ -26,8 +26,11 @@ export {
  * §4's second one: the 6-digit code is a supported feature rather than a
  * project. Generation, hashing, expiry, the attempt cap and single use are
  * settings below rather than security-critical code somebody wrote once. What
- * this file adds to the defaults is the list in §6 — hashed at rest, five
- * minutes, three attempts — and the delivery.
+ * this file adds to the defaults is the list in §6 — hashed at rest under a
+ * key, five minutes, three attempts — and the delivery. The "under a key" is
+ * the Phase 6 review's F3: the library's own `hashed` is an unsalted SHA-256,
+ * and six digits reverse in about two seconds. lib/auth-options.ts says what
+ * the keyed hash does and does not protect against.
  *
  * TWO PROVIDERS AND NO THIRD. Google, and a code by email.
  * docs/product-decisions.md §2: no passwords, no magic links, no GitHub, and

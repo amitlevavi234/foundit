@@ -233,6 +233,20 @@ Access is enforced in the database, not just the page: an `is_admin` flag on the
 profile, checked by the row-level rules, so the dashboard cannot be reached by
 guessing the URL.
 
+**A private saved list is not operator data** (decided 12 September 2026). Until
+now `collections_read` carried `or auth.is_admin()`, inherited from `0001`, so an
+administrator could read any collection — including one with no share token, which is
+a list somebody made for themselves and showed to nobody. Phase 6's adversarial review
+found it, and it contradicts the privacy line directly: a person is visible to the
+operator through what they did **in public**, and a private list is the opposite of
+that. A saved list is the same category of sensitive as a like list, which `0003`
+already made private, and this catalogue lists tools for leaving somebody, hiding money
+and managing an illness. So `or auth.is_admin()` is gone from `collections_read` and
+`collection_items_read` (`0015_phase6_review.sql`), and an administrator now reads a
+shared collection only the way anybody else does: by holding its link. The dashboard
+loses nothing it was going to use — the "saves" figure it wants is a count, and Phase 8
+will get counts from a definer function that returns numbers rather than rows.
+
 ## 11. Paid accounts, later (added 10 September 2026)
 
 Premium accounts are expected eventually, not soon. Two consequences to plan for now,
@@ -575,15 +589,22 @@ place in this product where who wrote it has to be the same string as the
 profile it points at. So the tool page prints `@handle`, and the artboard's
 "Priya Raman" over the review is not built.
 
-**4. An @name is derived from the address, and never transliterated.** Nobody is
-asked to choose a handle during sign-in, because the sign-in screen is two
-controls and a sentence and that is the whole of its value. It comes from the
-local part of the address, sanitised to the CHECK `0001` already carries, and
-deduplicated with a number by the unique index rather than by a guess. A name in
-another script produces `friend`, `friend2`, `friend3` — **not** a guess at how
-it looks in Latin letters, because a wrong transliteration of somebody's name is
-worse than no name. Settings is where anybody changes it, and a handle that is
-refused is refused out loud rather than quietly turned into something else.
+**4. An @name is derived from the NAME, never from the address, and never
+transliterated** (amended 12 September 2026 after the review). Nobody is asked to
+choose a handle during sign-in, because the sign-in screen is two controls and a
+sentence and that is the whole of its value. It was originally derived from the
+local part of the address — which published the mailbox name on a public page, so
+`amitlevavi234@gmail.com` became `@amitlevavi234` beside everything that person had
+reviewed. It now comes from the name the provider gave us, sanitised to the CHECK
+`0001` already carries and deduplicated with a number by the unique index rather than
+by a guess; with no name — which is every emailed-code sign-in — it is a neutral word
+and four digits, `maker_4821`. A name in another script gets the same neutral handle
+rather than a guess at how it looks in Latin letters, because a wrong transliteration
+of somebody's name is worse than no name. There is also a reserved list now: `admin`,
+`settings`, `api`, `saved`, `browse`, every first path segment under `app/`, and any
+`admin_…`, because `@admin` on a review byline is an impersonation of an operator.
+Settings is where anybody changes it, and a handle that is refused is refused out loud
+rather than quietly turned into something else.
 
 **5. No avatar is ever fetched.** Google hands us a picture URL with the
 profile. Storing it would mean every page carrying the header asks Google's CDN
@@ -623,6 +644,20 @@ worse than no button. "Use my searches to improve matching" is not drawn either
 — there is nothing to toggle, because search text is never attached to a person
 in the first place, and consent to something that does not happen is a false
 statement about the site in exactly the way §14 says a cookie banner would be.
+
+**8a. A removal an administrator makes is final** (added 12 September 2026): the
+author of a removed review may not clear `deleted_at`, may not change a word of it,
+and may not write a new one on the same tool — otherwise the Digital Services Act
+takedown §4 promises lasts until their next request, which is what the review found.
+
+**8b. No token Google gives us is stored** (added 12 September 2026): the access token
+and the ID token are nulled before the `account` row is written, because this
+application never calls Google again and a credential to somebody else's system kept
+for nothing is a leak waiting for a backup.
+
+**8c. A share token is minted by the database** (added 12 September 2026): the
+application may not write one and a supplied value is refused, so "128 unguessable
+bits" is a rule rather than a property of the one statement anybody happens to send.
 
 **9. Every page that carries the header is now rendered per visitor.** The
 header shows an avatar or a Sign in button, so a page carrying it cannot be one
