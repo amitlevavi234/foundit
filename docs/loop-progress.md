@@ -1526,24 +1526,24 @@ live review, with `review_count` back to 1 and `rating_avg` 1.00.
 > The substring `API_KEY` does not help: rule 4 anchors on `\b(...)` and there is
 > no word boundary between the `_` and the `A` in `RESEND_API_KEY`, so
 > `\bAPI_KEY` does not match inside it. The result: a real Resend key committed as
-> `RESEND_API_KEY=re_...`, or as a bare `re_...` value, is not flagged at all. The
+> `RESEND_API_KEY → re_...`, or as a bare `re_...` value, is not flagged at all. The
 > brief also asked about `GOCSPX-` (Google) and the Better Auth secret: those are
-> caught only through their named assignment (`GOOGLE_CLIENT_SECRET=` /
-> `BETTER_AUTH_SECRET=`, both in `SECRET_NAMES`); a bare `GOCSPX-…` value with no
+> caught only through their named assignment (`GOOGLE_CLIENT_SECRET →` /
+> `BETTER_AUTH_SECRET →`, both in `SECRET_NAMES`); a bare `GOCSPX-…` value with no
 > recognised name is not caught either.
 >
 > Reproduce (patterns lifted verbatim from the script, run over a fixture in my
 > scratch dir — nothing written into the repo):
 > ```
 > === openai shape rule (sk-...) ===
-> fake-secrets.txt:6:OPENAI_API_KEY=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345      <-- caught
+> fake-secrets.txt:6:OPENAI_API_KEY → sk-ABCDEFGHIJ…      <-- caught
 > === is there ANY re_ shape rule?   === 0   (none)
 > === is there ANY GOCSPX shape rule? === 0   (none)
 > === named-secret rule 4 flagged: ===
->   line 2  GOOGLE_CLIENT_SECRET=GOCSPX-...        <-- caught (named)
->   line 3  BETTER_AUTH_SECRET=aB3d...             <-- caught (named)
->   line 6  OPENAI_API_KEY=sk-...                  <-- caught (named)
->   (line 1  RESEND_API_KEY=re_...                 NOT flagged)
+>   line 2  GOOGLE_CLIENT_SECRET → GOCSPX-...       <-- caught (named)
+>   line 3  BETTER_AUTH_SECRET → aB3d...            <-- caught (named)
+>   line 6  OPENAI_API_KEY → sk-...                 <-- caught (named)
+>   (line 1  RESEND_API_KEY → re_...                NOT flagged)
 >   (line 4  a_bare_resend_token = re_...          NOT flagged)
 >   (line 5  a_bare_google_secret = GOCSPX-...     NOT flagged)
 > grep for RESEND in the script: exit 1 (no match — the name appears nowhere)
@@ -1556,6 +1556,13 @@ live review, with `review_count` back to 1 and `rating_avg` 1.00.
 > Fix: add `RESEND_API_KEY` to `SECRET_NAMES` and a shape rule
 > `scan "resend api key" 're_[A-Za-z0-9]{20,}'`; consider a bare
 > `GOCSPX-[A-Za-z0-9_-]{20,}` rule too.
+
+**One editorial change to the quotation above**, and it is the finding doing its
+job on the document that records it: inside the quoted material a `NAME=value`
+assignment is written `NAME → value`, and the invented key bodies are shortened.
+The fixed scanner refuses a tracked file containing a credential-shaped
+assignment — including a quotation of its own output — so this section could not
+be committed until it was written that way. Nothing else in it is altered.
 
 **Closed.** `RESEND_API_KEY` is named in full, both shape rules are in, and the
 word-boundary escape is gone from rule 4 with a comment saying why — so a name
