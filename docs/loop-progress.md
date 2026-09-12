@@ -2009,6 +2009,31 @@ differ by one constant and nothing else:
 
 `eval/recordings/shown1-frozen.json` and `shown2-frozen.json`.
 
+**The "before" column is 0.8796 and the recorded Phase 5 row is 0.8707, so the
+chain has to be said out loud: `0.8707 → (seven judgements added) → 0.8796 →
+(the threshold) → 0.8645`.** Not one of the 347 judgements Phase 5 froze was
+altered or deleted — 7 added, 0 changed, 0 removed, and the readings are
+identical. The seven are the searches that had no judgement in that recording
+(its own report printed "searches with none recorded 6", six cache keys over
+seven searches) plus the new sentence, and **two of them are golden queries that
+had therefore been scored on the Phase 4 order**: q023 "programa gratuito para
+editar fotos sin pagar Photoshop" (0.5750 → 0.9423, 19 results → 7) and q034
+"stop myself opening the same distracting websites…" (0.6951 → 0.8630, 20 → 5).
+`(0.3673 + 0.1678) / 60 = 0.0089`, and `0.8707 + 0.0089 = 0.8796`.
+
+Isolated rather than inferred: remove exactly those seven from the committed
+fixture, change nothing else, and the same code reproduces **0.8707 and 0.7842
+to four decimals** — `eval/recordings/phase5-recheck.json`. That rules out a
+scoring-path change, a changed reading and a re-recorded judgement in one run.
+
+**The extension moves both headline comparisons against the shipped change, not
+for it.** Against the Phase 5 row the threshold would read as a 0.0062 drop and
+a +4 gain on the negatives; against the honest before it is a **0.0151 drop and
++3**. The larger drop and the smaller gain are the ones reported everywhere,
+because they are the ones measured on the fixture that ships. The full account,
+with the seven named and the isolation command, is in `eval/baselines.md` under
+"Why the \"before\" reads 0.8796 when the Phase 5 row reads 0.8707".
+
 **The gate it misses is the headline one: 24 of 31 against a target of 28.**
 Everything else in the brief's table is met on the frozen recording — held-out
 22 of 25, the reviewer's 25 at 22, zero golden empties, zero perturbation flips,

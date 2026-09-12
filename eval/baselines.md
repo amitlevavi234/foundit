@@ -92,7 +92,7 @@ this is the one a run is gated against.
 | Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | Negatives empty | Held-out empty | Perturbed empty | Rerank coverage | What changed |
 | ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | --------------- | -------------- | --------------- | --------------- | ------------ |
 | 2026-09-12 | 15ff3a8 | 5 | yes | 60 | 0.7842 | 0.8707 | 78.6 | 108.1 | 0 of 60 | 20 of 30 | 19 of 25 | 0 of 240 | 347 of 353 | **The Phase 5 review's fixes, and the reranker's number re-recorded from artefacts anybody can open.** The search is unchanged; what changed is what may be claimed about it. Three fresh recordings at N=20 — `eval/recordings/n20-1.json`, `n20-2.json`, `n20-3.json` — read 0.8811, **0.8707** and 0.8711. The frozen one is `n20-2`, the LOWEST of the three, because it is the only one of the three that clears every gate: `n20-1` empties two of the 240 perturbations and `n20-3` empties one of them and a golden query outright. So the number is the worst of three rather than the middle of five, and the reason is written down. Against the previously recorded Phase 5 row the negatives share falls 22 of 30 → 20 of 30 and the held-out 20 of 25 → 19 of 25: the same code, a different recording, and that spread IS the finding. New: the reviewer's 25 blind negatives (20 of 25 empty, near misses 14 of 17) and 15 blind answerable sentences (rank 1 in **15 of 15**), both held out. Prompt injection through a candidate's own statement closed; two write paths closed (`0011`); `query_reranks_shape` made to mean what it says (`0011`, `0012`); the caps re-costed from output CEILINGS and cut to 120 first-ever searches a day. $0.000427 a search. See "Phase 5, re-measured" below. |
-| 2026-09-12 | 033fe53 | 6+ | yes | 60 | 0.7875 | 0.8796 | 119.7 | 171.9 | 0 of 60 | 21 of 31 | 19 of 25 | 0 of 240 | 354 of 354 | **NOT A NEW MEASUREMENT — the row above, re-read with one negative added and the denominator changed from 30 to 31.** `eval/negatives.jsonl` gained the owner's own sentence, "app that transfer reels to recepies free", typed as he typed it; adding a test is allowed and the golden set is untouched. Nothing about the search changed, and the judgements are the frozen `n20-2` set plus one for the new sentence. The nDCG moves 0.8707 → 0.8796 for a reason that has nothing to do with quality: the frozen fixture was missing judgements for 6 of its 353 searches, which measured the Phase 4 order, and recording those six is what moved it — coverage 347 of 353 → 354 of 354. Reproduce exactly: `node eval/run.mjs --rerank-floor=1` against the committed fixture (`eval/recordings/shown1-frozen.json`). This is the BEFORE the row below is measured against. |
+| 2026-09-12 | 033fe53 | 6+ | yes | 60 | 0.7875 | 0.8796 | 119.7 | 171.9 | 0 of 60 | 21 of 31 | 19 of 25 | 0 of 240 | 354 of 354 | **NOT A NEW MEASUREMENT — the row above, re-read with one negative added and the denominator changed from 30 to 31.** `eval/negatives.jsonl` gained the owner's own sentence, "app that transfer reels to recepies free", typed as he typed it; adding a test is allowed and the golden set is untouched. Nothing about the search changed, and the judgements are the frozen `n20-2` set plus one for the new sentence. **The nDCG moves 0.8707 → 0.8796 and not one judgement was re-recorded**: SEVEN were ADDED to the 347 the Phase 5 row froze, 0 changed and 0 removed, and two of the seven are golden queries that had been scored on the Phase 4 order — q023 (0.5750 → 0.9423) and q034 (0.6951 → 0.8630), which between them are the whole 0.0089. Coverage 347 of 353 → 354 of 354. The isolation is below under "Why the \"before\" reads 0.8796 when the Phase 5 row reads 0.8707": remove exactly those seven and the same code reproduces 0.8707 and 0.7842 to four decimals (`eval/recordings/phase5-recheck.json`). The extension moves both headline comparisons AGAINST the shipped change, not for it. Reproduce this row: `node eval/run.mjs --rerank-floor=1` against the committed fixture (`eval/recordings/shown1-frozen.json`). This is the BEFORE the row below is measured against. |
 | 2026-09-12 | 033fe53 | 6+ | yes | 60 | 0.7269 | 0.8645 | 119.7 | 171.9 | 0 of 60 | 24 of 31 | 22 of 25 | 0 of 240 | 354 of 354 | **A "Loose" result is no longer shown.** `RERANK_SHOWN_FROM` is 2: the reranker's grade 1 — "in the right area rather than an answer to it" — is dropped from the page with its 0s. The owner searched "app that transfer reels to recepies free" and was shown a receipt splitter graded 3; his decision (`docs/product-decisions.md` §17) is that the page should say there is nothing rather than show something unrelated, and this is the half of it that could be shipped. **Sentences that should return nothing: 21 of 31 → 24 of 31, near misses 8 of 16 → 11 of 16, held-out 19 of 25 → 22 of 25, the reviewer's 25 → 22 of 25. The price is nDCG 0.8796 → 0.8645 (a DROP of 0.0151) and recall 0.7875 → 0.7269 (a drop of 0.0606)**, and the drop is the point rather than a footnote: a judged-relevant tool the model reads as "in the right area" now leaves the page. Nothing else moved — 0 golden queries emptied, 0 of 240 perturbations, 15 of 15 answerable sentences still at rank 1, coverage 354 of 354, $0.000428 a search. The threshold costs no API call, changes no judgement and was chosen by re-scoring one recording at every value of it. **Two samples per judgement with the lower mark — the other half, and the half that fixes the owner's sentence outright — was measured over three recordings and NOT shipped: it empties golden queries and perturbations.** See "Ranking precision (after Phase 6)" below. |
 
 ### Ranking precision (after Phase 6) — the owner's decision, measured
@@ -113,6 +113,90 @@ Adding a test is allowed; the golden set is untouched and no negative was
 removed or reworded. The denominators in every row and table below are 31 rather
 than 30, and the two rows above are the same recording read at both thresholds
 so that the before and the after differ by one constant and nothing else.
+
+#### Why the "before" reads 0.8796 when the Phase 5 row reads 0.8707
+
+**The honest chain is `0.8707 → (seven judgements added, two of which move a
+golden query) → 0.8796 → (the threshold) → 0.8645`, and the middle step has to
+be established rather than asserted** — otherwise a reader comparing the two
+rows concludes the frozen recording was changed to suit the result. It was not
+changed. It was extended, and this is the whole of it.
+
+**What is different about the fixture.** Diffing the committed fixture against
+`git show 536df1e~1:db/seed/embeddings.fixture.json` — the Phase 5 frozen one:
+
+```
+Phase 5 frozen fixture judgements: 347
+shipped fixture judgements:        354
+added: 7   removed: 0   changed: 0
+readings changed: 0      readings added: 1  (the new sentence's)
+```
+
+**Not one of the 347 judgements Phase 5 froze was altered or deleted.** The
+seven that were added are the seven searches that had no judgement in that
+recording — the "searches with none recorded 6" line the frozen fixture printed,
+which is 6 cache keys over 7 searches because two of them share one — plus the
+new sentence:
+
+| added judgement | the search that needed it | what it did |
+| --- | --- | --- |
+| `golden.jsonl` **q023** | "programa gratuito para editar fotos sin pagar Photoshop" | nDCG 0.5750 → **0.9423**, 19 results → 7 |
+| `golden.jsonl` **q034** | "stop myself opening the same distracting websites while I am trying to work" | nDCG 0.6951 → **0.8630**, 20 results → 5 |
+| `golden.jsonl` q040 | "password manager with a russian interface" | judged; its own nDCG does not move |
+| a perturbation of q001 | "free app to split expenses with friends while travelling." | judged; still not empty |
+| a perturbation of q004 | "…with no idea where the money went?" | judged; still not empty |
+| `negatives.review.jsonl` near-05 | "the video i recorded is gone because my phone was stolen at the airport" | judged; the held-out share does not move |
+| `negatives.jsonl` n31 | the owner's sentence | negatives **20 of 31 → 21 of 31** |
+
+**The isolation.** Take the committed fixture, remove exactly those seven
+judgements, change nothing else — same code, same readings, same vectors — and
+re-score at the threshold Phase 5 shipped:
+
+```
+node eval/run.mjs --rerank-floor=1        # eval/recordings/phase5-recheck.json
+
+  searches with a judgement   347 of 354
+  nDCG@10  0.8707      recall@10  0.7842
+  golden empty 0   perturbed empty 0 of 240   negatives 20 of 31
+```
+
+**0.8707 and 0.7842, to four decimals, which is the recorded Phase 5 row.** That
+settles the three candidate explanations at once: the scoring path in
+`eval/run.mjs` did not change the number (the same code reproduces it), the
+readings did not change (none did, and the reader's new output ceiling only
+affects a call that is made — every reading here comes from the fixture), and no
+judgement was re-recorded.
+
+**Two golden queries of sixty carry the entire move.** q023 and q034 had no
+judgement in the frozen recording, so both were scored on the **Phase 4 order**:
+`reranked: false`, nineteen and twenty results, nothing dropped. Judging them
+drops them to seven and five results and adds
+`(0.3673 + 0.1678) / 60 = 0.0089` to the headline. 0.8707 + 0.0089 = 0.8796.
+
+So the Phase 5 row was, in a small and previously printed way, **two parts Phase
+4**: the `Rerank coverage` column exists precisely to make that visible, it read
+`347 of 353`, and this is what the six missing judgements were worth.
+
+**Does the extension flatter the shipped number? No — it moves both headline
+comparisons against it.** The before goes up on nDCG *and* up on the negatives,
+so the shipped threshold is charged a bigger drop and credited a smaller gain
+than the Phase 5 row would have given it:
+
+| | against the Phase 5 row (347 judgements) | against the re-read before (354) |
+| --- | --- | --- |
+| nDCG@10 | 0.8707 → 0.8645, a drop of **0.0062** | 0.8796 → 0.8645, a drop of **0.0151** |
+| `negatives.jsonl` empty | 20 of 31 → 24 of 31, **+4** | 21 of 31 → 24 of 31, **+3** |
+
+**The larger drop and the smaller gain are the ones reported**, here and in
+`docs/product-decisions.md` §17 and `docs/loop-progress.md`, because they are
+the ones measured on the fixture that ships. Quoting −0.0062 and +4 would be
+comparing a judged search against an unjudged one and calling the difference a
+threshold.
+
+One consequence worth naming: q023 is Spanish, so the non-English slice moves
+with it — 0.8871 on the re-read before, against the 0.8877 Phase 5 recorded for
+that slice under the reranker. Those two numbers are close for a reason that is
+now legible rather than lucky.
 
 #### What ships, and the one gate it misses
 
