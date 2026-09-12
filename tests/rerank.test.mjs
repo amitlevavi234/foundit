@@ -24,16 +24,22 @@ import {
   RERANK_MAX_CANDIDATES,
   RERANK_MODEL,
   RERANK_REQUESTS_PER_JUDGEMENT,
+  RERANK_SAMPLES,
+  RERANK_SHOWN_FROM,
   RERANK_TIMEOUT_MS,
   RERANK_TOP_N,
   applyRerank,
   candidatesHash,
+  combineSamples,
   hadGoodMatch,
+  lowerOf,
+  refusedEverything,
   relevanceBand,
   relevanceOf,
   rerank,
   rerankCandidates,
   rerankInput,
+  rerankOrThrow,
   rerankSchema,
   validateJudgement,
 } from '../lib/rerank.ts';
@@ -149,10 +155,28 @@ test('the order is relevance first, then the order the search already chose', ()
     { slug: 'd', relevance: 0 },
   ];
   assert.deepEqual(
-    applyRerank(rows, verdicts).map((r) => r.slug),
+    // Asked for explicitly, because this assertion is about the ORDER and the
+    // shipped threshold would remove one of the rows it is about.
+    applyRerank(rows, verdicts, 1).map((r) => r.slug),
     // b and c tie at 3 and keep the search's order; a is below them; d is gone.
     ['b', 'c', 'a'],
   );
+});
+
+test('a "Loose" 1 does not reach a page, and that is the shipped threshold', () => {
+  // The owner's decision of 12 September 2026, in one assertion: relevance 1
+  // is "in the right area rather than an answer to it", and he would rather
+  // the page say there is no matching tool than show one that is not related.
+  // The threshold was measured over one recording's judgements rather than
+  // chosen — eval/baselines.md, "Ranking precision (after Phase 6)".
+  assert.equal(RERANK_SHOWN_FROM, 2);
+  const rows = [{ slug: 'a' }, { slug: 'b' }];
+  const loose = [
+    { slug: 'a', relevance: 1 },
+    { slug: 'b', relevance: 1 },
+  ];
+  assert.deepEqual(applyRerank(rows, loose).map((r) => r.slug), [], 'two 1s are an empty page');
+  assert.deepEqual(applyRerank(rows, loose, 1).map((r) => r.slug), ['a', 'b'], 'and were not');
 });
 
 test('relevance 0 is dropped, and an unjudged row is dropped with it', () => {
@@ -160,6 +184,38 @@ test('relevance 0 is dropped, and an unjudged row is dropped with it', () => {
   assert.deepEqual(applyRerank(rows, [{ slug: 'a', relevance: 0 }]).map((r) => r.slug), []);
   assert.deepEqual(applyRerank(rows, [{ slug: 'b', relevance: 2 }]).map((r) => r.slug), ['b']);
 });
+
+/* --- two samples, the lower mark ------------------------------------------ */
+
+test('the lower of two judgements is taken slug by slug', () => {
+  const a = [
+    { slug: 'alpha', relevance: 3 },
+    { slug: 'bravo', relevance: 1 },
+    { slug: 'charlie', relevance: 2 },
+  ];
+  const b = [
+    { slug: 'alpha', relevance: 0 },
+    { slug: 'bravo', relevance: 3 },
+    { slug: 'charlie', relevance: 2 },
+  ];
+  assert.deepEqual(lowerOf(a, b), [
+    // The owner's case: a 3 that happened once is a 0.
+    { slug: 'alpha', relevance: 0 },
+    { slug: 'bravo', relevance: 1 },
+    { slug: 'charlie', relevance: 2 },
+  ]);
+  // Content is symmetric, and the order is the first argument's.
+  assert.deepEqual(
+    [...lowerOf(b, a)].sort((x, y) => x.slug.localeCompare(y.slug)),
+    [...lowerOf(a, b)].sort((x, y) => x.slug.localeCompare(y.slug)),
+  );
+  // A slug the other side does not mention counts as 0, which is the refusing
+  // direction. validateJudgement makes it unreachable; this pins the direction.
+  assert.deepEqual(lowerOf([{ slug: 'alpha', relevance: 3 }], []), [
+    { slug: 'alpha', relevance: 0 },
+  ]);
+});
+
 
 test('a judgement of all zeroes empties the page, which is the point', () => {
   const rows = [{ slug: 'a' }, { slug: 'b' }, { slug: 'c' }];
@@ -444,6 +500,130 @@ test('with no key it does not call, and the order stands', async () => {
   }
 });
 
-test('one judgement is one request, and the cap is told so', () => {
-  assert.equal(RERANK_REQUESTS_PER_JUDGEMENT, 1);
+test('one judgement is one request per sample, and the cap is told so', () => {
+  // The daily cap multiplies this by the price of a request, so a judgement
+  // that quietly became two calls against a constant still saying one would
+  // have doubled the worst-case bill with nothing to notice it. That is why the
+  // constant is DERIVED from RERANK_SAMPLES rather than written out: the
+  // precision work ran at two samples for a day and this followed it without
+  // anybody remembering to.
+  assert.equal(RERANK_SAMPLES, 1, 'two was measured over three recordings and not shipped');
+  assert.equal(RERANK_REQUESTS_PER_JUDGEMENT, RERANK_SAMPLES, 'one request per sample');
 });
+
+test('one sample refusing everything empties the page, and that is the trade', () => {
+  // THE FINDING THIS PROJECT PAID FOR, pinned so nobody undoes it by accident.
+  //
+  // Under the lower mark, a sample that grades ALL candidates 0 has a veto. It
+  // is what empties the owner's page — "app that transfer reels to recepies
+  // free", where one sample keeps grading Receiptly 3 — and it is what emptied
+  // golden q028 on eval/recordings/min2-2.json, a question the catalogue
+  // answers five ways.
+  //
+  // The obvious fix is `readSentence`'s rule: discard a refusal the other
+  // sample contradicts. It was built, recorded (eval/recordings/vote-1.json)
+  // and measured against the owner's own sentence: Receiptly came back at 3
+  // five times out of six. The rule that rescues q028 is the rule that undoes
+  // the reason this change exists, so there is no rule, and `refusedEverything`
+  // survives only as the name of the shape a run counts.
+  const rich = [
+    { slug: 'alpha', relevance: 3 },
+    { slug: 'bravo', relevance: 2 },
+    { slug: 'charlie', relevance: 0 },
+  ];
+  const nothing = rich.map((v) => ({ slug: v.slug, relevance: 0 }));
+
+  assert.equal(refusedEverything(nothing), true);
+  assert.equal(refusedEverything(rich), false);
+  assert.equal(refusedEverything([]), false, 'no candidates is not a refusal');
+
+  // One sample refusing everything empties the page, whichever order they
+  // arrive in. This is the assertion a future "fix" has to argue with.
+  assert.deepEqual(combineSamples([rich, nothing]), nothing);
+  assert.deepEqual(combineSamples([nothing, rich]), nothing);
+  assert.deepEqual(combineSamples([nothing, nothing]), nothing);
+  // Both found something: the lower mark, slug by slug.
+  assert.deepEqual(
+    combineSamples([rich, [
+      { slug: 'alpha', relevance: 0 },
+      { slug: 'bravo', relevance: 2 },
+      { slug: 'charlie', relevance: 1 },
+    ]]),
+    [
+      { slug: 'alpha', relevance: 0 },
+      { slug: 'bravo', relevance: 2 },
+      { slug: 'charlie', relevance: 0 },
+    ],
+  );
+  // One sample is still a judgement: with nothing to compare against, it is it.
+  assert.deepEqual(combineSamples([rich]), rich);
+});
+
+test('the shipped path makes ONE call, and asking for two still works', async () => {
+  const answers = [
+    { results: [{ slug: 'alpha', relevance: 3 }, { slug: 'bravo', relevance: 2 }, { slug: 'charlie', relevance: 0 }] },
+    { results: [{ slug: 'alpha', relevance: 0 }, { slug: 'bravo', relevance: 2 }, { slug: 'charlie', relevance: 3 }] },
+  ];
+
+  // What ships: one sample, one request, and the grades as they came back.
+  let call = 0;
+  const shipped = await withFetch(
+    () => responded(JSON.stringify(answers[call++ % answers.length])),
+    () => rerank('a sentence', CANDIDATES),
+  );
+  assert.equal(call, 1, 'a judgement is one request');
+  assert.equal(shipped.value.samples, 1);
+  assert.equal(shipped.value.outs.length, 1, 'output tokens are reported per request');
+
+  // The mechanism that was measured and not shipped, kept working so that
+  // raising RERANK_SAMPLES is one constant rather than a rewrite: two calls,
+  // and the page shows only what BOTH of them were willing to show.
+  call = 0;
+  const twice = await withFetch(
+    () => responded(JSON.stringify(answers[call++ % answers.length])),
+    () => rerankOrThrow('a sentence', CANDIDATES, { samples: 2 }),
+  );
+  assert.equal(call, 2);
+  assert.equal(twice.value.samples, 2);
+  assert.deepEqual(twice.value.judgement, [
+    { slug: 'alpha', relevance: 0 },
+    { slug: 'bravo', relevance: 2 },
+    { slug: 'charlie', relevance: 0 },
+  ]);
+  assert.deepEqual(
+    applyRerank([{ slug: 'alpha' }, { slug: 'bravo' }, { slug: 'charlie' }], twice.value.judgement).map((r) => r.slug),
+    ['bravo'],
+  );
+});
+
+test('one sample is still a judgement when the other does not come back', async () => {
+  // The reader's rule, and for the reader's reason: no judgement at all means
+  // the whole Phase 4 candidate set on the page, unfiltered, which is worse
+  // than a judgement made once.
+  let call = 0;
+  const { value, errors } = await withFetch(
+    () => {
+      call += 1;
+      if (call === 1) throw new Error('econnreset');
+      return responded(
+        JSON.stringify({
+          results: [
+            { slug: 'alpha', relevance: 2 },
+            { slug: 'bravo', relevance: 0 },
+            { slug: 'charlie', relevance: 0 },
+          ],
+        }),
+      );
+    },
+    () => rerankOrThrow('a sentence', CANDIDATES, { samples: 2 }),
+  );
+  assert.equal(value.samples, 1, 'the one that returned is the judgement');
+  assert.deepEqual(value.judgement, [
+    { slug: 'alpha', relevance: 2 },
+    { slug: 'bravo', relevance: 0 },
+    { slug: 'charlie', relevance: 0 },
+  ]);
+  assert.deepEqual(errors, [], 'and it is not an error, so nothing is logged');
+  assert.equal(call, 2, 'both were asked');
+});
+

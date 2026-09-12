@@ -143,8 +143,11 @@ one.* Phase 5 added a reranker: over the top candidates the search returned,
 `gpt-5-nano` is shown the sentence and each candidate's own name, summary and
 problem statements — and nothing else, not its price, its rating, its like
 count or the rank the search gave it — and grades each one 0 to 3. **Where that
-ran, the band is the grade**: 3 is *Strong*, 2 is *Possible*, 1 is *Loose*, and
-0 is not shown at all. **Where it did not run** — no key, a timeout, a
+ran, the band is the grade**: 3 is *Strong* and 2 is *Possible*. **Amended 12
+September 2026** (§17, the owner's precision decision): a 1 — *Loose*, "in the
+right area rather than an answer to it" — is no longer shown either, so 0 and 1
+are both off the page and *Loose* no longer appears on a card.
+**Where it did not run** — no key, a timeout, a
 malformed answer, the daily cap spent — the band is what it has been since
 Phase 3: a *location*, naming which of a listing's texts the words turned up
 in. The two are different claims and are worded differently, and the line above
@@ -556,6 +559,99 @@ column, no session column and no foreign key to anything that has one, and
 `log_search_event` still takes no identity and returns no row id.
 `match_judged` is a boolean about a search, and there is nothing in this row
 that could ever say whose.
+
+### Amended 12 September 2026: precision over recall, and the sentence that decided it
+
+The owner searched **"app that transfer reels to recepies free"** — his
+spelling — and was shown **Receiptly, a receipt splitter, as the only result on
+the page**. The cached judgement in `public.query_reranks` had graded it
+**relevance 3**, "clearly fits". Nothing about the two sentences agrees except
+that "recepies" looks like "receipts". His words: he would rather the page say
+there is no matching tool than show one that is not related.
+
+**That is now the rule, and it outranks the recall this project has spent three
+phases buying.** Where the two conflict — and they do conflict, measurably —
+the page shows less. Three things follow, each measured rather than asserted,
+and the numbers are in `eval/baselines.md` under "Ranking precision (after
+Phase 6)".
+
+**1. Relevance 1 no longer reaches a page.** The *Loose* band's own words were
+"this is in the right area rather than an answer to it", and §17 above has said
+since the day it was written that relevance 1 is not a good match. A row the
+product describes as not an answer, on a page it does not count as a match, is
+exactly the row the owner was objecting to. `RERANK_SHOWN_FROM` is 2: a result
+is shown when the reranker judged it to do the thing, at least in part. So no
+card on a judged page carries the *Loose* band any more — `/ranking` says as
+much, and §6's description of the bands is amended with it. The band itself
+stays in `lib/rerank.ts`, because the four-point scale is still the four-point
+scale and the threshold is a measured number that a later measurement may move
+back.
+
+**2. The price is recorded as a price.** Precision over recall is not a free
+choice and this file will not pretend it is. Both numbers come off ONE frozen
+recording, scored at both thresholds, so the comparison is exact rather than
+two runs of a model that wobbles — `eval/recordings/shown1-frozen.json` and
+`shown2-frozen.json`:
+
+| | *Loose* shown | *Loose* dropped | change |
+| --- | --- | --- | --- |
+| nDCG@10 | 0.8796 | **0.8645** | −0.0151 |
+| recall@10 | 0.7875 | **0.7269** | −0.0606 |
+| `negatives.jsonl` empty | 21 of 31 | **24 of 31** | +3 |
+| its near misses | 8 of 16 | **11 of 16** | +3 |
+| held-out empty | 19 of 25 | **22 of 25** | +3 |
+| the reviewer's 25 | 20 of 25 | **22 of 25** | +2 |
+| answerable sentences at rank 1 | 15 of 15 | 15 of 15 | — |
+| golden queries emptied | 0 | 0 | — |
+
+**A judged-relevant tool the model calls "in the right area" is now dropped
+from a page it used to sit at the bottom of, and some of those droppings are
+wrong** — that is what the recall line is. Six hundredths of recall for three
+of our own unanswerable sentences and three of a reviewer's is the trade the
+owner asked for, and it is written here in both directions so that a later
+phase can disagree with the reading rather than with a sentence.
+
+**3. Two samples per judgement were measured and NOT shipped, and the owner's
+own sentence is the reason it is worth recording.** The Phase 5 review had
+measured the reranker changing 25% of its own grades across three live calls,
+with 26 of 37 crossing the line between shown and not shown; his 3 is what that
+looks like from the outside. Asking twice and keeping the LOWER mark makes a
+grade happen twice before anybody sees it, and it empties his page every time.
+It also **empties pages this catalogue answers**: across three recordings it
+emptied golden q028 once and one to two of the 240 mechanical perturbations
+every time, against a gate that allows zero. The rule that rescues those — a
+refusal one sample cannot corroborate is not a refusal — puts Receiptly back at
+3 five times out of six. `lib/rerank.ts` carries the whole measurement beside
+`RERANK_SAMPLES`; the short version is that a single sample saying "none of
+these" is what a correct empty page and a wrong empty page look like from here,
+and this instrument cannot tell them apart.
+
+**So his sentence returns nothing today, and the reason is thinner than it
+looks.** The judgement now cached for it grades all twenty candidates 0. Five
+further single samples of the same question graded Receiptly 3, 2 and 2 — so
+the empty page is one draw of an unstable judgement rather than a property of
+the search, and the change that would have made it a property is the one
+above.
+
+**What has NOT changed.** The definition of a good match above — the reranker
+ran, and something it judged 2 or 3 is on the page — is untouched, and it is
+now also the definition of what is shown at all, which is the one simplification
+this amendment buys. A search where the reranker did not run is still
+`match_judged: false` and still serves the Phase 4 order unfiltered: a page
+nobody judged is not a page this rule can speak about.
+
+**And one consequence worth saying out loud, because §17 above warns against
+exactly its shape.** With the threshold at 2, every result on a judged page is
+a 2 or a 3 — so on a judged search `had_good_match` is now true precisely when
+the page is not empty. The column that this section was written to stop being
+`result_count > 0` has, for judged searches, become arithmetically equal to it.
+That is not a guess creeping back in: the column still means what it says, and
+the reason the two coincide is the decision above rather than a shortcut. What
+keeps the operator panel worth reading is `match_judged`, which still separates
+the three states — nobody looked, it was read and nothing fitted, it was read
+and something did — and the middle one is the panel. If a future phase wants
+the two columns to be independent again, the way to do it is to define a good
+match as a 3 and leave what is *shown* at 2, deliberately, in this file.
 
 ## 18. What accounts actually do, and the nine things Phase 6 had to decide (added 12 September 2026)
 

@@ -63,17 +63,21 @@ export default function Ranking() {
           describes what ships today. */}
       <p style={{ margin: 0 }}>
         <strong>What the bands mean, and what a percentage would take.</strong> Each result carries
-        one of three words — <strong>Strong</strong>, <strong>Possible</strong> or{' '}
-        <strong>Loose</strong> — and they come from a model that was shown your sentence and that
-        listing’s own description and problem statements, and nothing else: not its price, not its
-        rating, not how many people liked it, not where the search had put it. Strong means the tool
-        is for the thing you described; Possible means it does the job, perhaps as one part of
-        something larger; Loose means it is in the right area rather than an answer. Anything it
-        reads as not for you is not shown at all, which is why a page here can be short, or empty.
-        Where that reading could not run — no answer from the model in time, or the day’s spending
-        limit reached — the band instead names <em>where</em> your words turned up in a listing, and
-        the line above the results says which of the two you are looking at. A band is a judgement
-        about fit; a location is not, and they are deliberately worded so you can tell them apart.
+        one of two words — <strong>Strong</strong> or <strong>Possible</strong> — and they come from
+        a model that was shown your sentence and that listing’s own description and problem
+        statements, and nothing else: not its price, not its rating, not how many people liked it,
+        not where the search had put it. Strong means the tool is for the thing you described;
+        Possible means it does the job, perhaps as one part of something larger, perhaps in a couple
+        of steps. <strong>Everything else is not shown at all</strong> — and since 12 September 2026
+        that includes a tool the model reads as being in the right <em>area</em> without answering
+        what you asked, which used to appear at the bottom of the page under a third word,{' '}
+        <em>Loose</em>. The owner decided the other way round: a page that says nothing here fits is
+        better than a page with something unrelated on it. So a page here can be short, or empty,
+        and it is emptier than it was. Where that reading could not run — no answer from the model in
+        time, or the day’s spending limit reached — the band instead names <em>where</em> your words
+        turned up in a listing, and the line above the results says which of the two you are looking
+        at. A band is a judgement about fit; a location is not, and they are deliberately worded so
+        you can tell them apart.
       </p>
       <p style={{ margin: 0 }}>
         There is no percentage, and that is not modesty. A calibrated number means something precise

@@ -25,7 +25,7 @@ import { ToolTile } from './ToolTile';
  *
  * The designed fit meter still has its slot (`fit`), and it is still empty
  * after Phase 5. That phase did give the band something to say — where the
- * reranker ran, `band` is its judgement (Strong, Possible, Loose) rather than a
+ * reranker ran, `band` is its judgement (Strong or Possible) rather than a
  * location — but a PERCENTAGE needs a calibration, a calibration needs pairs
  * that people have judged, and there are none. `/ranking` says so in two
  * paragraphs and `eval/calibrate.mjs` is the command that fits the curve the

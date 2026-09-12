@@ -1132,6 +1132,18 @@ function parseArgs(argv) {
     /** How many candidates are judged. Measured at 20, 30 and 50. */
     rerankN: null,
     /**
+     * The lowest grade that still reaches a page. Null means the shipped
+     * `RERANK_SHOWN_FROM`.
+     *
+     * A SWEEP FLAG THAT COSTS NOTHING, which is the point of it. The threshold
+     * is applied when a judgement is USED rather than when it is recorded, so
+     * one recording's judgements score at every value of it and choosing it is
+     * a free measurement rather than three more paid ones. `applyRerank` is
+     * still the one function that decides the order; this is the argument it
+     * takes.
+     */
+    rerankFloor: null,
+    /**
      * Call the model for any (sentence, candidate set) the fixture does not
      * hold, and write the answers into it. The ONE path in this harness that
      * spends money, and it is never on by default.
@@ -1156,6 +1168,7 @@ function parseArgs(argv) {
     else if (arg === '--no-rerank') opts.rerank = false;
     else if (arg === '--record-reranks') opts.recordReranks = true;
     else if (arg.startsWith('--rerank-n=')) opts.rerankN = Number.parseInt(arg.slice(11), 10);
+    else if (arg.startsWith('--rerank-floor=')) opts.rerankFloor = Number.parseInt(arg.slice(15), 10);
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg.startsWith('--limit=')) opts.limit = Number.parseInt(arg.slice(8), 10);
     else if (arg.startsWith('--timeout=')) opts.timeout = Number.parseInt(arg.slice(10), 10);
@@ -1198,6 +1211,12 @@ function parseArgs(argv) {
   }
   if (opts.rerankN !== null && (!Number.isInteger(opts.rerankN) || opts.rerankN < 1)) {
     return { error: '--rerank-n must be a positive integer', opts };
+  }
+  if (
+    opts.rerankFloor !== null &&
+    (!Number.isInteger(opts.rerankFloor) || opts.rerankFloor < 1 || opts.rerankFloor > 3)
+  ) {
+    return { error: '--rerank-floor must be 1, 2 or 3', opts };
   }
   if (opts.recordReranks && !opts.rerank) {
     return { error: '--record-reranks and --no-rerank ask for opposite things', opts };
@@ -1249,6 +1268,10 @@ const USAGE = `Foundit search evaluation harness
                   what a visitor gets.
   --rerank-n=N    how many candidates the reranker judges (default: the shipped
                   RERANK_TOP_N in lib/rerank.ts). Measured at 20, 30 and 50.
+  --rerank-floor=N  the lowest grade that still reaches a page: 1, 2 or 3
+                  (default: the shipped RERANK_SHOWN_FROM in lib/rerank.ts).
+                  Applied when a judgement is used, so one recording scores at
+                  every value and the sweep costs nothing.
   --record-reranks  call the model for any (sentence, candidate set) the
                   fixture does not hold, and write the answers into it. THE ONE
                   PATH HERE THAT SPENDS MONEY. Needs a key.
@@ -1798,23 +1821,49 @@ async function prerecordJudgements(client, sets, plan, reranker, opts, redact) {
   process.stdout.write(`  recording: ${work.length} judgement(s) to fetch.\n`);
   if (work.length === 0) return;
 
-  // Four at a time. The application makes ONE call per search and this is not a
-  // model of that — it is a recording session, and the same reasoning as
-  // scripts/read.mjs's CONCURRENCY: kept low because the provider answers a
-  // burst of six with 429s.
-  const CONCURRENCY = 4;
+  // TWO SENTENCES AT A TIME, WHICH IS FOUR REQUESTS IN FLIGHT. It was four
+  // sentences while a judgement was one call, and the day a judgement became
+  // two calls (lib/rerank.ts, RERANK_SAMPLES) the same four sentences put eight
+  // requests in flight and the provider answered with 429s: the first recording
+  // taken that way lost 145 of 354 judgements outright and made another 72 from
+  // a single sample, which is not a recording of this configuration at all. The
+  // same arithmetic and the same ceiling as scripts/read.mjs, which reads two
+  // sentences at a time for exactly this reason.
+  const CONCURRENCY = Math.max(1, Math.floor(4 / (reranker.samples ?? 1)));
   let done = 0;
-  const fetchOne = async ({ sentence, hash, candidates }) => {
+  let total = work.length;
+  /** Judgements that failed, or came back short of their samples. */
+  let retry = [];
+
+  /**
+   * One judgement, recorded — or put on the retry list.
+   *
+   * A JUDGEMENT SHORT OF ITS SAMPLES IS NOT RECORDED ON THE FIRST PASS. The
+   * application uses one sample when the second does not return, because the
+   * alternative there is no judgement at all and a visitor is waiting. A
+   * RECORDING is not waiting for anything, and a fixture whose judgements are
+   * part two-sample and part one-sample measures neither configuration — the
+   * first recording taken this way had 72 of 209 made from a single call.
+   * So it goes round once more, alone, and only then is one sample accepted
+   * and counted on the `judgements from ONE sample` line.
+   */
+  const fetchOne = async (item, lastChance) => {
     try {
-      const fresh = await reranker.rerankOrThrow(sentence, candidates);
+      const fresh = await reranker.rerankOrThrow(item.sentence, item.candidates);
+      if ((fresh.samples ?? 1) < reranker.samples && !lastChance) {
+        retry.push(item);
+        return;
+      }
       reranker.stats.recorded += 1;
       reranker.stats.tokensIn += fresh.tokensIn;
       reranker.stats.tokensOut += fresh.tokensOut;
-      reranker.fixture[`${normalizedKey(sentence)}\n${hash}`] = fresh.judgement;
+      reranker.stats.outs.push(...(fresh.outs ?? []));
+      if ((fresh.samples ?? 1) < reranker.samples) reranker.stats.oneSample += 1;
+      reranker.fixture[`${normalizedKey(item.sentence)}\n${item.hash}`] = fresh.judgement;
       try {
         await client.query(STORE_QUERY_RERANKS_SQL, [
-          [normalizedKey(sentence)],
-          [hash],
+          [normalizedKey(item.sentence)],
+          [item.hash],
           [JSON.stringify(fresh.judgement)],
           reranker.model,
         ]);
@@ -1822,18 +1871,35 @@ async function prerecordJudgements(client, sets, plan, reranker, opts, redact) {
         // The cache is a convenience while recording; the fixture is the record.
       }
     } catch (err) {
+      if (!lastChance) {
+        retry.push(item);
+        return;
+      }
       reranker.stats.failed += 1;
       reranker.stats.note = `the reranker failed on one sentence (${redact(err?.message ?? err)})`;
+    } finally {
+      done += 1;
+      if (done % 50 === 0) process.stdout.write(`    ${done} of ${total}\n`);
     }
-    done += 1;
-    if (done % 50 === 0) process.stdout.write(`    ${done} of ${work.length}\n`);
   };
 
   for (let i = 0; i < work.length; i += CONCURRENCY) {
-    await Promise.all(work.slice(i, i + CONCURRENCY).map(fetchOne));
+    await Promise.all(work.slice(i, i + CONCURRENCY).map((item) => fetchOne(item, false)));
   }
+
+  // The second pass, one at a time, because what it is recovering from is a
+  // burst the provider refused.
+  const second = retry;
+  retry = [];
+  if (second.length > 0) {
+    process.stdout.write(`  recording: ${second.length} to try once more, one at a time.\n`);
+    total += second.length;
+    for (const item of second) await fetchOne(item, true);
+  }
+
   process.stdout.write(
-    `  recorded: ${reranker.stats.recorded}, failed ${reranker.stats.failed}.\n`,
+    `  recorded: ${reranker.stats.recorded}, failed ${reranker.stats.failed}, ` +
+      `from one sample ${reranker.stats.oneSample}.\n`,
   );
 }
 
@@ -2109,6 +2175,8 @@ async function runPass(client, queries, opts, plan, redact, reranker = null) {
           reranker.stats.recorded += 1;
           reranker.stats.tokensIn += fresh.tokensIn;
           reranker.stats.tokensOut += fresh.tokensOut;
+          reranker.stats.outs.push(...(fresh.outs ?? []));
+          if ((fresh.samples ?? 1) < reranker.samples) reranker.stats.oneSample += 1;
           reranker.fixture[key] = fresh.judgement;
           raw = fresh.judgement;
           try {
@@ -2133,7 +2201,7 @@ async function runPass(client, queries, opts, plan, redact, reranker = null) {
         if ('judgement' in checked) {
           judged = true;
           judgement = checked.judgement;
-          results = rr.applyRerank(results, checked.judgement);
+          results = rr.applyRerank(results, checked.judgement, reranker.floor);
           reranker.stats.judged += 1;
         } else {
           reranker.stats.refused += 1;
@@ -2474,12 +2542,35 @@ async function main(argv) {
         reranker = {
           lib: rr,
           rerankOrThrow: rr.rerankOrThrow,
+          // What goes in query_reranks.rerank_model, which public.rerank_model()
+          // has to agree with. It is the model name and nothing else, and the
+          // day RERANK_SAMPLES or the prompt moves it has to stop being that —
+          // lib/rerank.ts says so where the constant is.
           model: rr.RERANK_MODEL,
+          samples: rr.RERANK_SAMPLES,
+          maxOutputTokens: rr.RERANK_MAX_OUTPUT_TOKENS,
+          floor: opts.rerankFloor ?? rr.RERANK_SHOWN_FROM,
           n: opts.rerankN ?? rr.RERANK_TOP_N,
           listings,
           record: opts.recordReranks,
           fixture: {},
-          stats: { judged: 0, missing: 0, refused: 0, recorded: 0, failed: 0, tokensIn: 0, tokensOut: 0, note: null },
+          stats: {
+            judged: 0,
+            missing: 0,
+            refused: 0,
+            recorded: 0,
+            failed: 0,
+            tokensIn: 0,
+            tokensOut: 0,
+            // Output tokens per REQUEST, one entry per call this recording
+            // made, and the number of judgements that were made from one call
+            // rather than two. The first is what a max_output_tokens ceiling
+            // has to be set from; the second is how often the vote did not
+            // happen. Both are empty on a run that records nothing.
+            outs: [],
+            oneSample: 0,
+            note: null,
+          },
         };
         process.stdout.write(
           `  reranker: top ${reranker.n} candidates, ${warmed.loaded} of ${warmed.recorded} ` +
@@ -3085,7 +3176,18 @@ async function main(argv) {
       recordedAt: startedAt.toISOString(),
       plan: opts.plan,
       rerank: reranker
-        ? { model: reranker.model, topN: reranker.n, ...reranker.stats }
+        ? {
+            model: reranker.model,
+            topN: reranker.n,
+            samples: reranker.samples ?? 1,
+            shownFrom: reranker.floor ?? 1,
+            ...reranker.stats,
+            // The raw per-call list is hundreds of integers and says nothing a
+            // reader of a recording wants; the five numbers off it say all of
+            // it. The list itself lives for the length of one process.
+            outs: undefined,
+            outputTokens: outputSpread(reranker.stats.outs ?? []),
+          }
         : null,
       coverage,
       overall,
@@ -3666,6 +3768,29 @@ export function buildPositivesReport(overall, perQuery) {
   return out.join('\n');
 }
 
+/**
+ * The distribution of one recording's per-request output tokens, or null when
+ * it made no call.
+ *
+ * A MEAN IS THE WRONG STATISTIC HERE and that is the whole reason this exists.
+ * `max_output_tokens` is what the worst case is billed at, so the number the
+ * daily caps are multiplied by has to come off the tail rather than the middle
+ * — the reader's ceiling stood at 900 against a mean of 65 and a p99 of 117
+ * until somebody measured the three.
+ */
+export function outputSpread(outs) {
+  if (!Array.isArray(outs) || outs.length === 0) return null;
+  const sorted = [...outs].sort((a, b) => a - b);
+  return {
+    calls: sorted.length,
+    mean: Math.round(mean(sorted)),
+    p50: percentile(sorted, 50),
+    p90: percentile(sorted, 90),
+    p99: percentile(sorted, 99),
+    max: sorted[sorted.length - 1],
+  };
+}
+
 export function buildRerankReport(reranker, passes) {
   const out = [];
   const s = reranker.stats;
@@ -3692,12 +3817,32 @@ export function buildRerankReport(reranker, passes) {
   out.push(`${reranker.model} and graded 0 to 3. Anything graded 0 is dropped.`);
   out.push('');
   out.push(`  candidates judged per search  top ${reranker.n}`);
+  out.push(`  samples per judgement         ${reranker.samples ?? 1} (the LOWER mark of them is the grade)`);
+  out.push(
+    `  shown from relevance          ${reranker.floor ?? 1}` +
+      (reranker.floor >= 2 ? ' (a "Loose" 1 is dropped, not shown)' : ' (0 is dropped)'),
+  );
   out.push(`  searches with a judgement     ${s.judged} of ${judgeable.length}`);
   out.push(`  searches with none recorded   ${s.missing}  (these measure the Phase 4 order)`);
   out.push(`  recorded judgements refused   ${s.refused}`);
   if (reranker.record) {
     out.push(`  judgements recorded this run  ${s.recorded} (${s.failed} failed)`);
+    out.push(`  judgements from ONE sample    ${s.oneSample ?? 0} (the other call did not return)`);
     out.push(`  tokens                        ${s.tokensIn} in, ${s.tokensOut} out`);
+    // The distribution rather than the mean, because a max_output_tokens
+    // ceiling bounds ONE request and a daily cap is multiplied by it. The
+    // reader's half of the same question is scripts/output-tokens.mjs.
+    const spread = outputSpread(s.outs ?? []);
+    if (spread) {
+      out.push(
+        `  output tokens per request     p50 ${spread.p50}, p90 ${spread.p90}, ` +
+          `p99 ${spread.p99}, max ${spread.max} over ${spread.calls} call(s)`,
+      );
+      out.push(
+        `  a 3x-p99 ceiling would be     ${3 * spread.p99}` +
+          (reranker.maxOutputTokens ? ` (lib/rerank.ts sends ${reranker.maxOutputTokens})` : ''),
+      );
+    }
   }
   out.push(`  results dropped as "not for this"  ${dropped}`);
   out.push(`  pages emptied by the judgement     ${emptied}`);

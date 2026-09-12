@@ -896,11 +896,13 @@ async function Answer({
                 : `${results.length} ${results.length === 1 ? 'tool meets' : 'tools meet'} this.`
               : judged
                 ? // The reranker read every candidate against this sentence and
-                  // what is left is what it did not rule out. That is a stronger
-                  // claim than the floor's "close in meaning", and a weaker one
-                  // than "these fit": a Loose result is on the page and is
-                  // labelled Loose. So the heading says what happened — each one
-                  // was read — rather than asserting a grade for all of them.
+                  // what is left is what it judged to do the thing, at least in
+                  // part — RERANK_SHOWN_FROM is 2 since the owner's precision
+                  // decision, so a "Loose" 1 is no longer among them. The
+                  // heading still says what HAPPENED — each one was read —
+                  // rather than asserting a grade for all of them, because the
+                  // per-card band is where a grade belongs and two of them can
+                  // be Possible rather than Strong.
                   results.length >= RESULT_LIMIT
                   ? `The first ${results.length}, read against what you asked.`
                   : `${results.length} ${results.length === 1 ? 'tool' : 'tools'}, read against what you asked.`
@@ -1003,9 +1005,14 @@ async function Answer({
         {results.map((result, i) => {
           // Where the band comes from, and it is two different claims.
           //
-          // Where the reranker ran, it is the judgement: Strong, Possible or
-          // Loose, from a relevance of 3, 2 or 1 — a model that was shown this
-          // sentence and this listing and nothing else. Where it did not run,
+          // Where the reranker ran, it is the judgement: Strong or Possible,
+          // from a relevance of 3 or 2 — a model that was shown this sentence
+          // and this listing and nothing else. A 1 cannot reach this line any
+          // more, because `applyRerank` no longer puts one on the page
+          // (RERANK_SHOWN_FROM); the branch below still names it, so the day a
+          // measurement moves the threshold back the card does not fall through
+          // to a location band and quietly change what it is claiming.
+          // Where it did not run,
           // it is what it has always been: a LOCATION, which of the tool's texts
           // the words turned up in. The two say different things and the card
           // must not pass one off as the other, so they have different words.

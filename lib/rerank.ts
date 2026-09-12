@@ -57,6 +57,84 @@ import { ReaderError, callResponses, capText } from './reader-model.ts';
 export const RERANK_MODEL = 'gpt-5-nano';
 
 /**
+ * How many times the model is asked, and what is done with the answers.
+ *
+ * ONE — AND TWO WAS BUILT, MEASURED OVER THREE RECORDINGS AND NOT SHIPPED.
+ * This constant is a measurement, and it is the most expensive measurement in
+ * the precision work, so the whole of it is written down here.
+ *
+ * THE SENTENCE THAT ASKED THE QUESTION. The owner searched "app that transfer
+ * reels to recepies free" and was shown Receiptly — a receipt splitter — as the
+ * only result, because the cached judgement graded it **3**. Nothing about the
+ * two agrees except that "recepies" looks like "receipts". His decision, in
+ * `docs/product-decisions.md` §17, is that he would rather the page say there is
+ * no matching tool than show one that is not related.
+ *
+ * WHY TWO SAMPLES WAS THE OBVIOUS ANSWER. The Phase 5 review had already
+ * measured the reranker changing 37 of 147 (slug, sentence) grades across three
+ * live calls — 25.2% — with 26 of them crossing the line between shown and not
+ * shown. A hallucinated 3 is that instability seen from the outside, and the
+ * reader's own fix for the same problem is to sample twice and vote. Two
+ * samples with the LOWER mark makes a grade have to happen twice before
+ * anybody sees it. Six judgements of the owner's sentence at each setting:
+ *
+ *   one sample    Receiptly 3, -, 2, (timeout), 2, -   shown 3 times of 5
+ *   two, lower    Receiptly 0 on every recording taken
+ *
+ * WHY IT IS NOT SHIPPED. A sample that grades ALL twenty candidates 0 has
+ * refused the whole page, and under the lower mark that one sample has a VETO.
+ * That veto is what empties the owner's page — and it is also what empties
+ * pages this catalogue answers. Three full recordings at `RERANK_SAMPLES = 2`
+ * (`eval/recordings/min2-{1,2,3}.json`), against a gate that allows ZERO:
+ *
+ *   golden queries emptied           0, 1 (q028), 0
+ *   perturbed variants emptied       1 (q018), 2 (q028), 1 (q042)   of 240
+ *
+ * `docs/build-phases.md`'s rule for the perturbation gate is zero, not "no
+ * worse than recorded", and the Phase 5 review's words for it stand: a floor
+ * that depends on a full stop is not a floor. Every one of the three recordings
+ * failed it, at both values of `RERANK_SHOWN_FROM`, so there was no recording
+ * to freeze.
+ *
+ * AND THE FIX FOR THE VETO UNDOES THE REASON FOR THE CHANGE. `combineSamples`
+ * carries the attempt: discard a sample that refuses everything when the other
+ * one does not, which is `readSentence`'s own "a refusal that could not be
+ * corroborated is not a refusal". It was built, recorded
+ * (`eval/recordings/vote-1.json`) and pointed at the owner's sentence six
+ * times: **Receiptly came back at 3 five times of six.** The rule that rescues
+ * q028 is the rule that puts Receiptly back on his page. A single sample saying
+ * "none of these" is what a correct empty page and a wrong empty page look like
+ * from here, and this instrument cannot tell them apart.
+ *
+ * So the precision the owner asked for is bought by `RERANK_SHOWN_FROM` instead
+ * — which costs nothing, changes no judgement, and is measured in
+ * `eval/baselines.md` — and this stays at one. **The mechanism is kept rather
+ * than deleted**, the way `RERANK_EFFORT` keeps the measurement that rejected
+ * `low`: `rerankOrThrow` takes a `samples` option, `lowerOf` and
+ * `combineSamples` are tested, and the day the reranker is a steadier model
+ * this is one constant and three recordings away from being re-measured.
+ *
+ * IF IT IS EVER RAISED, THREE THINGS MOVE WITH IT, and they are named here
+ * because the first one is invisible until it has already gone wrong:
+ *
+ *   1. `public.rerank_model()` must change in a migration. The cache is keyed
+ *      on it, `query_rerank()` serves a row only when it matches, and a single
+ *      sample and the lower of two are different answers to the same question —
+ *      so without that, every judgement recorded the old way is served as if
+ *      the new rule had produced it. 0010's comment on that function already
+ *      says this about the prompt and the schema; the sampling belongs in the
+ *      same sentence.
+ *   2. `RERANK_REQUESTS_PER_JUDGEMENT` follows it, and with it
+ *      `MAX_RERANK_CALLS_PER_DAY` in `.env.example` — the cap counts requests,
+ *      and `tests/rate-limit.test.mjs` is where the arithmetic has to close.
+ *   3. `eval/run.mjs`'s recording concurrency, which is `4 / samples`: four
+ *      sentences at two calls each is eight requests in flight and the provider
+ *      answers that with 429s. The first recording taken this way lost 145 of
+ *      354 judgements.
+ */
+export const RERANK_SAMPLES = 1;
+
+/**
  * How long a search will wait for a judgement, INCLUDING the body read.
  *
  * A second longer than the reader's three, because this call carries fifty
@@ -128,12 +206,16 @@ export const MAX_RERANK_INPUT = 200;
 /**
  * How many HTTP requests one judgement costs.
  *
- * ONE. The reader samples twice and votes because its `asks_for_software` can
- * empty a page with no search behind it; a reranker mistake reorders a page or
- * drops one result from it, which is recoverable by reading the next line. The
- * daily cap counts REQUESTS, so this is the number it takes per judgement.
+ * ONE PER SAMPLE, so one — and it is written as `RERANK_SAMPLES` rather than as
+ * a literal because the two must never disagree. The precision work measured
+ * two samples and did not ship them (see above), and the reason this constant
+ * is derived is that the cap counts REQUESTS: a judgement that quietly became
+ * two calls against a constant still saying one would have doubled the
+ * worst-case bill with nothing in the project to notice it. `mayCallRerank()`
+ * defaults to this, `.env.example`'s MAX_RERANK_CALLS_PER_DAY is costed from
+ * it, and `tests/rate-limit.test.mjs` is where the arithmetic has to close.
  */
-export const RERANK_REQUESTS_PER_JUDGEMENT = 1;
+export const RERANK_REQUESTS_PER_JUDGEMENT = RERANK_SAMPLES;
 
 /**
  * The ceiling on what one judgement may produce.
@@ -146,14 +228,20 @@ export const RERANK_REQUESTS_PER_JUDGEMENT = 1;
  * from these ceilings rather than from the averages, and at 2,000 the three
  * caps together came to $17.52 a month against a $5 ceiling.
  *
- * 700 is three and a half times the measured mean, which is headroom for a
- * candidate list that reasons harder than usual and is still a bound. If a
- * judgement ever comes back with no text because it ran past this, the response
- * carries `status: incomplete`, `callResponses` refuses it by name, and the
- * page is the Phase 4 page — the same failure as a timeout, and visible in the
- * "recorded judgements refused" line of any run.
+ * AND 700 WAS A MEAN TIMES THREE AND A HALF, which is the right shape of
+ * number chosen from the wrong statistic. A ceiling belongs on the tail, and
+ * the tail is now printed by every recording run — "output tokens per request:
+ * p50 238, p90 247, p99 250, max 293 over 707 call(s)". The rule is the
+ * reader's rule, three times the p99, which is 750: fifty MORE than the number
+ * that was here, and the same rule that took the reader's from 900 to 360.
+ *
+ * If a judgement ever comes back with no text because it ran past this, the
+ * response carries `status: incomplete`, `callResponses` refuses it by name,
+ * and — since the precision work — the other sample is used alone. If both run
+ * past it the page is the Phase 4 page, the same failure as a timeout, and
+ * visible in the "recorded judgements refused" line of any run.
  */
-export const RERANK_MAX_OUTPUT_TOKENS = 700;
+export const RERANK_MAX_OUTPUT_TOKENS = 750;
 
 /**
  * How hard the model may think before judging.
@@ -243,6 +331,19 @@ export interface RerankResult {
   model: string;
   tokensIn: number;
   tokensOut: number;
+  /**
+   * Output tokens per REQUEST, one entry per sample that came back.
+   *
+   * The totals above are what the judgement cost; this is what each call
+   * produced, and it is a different question with a different use. A daily cap
+   * is multiplied by `max_output_tokens`, so the ceiling has to be set from the
+   * distribution of these rather than from their mean — `eval/run.mjs` prints
+   * p50, p99 and the maximum of every call a recording made, and
+   * `scripts/output-tokens.mjs` does the same for the reader.
+   */
+  outs: number[];
+  /** How many of the `RERANK_SAMPLES` calls came back. 1 means no vote. */
+  samples: number;
 }
 
 /**
@@ -543,28 +644,73 @@ export function validateJudgement(
 }
 
 /**
+ * The lowest grade that still reaches a page.
+ *
+ * IT WAS 1, AND 1 MEANT SHOWING "LOOSE". The band's own words are "this is in
+ * the right area rather than an answer to it", `docs/product-decisions.md` §17
+ * has said since Phase 5 that "relevance 1 is not a good match", and the owner
+ * asked on 12 September 2026 for a page that says there is no matching tool
+ * rather than one that shows a tool that is not related. A row the product
+ * describes as not an answer, on a page it does not count as a match, is
+ * exactly the row he was talking about.
+ *
+ * MEASURED, AND MEASURED FOR NOTHING. The threshold is applied when a judgement
+ * is USED rather than when it is recorded, so ONE recording's judgements score
+ * at every value of it: `eval/run.mjs --rerank-floor=` re-scores the whole
+ * instrument — 60 golden queries, 31 negatives, two held-out files, 15
+ * answerable sentences, 240 perturbations — without an API call. That is the
+ * only reason this is a decision rather than a preference. The same frozen
+ * recording at each value (`eval/recordings/shown1-frozen.json`,
+ * `shown2-frozen.json`, and the frontier table in `eval/baselines.md` under
+ * "Ranking precision (after Phase 6)"):
+ *
+ *   shown from   nDCG@10   recall@10   golden empty   negatives   held-out
+ *   1            0.8796    0.7875      0              21 of 31    19 of 25
+ *   2 (ships)    0.8645    0.7269      0              24 of 31    22 of 25
+ *   3            0.7398    0.4967      3              29 of 31    23 of 25
+ *
+ * THREE IS WHY THERE IS A CEILING ON THIS. It refuses 29 of 31 unanswerable
+ * sentences and empties three golden queries and six of the 240 perturbations
+ * doing it. A page that is empty for somebody with a real question is the one
+ * failure this project treats as absolute, so 3 is in the table to save the
+ * next person the recording.
+ *
+ * What 2 costs is real and is recorded beside it: every graded-relevant tool
+ * the model calls 1 leaves the page, so recall@10 falls 0.0606 and nDCG@10
+ * 0.0151. It is the trade the owner asked for, priced rather than assumed.
+ */
+export const RERANK_SHOWN_FROM: 1 | 2 = 2;
+
+/**
  * The final order, and the only place it is decided.
  *
  * Relevance descending, then the order the Phase 4 search already produced —
  * which is what "then Phase 4 rank" means and why the second key is the index
  * rather than the score: the score is an RRF sum whose ties the database
  * already broke, and re-breaking them here would be a second opinion nobody
- * asked for. Anything judged 0 is dropped.
+ * asked for. Anything judged below `shownFrom` is dropped.
  *
  * `items` may be anything with a slug, so the application can pass its
  * decorated result rows and the harness can pass its bare ones and both get the
  * same answer. A candidate the judgement does not mention is dropped as well:
  * `validateJudgement` makes that unreachable, and if it ever became reachable,
  * showing an unjudged tool on a judged page is the wrong way to fail.
+ *
+ * `shownFrom` is a PARAMETER with the shipped constant as its default, and it
+ * is a parameter for one reason: the harness sweeps it (`--rerank-floor=`) over
+ * judgements that are already recorded, so choosing it costs no API call. Both
+ * callers in the application pass nothing and get `RERANK_SHOWN_FROM`, which is
+ * what keeps this the one function that decides the order.
  */
 export function applyRerank<T extends { slug: string }>(
   items: readonly T[],
   judgement: RerankJudgement,
+  shownFrom: number = RERANK_SHOWN_FROM,
 ): T[] {
   const relevance = new Map(judgement.map((v) => [v.slug, v.relevance]));
   return items
     .map((item, index) => ({ item, index, relevance: relevance.get(item.slug) ?? 0 }))
-    .filter((row) => row.relevance >= 1)
+    .filter((row) => row.relevance >= shownFrom)
     .sort((a, b) => b.relevance - a.relevance || a.index - b.index)
     .map((row) => row.item);
 }
@@ -578,6 +724,13 @@ export function relevanceOf(judgement: RerankJudgement | null, slug: string): 0 
 
 /**
  * The bands, which is all Phase 5 draws.
+ *
+ * THE `1` CASE IS UNREACHABLE FROM A PAGE while `RERANK_SHOWN_FROM` is 2, and
+ * it is kept rather than deleted: the scale is still four points, the threshold
+ * is a measured number a later measurement may move, and the words for a grade
+ * belong in one place whether or not today's page shows them. `/ranking` tells
+ * a visitor that only two of the three appear, which is the sentence that has
+ * to stay true.
  *
  * `docs/build-phases.md` forbids a rescaled similarity shown as a percentage,
  * and Phase 5 does not have the judged pairs to calibrate a real one — see
@@ -618,7 +771,20 @@ export function relevanceBand(
   }
 }
 
-/** True when at least one result was judged to fit. The definition of a good match. */
+/**
+ * True when at least one result was judged to fit. The definition of a good
+ * match, and `docs/product-decisions.md` §17 is where it is decided.
+ *
+ * SINCE `RERANK_SHOWN_FROM` BECAME 2 THIS IS TRUE EXACTLY WHEN `shown` IS NOT
+ * EMPTY, on a judged search, because nothing below 2 reaches a page any more.
+ * §17 was written to stop this column being `result_count > 0` wearing a name
+ * that promises more, and the two have now coincided — not because a guess
+ * crept back in, but because the owner's precision decision made the bar for
+ * being shown the same as the bar for fitting. It is recorded there rather than
+ * here, `match_judged` still separates "nobody looked" from "read and nothing
+ * fitted", and this function is still the ONE place either question is
+ * answered, which is what matters if a later phase separates them again.
+ */
 export function hadGoodMatch(judgement: RerankJudgement | null, shown: readonly string[]): boolean {
   if (!judgement) return false;
   const on = new Set(shown);
@@ -626,13 +792,114 @@ export function hadGoodMatch(judgement: RerankJudgement | null, shown: readonly 
 }
 
 /**
+ * The lower mark of two judgements of the same candidate list, slug by slug.
+ *
+ * The whole of lever 1, and it is four lines because it has to be readable:
+ * the number a person sees is the SMALLER of what two readings of the same
+ * pair produced, so a grade that appears once and not twice never reaches a
+ * page. Exported so `tests/rerank.test.mjs` can put two judgements through it
+ * rather than through a live model.
+ *
+ * The order is the FIRST judgement's, which is the order the search returned
+ * the candidates in — `applyRerank` re-sorts anyway, and keeping one side's
+ * order makes the result of `lowerOf(a, b)` and `lowerOf(b, a)` identical in
+ * content and stable in sequence. A slug in one and not the other cannot
+ * happen: `validateJudgement` has already refused any judgement that does not
+ * name every candidate exactly once. If it somehow did, the missing side
+ * counts as 0, which is the refusing direction.
+ */
+export function lowerOf(a: RerankJudgement, b: RerankJudgement): RerankJudgement {
+  const other = new Map(b.map((v) => [v.slug, v.relevance]));
+  return a.map((verdict) => ({
+    slug: verdict.slug,
+    relevance: Math.min(verdict.relevance, other.get(verdict.slug) ?? 0) as 0 | 1 | 2 | 3,
+  }));
+}
+
+/**
+ * True when a sample graded every candidate 0: "nothing here is for this".
+ *
+ * Exported because it names the thing the measurement below is about, and
+ * because `eval/run.mjs` counts how many of a recording's judgements are of
+ * this shape — a run that refuses every page is a run to distrust.
+ */
+export function refusedEverything(judgement: RerankJudgement): boolean {
+  return judgement.length > 0 && judgement.every((v) => v.relevance === 0);
+}
+
+/**
+ * The one judgement, out of however many samples came back: **the lower mark,
+ * and nothing else.**
+ *
+ * IT IS WORTH KNOWING WHAT WAS TRIED HERE AND MEASURED AWAY, because the thing
+ * that was tried is the obvious fix for the plain lower mark's one bad habit.
+ *
+ * The habit: a sample that grades ALL twenty candidates 0 has refused the whole
+ * page, and under the lower mark that one sample has a VETO. On
+ * `eval/recordings/min2-2.json` it used it on golden q028 — "edit a video for
+ * free without a watermark stamped across it", which this catalogue answers
+ * five ways — and on two of the 240 perturbations.
+ *
+ * The fix: `readSentence`'s own rule, that "a refusal which could not be
+ * corroborated is not a refusal". Discard a sample that refuses everything when
+ * the other one does not. It was built and recorded
+ * (`eval/recordings/vote-1.json`) and then aimed at the sentence this whole
+ * change exists for, six judgements of it, `scratch`-side:
+ *
+ *   the lower mark        receiptly=0 every time (the refusing sample wins)
+ *   corroboration rule    receiptly=3 five times of six, =1 once
+ *
+ * **The veto is not a bug in the lower mark; it is the lower mark.** The same
+ * mechanism that empties the owner's page empties q028, and no rule that keeps
+ * one can drop the other: a single sample saying "none of these" is exactly
+ * what a correct empty page and a wrong empty page look like from here. So the
+ * veto stays, the cost is recorded in `eval/baselines.md` as a golden empty on
+ * one of three recordings, and the honest summary is that this instrument
+ * cannot tell the two apart.
+ */
+export function combineSamples(judgements: readonly RerankJudgement[]): RerankJudgement {
+  if (judgements.length === 0) throw new ReaderError('there are no samples to combine');
+  return [...judgements].reduce(lowerOf);
+}
+
+/** One call, validated. The unit `rerankOrThrow` takes `RERANK_SAMPLES` of. */
+async function judgeOnce(
+  sentence: string,
+  candidates: readonly RerankCandidate[],
+  slugs: readonly string[],
+  effort: 'minimal' | 'low',
+): Promise<{ judgement: RerankJudgement; tokensIn: number; tokensOut: number }> {
+  const answer = await callResponses({
+    model: RERANK_MODEL,
+    instructions: RERANK_INSTRUCTIONS,
+    input: rerankInput(sentence, candidates),
+    schemaName: 'rerank_judgement',
+    schema: rerankSchema(slugs),
+    timeoutMs: RERANK_TIMEOUT_MS,
+    maxOutputTokens: RERANK_MAX_OUTPUT_TOKENS,
+    effort,
+  });
+
+  const checked = validateJudgement(answer.parsed, slugs);
+  if ('error' in checked) throw new ReaderError(`schema: ${checked.error}`);
+
+  return { judgement: checked.judgement, tokensIn: answer.tokensIn, tokensOut: answer.tokensOut };
+}
+
+/**
  * Ask the model to judge these candidates. Throws `ReaderError` on anything
  * that is not a well-formed 2xx response carrying a valid judgement.
+ *
+ * `RERANK_SAMPLES` calls, IN FLIGHT TOGETHER so the judgement still costs one
+ * round trip of wall time rather than two, and the lower mark of whatever came
+ * back. It throws only when every sample failed, and the message is the first
+ * failure's — a page with no judgement is the Phase 4 page, and the caller
+ * that logs it wants a reason rather than a count.
  */
 export async function rerankOrThrow(
   sentence: string,
   candidates: readonly RerankCandidate[],
-  options: { effort?: 'minimal' | 'low' } = {},
+  options: { effort?: 'minimal' | 'low'; samples?: number } = {},
 ): Promise<RerankResult> {
   const capped = capText(sentence, MAX_RERANK_INPUT);
   if (capped.trim() === '') throw new ReaderError('the sentence is empty');
@@ -646,25 +913,31 @@ export async function rerankOrThrow(
     throw new ReaderError('the candidate list has a duplicate slug');
   }
 
-  const answer = await callResponses({
-    model: RERANK_MODEL,
-    instructions: RERANK_INSTRUCTIONS,
-    input: rerankInput(capped, candidates),
-    schemaName: 'rerank_judgement',
-    schema: rerankSchema(slugs),
-    timeoutMs: RERANK_TIMEOUT_MS,
-    maxOutputTokens: RERANK_MAX_OUTPUT_TOKENS,
-    effort: options.effort ?? RERANK_EFFORT,
-  });
+  const wanted = Math.max(1, options.samples ?? RERANK_SAMPLES);
+  const effort = options.effort ?? RERANK_EFFORT;
+  const settled = await Promise.allSettled(
+    Array.from({ length: wanted }, () => judgeOnce(capped, candidates, slugs, effort)),
+  );
 
-  const checked = validateJudgement(answer.parsed, slugs);
-  if ('error' in checked) throw new ReaderError(`schema: ${checked.error}`);
+  const got = [];
+  let firstFailure: unknown = null;
+  for (const outcome of settled) {
+    if (outcome.status === 'fulfilled') got.push(outcome.value);
+    else if (firstFailure === null) firstFailure = outcome.reason;
+  }
+
+  if (got.length === 0) {
+    if (firstFailure instanceof ReaderError) throw firstFailure;
+    throw new ReaderError('every sample failed');
+  }
 
   return {
-    judgement: checked.judgement,
+    judgement: combineSamples(got.map((g) => g.judgement)),
     model: RERANK_MODEL,
-    tokensIn: answer.tokensIn,
-    tokensOut: answer.tokensOut,
+    tokensIn: got.reduce((sum, g) => sum + g.tokensIn, 0),
+    tokensOut: got.reduce((sum, g) => sum + g.tokensOut, 0),
+    outs: got.map((g) => g.tokensOut),
+    samples: got.length,
   };
 }
 

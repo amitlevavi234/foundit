@@ -27,7 +27,7 @@ export function resultsView(options: {
  * Where a result matched, in words. Not how well.
  *
  * **This is the FALLBACK band since Phase 5.** Where the reranker ran, the band
- * on a card is its judgement — Strong, Possible or Loose, from `relevanceBand`
+ * on a card is its judgement — Strong or Possible, from `relevanceBand`
  * in lib/rerank.ts — because something has read the sentence against that
  * listing and formed a view. Where it did not run (no key, a timeout, the daily
  * cap), the band is what is described below: a LOCATION. The results page says
