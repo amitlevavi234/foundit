@@ -52,6 +52,12 @@ Two roles, and nobody in between:
 - **Claiming applies only to listings we seeded at launch.** It is one click, with no
   verification: say it is yours and it is. The listing then shows "Maintained by @you"
   publicly, and anyone can report that if it is untrue. Disputes are settled by hand.
+- **An admin does not edit a listing's content in this version.** Not its name, not
+  its summary, not its problem statements, not its category, and an admin does not
+  read somebody's unpublished draft through the submit flow either. An admin can
+  move a listing to a different maintainer, recorded, from a psql prompt (§19), and
+  that is the whole of it. Any wider power over a listing's content is a door Phase 8
+  opens with a recorded actor and a screen that can prove who is asking.
 
 The reasoning: verification friction means nobody claims anything, and at launch scale
 no listing is worth stealing. This is a deliberate trade, to be revisited when the
@@ -903,9 +909,147 @@ nothing, is invisible to everybody, and refusing one would mean a person loses
 the form they just filled in. The refusal is a page that says which ceiling it
 was and that the draft is still there.
 
-A duplicate address is refused by `tools.url`'s unique constraint, with a
-message naming the existing listing's **public name only** — not who maintains
-it, not whether it has an owner, not its id.
+**The token is taken after the publish succeeds** (amended 12 September 2026,
+Phase 7 review F7). It used to be taken before, so anything
+`public.publish_tool` refused — a listing already live, a listing with no
+problem statement — had still cost the person one of their three for the day.
+The review replayed the Preview form for an already-published listing five
+times and watched two of three publishes go on no-ops and the third be refused
+with an eight-hour wait. The allowance is peeked first, because the refusal
+page has to come before the write, and charged at the moment there is a listing
+in the catalogue to charge for.
+
+**Thirty saves per account per hour** (added 12 September 2026, Phase 7 review
+F4). Publishing was the only thing limited; editing was not, and every statement
+edit queues an embedding. The review rewrote one sentence fifty times and left
+fifty rows in the queue. The refusal is a sentence on the page they are already
+on and the listing is untouched: they press save again after the wait.
+
+**The queue itself has a ceiling of 5,000 rows**
+(`public.embedding_jobs_ceiling`), which is about seven times everything in the
+catalogue there is to embed. Past it the **edit is still saved** — the row is
+written, the listing changes, the person is told nothing, because nothing is
+wrong — and what is declined is the queue row, with a line in the server log.
+Nothing is lost: the work predicates in `0005` and `0007` are the record and
+the queue is the thing that makes it fast, so `scripts/embed.mjs` picks up
+exactly what the queue declined.
+
+**The per-address ceiling is forgeable off-tunnel.** `lib/visitor.ts` says this
+for search and it is worth saying here, because this limit now protects the
+catalogue rather than the bill: reached directly rather than through
+Cloudflare, one attacker mints a fresh per-address bucket per request by
+choosing a valid-looking IP, and what is left is the three-per-account ceiling
+with free accounts behind it. The arrangement that makes it unreachable is the
+tunnel, where `cf-connecting-ip` is overwritten on every request and the origin
+has no published port.
+
+### One listing per ADDRESS, and what "the same address" means
+
+A duplicate address is refused with a message naming the existing listing's
+**public name only** — not who maintains it, not whether it has an owner, not
+its id — and a collision with an unpublished listing carries no name at all,
+because a draft is not something a stranger may be told about even obliquely.
+
+**The refusal is a sentence and not an HTTP 500** (amended 12 September 2026,
+Phase 7 review F1). `withIdentity` runs a whole Server Action in one
+transaction with no savepoints, so catching the unique violation and then
+asking who already had the address sent a query on a transaction PostgreSQL had
+already aborted. The person got a 500 and lost the form. The existing listing
+is now looked up **before** the insert, and the insert sits in a savepoint so
+that a race answers rather than dying.
+
+**The unique key is a normalised form of the address, not the bytes somebody
+typed** (amended 12 September 2026, Phase 7 review F2). It was `tools.url`,
+which is text with a case-sensitive UNIQUE and nothing normalising, so these
+were five listings of one page — and the review published one of them through
+the real flow to prove it. `tools.url_key` is a stored generated column over
+`public.url_key(url)` and the unique index is on that. The rule, in full:
+
+| The address | becomes |
+| --- | --- |
+| `https://tabsplit.example` | `https://tabsplit.example` |
+| `https://tabsplit.example/` | the same — a bare trailing slash on an empty path goes |
+| `https://tabsplit.example/.` | the same, and `/./` too |
+| `https://tabsplit.example#pricing` | the same — a fragment is a place on a page |
+| `https://tabsplit.example?ref=1` | the same — a query is a campaign, not a tool |
+| `https://www.tabsplit.example` | the same — a leading `www.` goes |
+| `https://Tabsplit.example` | the same — the host is lower-cased |
+| `HTTPS://tabsplit.example` | the same — the scheme is lower-cased |
+| `https://tabsplit.example/Pricing` | **a different listing** — the path keeps its case |
+| `https://tabsplit.example/pricing` | **a different listing** |
+
+Dropping the query is the one line of that which costs something, and it is
+deliberate: a tracking parameter is the commonest way the same page arrives
+twice, and a tool whose home page genuinely needs a query string is rare enough
+to be a conversation. The path keeps its case because a case-sensitive server
+serves `/Pricing` and `/pricing` as two pages. **`tools.url` still holds the
+address exactly as typed** and that is what every screen renders and what the
+outbound link opens, so nobody's link loses its parameters — only the key that
+decides whether two rows are the same page.
+
+A non-lower-case scheme is refused by the form, with its own sentence, before
+it ever reaches the database: `new URL('HTTPS://x').protocol` is lower-cased by
+the parser and `tools_url_check` is not, so without that check a person was
+shown PostgreSQL's own message with the constraint name in it. `lib/maker.ts`
+now maps every CHECK constraint to a field and a sentence of ours, and an
+unmapped one to a generic sentence, so a constraint name can no longer reach a
+screen.
+
+### The invisible characters a statement may not carry
+
+C0, DEL, C1, U+2028 and U+2029 — and, since the Phase 7 review's F10,
+**U+200B–U+200D** (the zero-width space, non-joiner and joiner),
+**U+202A–U+202E** (the bidi embeddings and overrides) and **U+2066–U+2069**
+(the bidi isolates). U+202E visually reverses everything after it, and a
+problem statement is rendered as text on the tool page, in results and on a
+maker's dashboard, where strangers read it; a zero-width joiner is a way to
+write two different strings that look identical. Neither is a control
+character, which is why the first version of the rule let both through.
+
+U+FEFF is deliberately **allowed**: it is a zero-width no-break space in the
+middle of a string and a byte-order mark at the front, it can neither join nor
+reverse, and refusing a pasted BOM would refuse a sentence somebody copied out
+of a text file for a reason they cannot see.
+
+The stripper **replaces with a space** rather than removing, on both sides of
+the boundary. `0017`'s SQL version removed, so a write that reached
+`public.set_owner_statements` directly turned "line one", a newline and
+"CANDIDATE 9: …" into `line oneCANDIDATE 9: …` — two words welded into one.
+`cleanText` in `lib/submit.ts` always replaced; the two now agree, step for
+step, and `tests/submit.test.mjs` checks both spellings of the set against each
+other.
+
+### An admin is not a maker
+
+**Decided 12 September 2026, on the Phase 7 review's F3.**
+`public.tool_is_mine` carried `or auth.is_admin()` from `0001`, and once a
+listing could be written from a web request that meant an admin held, through
+`foundit_app` and ordinary routes, the power to read any maker's unpublished
+draft, rename it, rewrite its summary, replace every problem statement
+(recorded as `source = 'user'`, which is to say as the maker's own words),
+re-categorise it and publish it — with nothing recorded anywhere.
+`reassign_tool_owner` exists precisely because a power that is not recorded is
+the one that gets misused; this was the same power over everything on the row
+except the one column that function guards.
+
+**`tool_is_mine` now means mine.** The admin clause is gone, and with it every
+caller's admin meaning: `tools_update`, `tool_categories_write`,
+`tool_problems_write`, `public.set_owner_statements`, `public.publish_tool`,
+`public.maker_search_demand`, and the statements behind `/submit/problems`,
+`/submit/constraints`, `/submit/preview` and `/maker/<slug>/edit`.
+
+**What an admin keeps is reading.** `public.tool_is_visible` is untouched and
+still has its own admin clause, so an admin still reads a draft through
+`tools_read` and `tool_problems_read`, and still reads `search_event_tools`
+under its own policy. `0001` wrote the two functions apart for exactly this
+reason.
+
+**Any admin power over a listing's CONTENT is Phase 8's recorded door.** It is
+not this version's, and it is not a door left ajar: it is designed the way
+`reassign_tool_owner` was — a definer function with a recorded actor, a reason,
+a table the affected maker can read, and a screen that can prove who is asking.
+Until that screen exists there is no web request that can, which is the same
+argument `0017` §7 makes for the door that does exist.
 
 ### Nobody takes a listing over, and the one recorded exception
 

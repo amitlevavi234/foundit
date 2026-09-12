@@ -2227,12 +2227,15 @@ no is worth what it costs.
   cannot be produced any more, and the "before" quoted above is a fresh
   single-sample measurement of the same question rather than his row.
 
-## Phase 7 — adding a tool — **built; item 10, the adversarial review, not yet run**
+## Phase 7 — adding a tool — **built; reviewed; all fourteen findings closed**
 
-One migration, one new SQL suite of fifteen sections, eleven screens, a queue
-and the worker that drains it. Six defects, all six found by doing the thing
-rather than by reading the schema — four of them mine, two of them older than
-this phase and unreachable until a listing could be added or claimed.
+Two migrations, one SQL suite of twenty sections, eleven screens, a queue and
+the worker that drains it. Six defects found while building it, all six by
+doing the thing rather than by reading the schema — four of them mine, two of
+them older than this phase and unreachable until a listing could be added or
+claimed. Then fourteen more from the adversarial review, three of them HIGH,
+every one of them fixed with a test that fails without it: the "Review"
+subsection below has the reviewer's own words, what changed, and which test.
 
 | | What landed | Where |
 | --- | --- | --- |
@@ -2241,7 +2244,7 @@ this phase and unreachable until a listing could be added or claimed.
 | The four columns nobody chooses | `made_by_owner`, `claimable`, `owner_id` and `published_at` stamped by a BEFORE INSERT trigger for a row a signed-in person is adding as themselves | `0017` §2 |
 | Only seeded listings are claimable | `tools_made_by_owner_is_not_claimable`, so a person-added row cannot be made claimable by anybody, owner included | `0017` §2 |
 | One door per write | `publish_tool`, `claim_tool`, `set_owner_statements`, `reassign_tool_owner`, `log_search_event_tools` | `0017` §3, 5, 6, 7, 8 |
-| The queue | `embedding_jobs`, filled by triggers on `tools` and `tool_problems`, drained by `foundit_embed` through three functions | `0017` §4, `scripts/embed-worker.mjs` |
+| The queue | `embedding_jobs`, filled by triggers on `tools` and `tool_problems`, drained by `foundit_embed` through three functions. Its `unique (kind, ref_id)` is "one outstanding job per thing", and **its comment claimed more than the key could do** — "a statement edited three times in a minute is embedded once, with its latest text" was false by mechanism, because an edit DELETED the row and INSERTED a new one, so `ref_id` changed every time and the key never fired for the case it described. `0018` makes an edit an UPDATE of the existing row, which is what the key needed to have something to collapse, and adds a row ceiling for the case where the worker is stopped | `0017` §4, `0018` §6–7, `scripts/embed-worker.mjs` |
 | Searches that found you | `search_event_tools (event_id, tool_id, rank)`, no user column, written by one definer function that returns nothing | `0017` §8, `lib/sql.ts` |
 | The five-event threshold | `maker_query_threshold()` = 5, and the CASE that withholds the text inside `maker_search_demand` | `0017` §8 |
 | Ownership changes | a table with no write policy at all and one writer, granted to no login role | `0017` §7 |
@@ -2259,7 +2262,7 @@ this phase and unreachable until a listing could be added or claimed.
 | A statement cannot forge a reranker candidate | §5 — the newline-then-fake-tool attack stored as one line |
 | Publishing is the only door | §6 — somebody else's refused 42501, a plain UPDATE refused on privilege, twice refused 22023, and a listing with no statement refused 22023 |
 | An edit re-queues only what changed | §7 — a name change and a platform change queue **0** jobs; a summary change queues exactly 1; replacing one of two statements queues exactly 1, it is the one that changed, and the untouched one still has its embedding |
-| The worker survives a bad row | §8 — a job for a vanished row comes back with a null body; three failures park it and it leaves the live queue; the provider's error text is stored with its control characters gone |
+| The worker survives a bad row | §8 — a job for a vanished row comes back with a null body; three failures park it and it leaves the live queue; the provider's error text is stored with its control characters gone. **CORRECTED after the review (F5, F8).** It was FALSE for two of the three bad rows this row claimed. A job for a live statement whose tool is a draft came back with its TEXT, not a null body, so the worker spent a request and wrote a vector onto unpublished content — `0017`'s function joined `pt` to check exactly that and never read it. And a request that failed as a whole was recorded against every job in it, so an outage parked up to thirty-one good statements beside whatever was queued with them. `0018` puts `pt` to work; the worker bisects and charges only an input that fails alone; §8 now queues a draft's statement and §19 of the suite asserts the rest |
 | The oracle stays split | §8 and §15 — `foundit_embed` holds no privilege on eight tables and cannot call `query_vector_ranks`; no role holds both a vector setter and the ranker; `foundit_app` can write neither vector column by any door |
 | The four claim outcomes | §9 — a stranger 42501, the one click that sets `owner_id` and records an approved claim, a second claim 42501, a claim on a person-added listing 42501, and the CHECK refusing that row to be made claimable at all; `http` evidence 22023 |
 | Nobody takes a listing over | §10 — another person's edit filtered to zero rows (not an error: row-level security filters), `owner_id` refused to a person, to the owner themselves and to an admin through the app role |
@@ -2332,18 +2335,32 @@ a shell heredoc, in a regex that then silently matched nothing.
   redirect route nobody has built. This is the oldest unkept promise in the
   product and it is now visible on a screen.
 - **The publishing limiter forgets on a restart, and in development on a
-  recompile.** That is the property `lib/rate-limit.ts` documents for every
-  bucket, and it showed during this phase's own evidence run: four listings
-  reached the catalogue for one account across two runs separated by several
-  edits, and three back-to-back within one. The ceiling that survives a restart
-  is `tools.url`'s unique constraint, which is in the database.
+  recompile — and the REASON written here was the wrong one.** The conclusion
+  holds and the mechanism did not: the bucket map is parked on `globalThis` and
+  **does** survive a recompile; what did not was the SALT, a module-level const
+  that Next re-randomised with the module, so every key changed and every
+  allowance was fresh anyway. The Phase 7 review (F13) caught it by watching an
+  allowance that should have been spent come back until the pages stopped
+  recompiling. `0018`'s companion change parks the salt beside the buckets, so
+  a recompile now forgets nobody and only a restart does. The ceiling that
+  survives a restart is the unique index on `public.tools.url_key`, which is in
+  the database — and which was on the raw `url` string, catching none of the
+  near-duplicates, until the same review (F2).
 - **`allowPublish` spends the per-account token before it checks the
   address.** A publish refused by the address ceiling has still cost the person
   one of their three for the day. `allowSignInCode` has had the same shape
   since Phase 6 and this follows it deliberately rather than fixing one of two.
-- **The worker's daily cap is its own.** `MAX_EMBEDDING_CALLS_PER_DAY` is
-  per process, so the worker and the web process each hold one. The vendor-side
-  cap is the only ceiling actually shared.
+  What is no longer true is the sibling of it the review found (F7): a publish
+  the DATABASE refused used to cost a token too, and now the allowance is
+  peeked before the write and charged after it succeeds.
+- **The worker's daily caps are its own.** `MAX_EMBEDDING_CALLS_PER_DAY` and
+  `MAX_EMBEDDING_TOKENS_PER_DAY` are counters in the process that holds them,
+  so the worker and the web process each hold a pair. The vendor-side cap is
+  the only ceiling actually shared. What that used to mean in practice — two
+  workers, two full allowances, $9.25 a month against a $5 ceiling — is closed
+  a different way: the worker takes an advisory lock and refuses to start if
+  another holds it (F4). This entry also used to omit that the cap was priced
+  at fifteen tokens a request while the worker spent it at up to 3,200.
 - **The live "searches that would find you" aside is not built**, and neither
   are the icon, the screenshots, the pricing-plans table or a fit meter on the
   preview. Each is absent with a sentence on the screen saying why, per
@@ -2356,6 +2373,439 @@ a shell heredoc, in a regex that then silently matched nothing.
 - **`0017` was applied, reversed and re-applied** during development, once,
   before it was committed — to prove the file on disk is the file that produced
   the schema after an edit. It has never run anywhere but this machine.
+
+### Review — item 10, run 12 September 2026
+
+A fresh Opus 5 subagent that had not seen the work attacked the policies as a
+stranger, a user, a maker, a second maker, an admin and each database role,
+plus the submit flow, the claim path, the queue, the dashboard's threshold, the
+limiter and the screens. It found fourteen things. **Every one of them is fixed,
+none is deferred**, and each fix has a test that fails without it — the
+database half in `db/migrations/0018_phase7_review.sql` and
+`db/test/adding_a_tool_test.sql` §16–20, the application half in
+`tests/submit.test.mjs`, `tests/maker.test.mjs`, `tests/embed-worker.test.mjs`,
+`tests/rate-limit.test.mjs`, `tests/links.test.mjs` and
+`tests/markup.test.mjs`.
+
+The review's own words are kept first in each entry, because a finding
+paraphrased by the person fixing it is a finding softened.
+
+#### F1 — The duplicate-address refusal is an HTTP 500, so gate item 7 is unmet  [HIGH]
+
+> `runWithIdentity` runs the whole callback in ONE transaction with no
+> savepoints. `createDraft` catches the `23505` from `tools_url_key` and then
+> sends a second query — `EXISTING_BY_URL_SQL` — on the same, now-aborted
+> transaction. Postgres answers `25P02`, the throw escapes `withIdentity`, and
+> the Server Action dies. The person never sees "We already list Tabsplit.";
+> they get a 500 and loses the form.
+
+**Fixed.** The existing listing is looked up BEFORE the insert, and the insert
+sits in a savepoint so that a race — or a collision with a draft the caller
+cannot read — answers rather than dying. `runCreateDraft` in `lib/tool-sql.ts`
+holds both guards; `createDraft` is a wrapper round it.
+
+**Tested.** `tests/submit.test.mjs`, "createDraft twice with the same address
+is a sentence, not a 500": it drives the function twice against the dev
+database and then asserts the transaction is still usable, which is the exact
+thing that used to come back `25P02`. Two more cover the message naming a
+published listing and carrying no name for a draft. Reproduced against the old
+order for the record: `the insert was refused 23505 / and the lookup answered
+25P02: current transaction is aborted, commands ignored until end of
+transaction block`.
+
+#### F2 — `tools.url`'s unique constraint catches none of the near-duplicates, so the "one listing per address" rule is a formality  [HIGH]
+
+> `url` is `text` with a case-sensitive UNIQUE. Nothing normalises. So the same
+> page can be listed again and again, and the limiter in F7 is the only ceiling
+> … It does not stop them.
+>
+> **Sub-finding, same root.** `HTTPS://tabsplit.example` is accepted by
+> `checkUrl` (`new URL().protocol` lower-cases) and refused by
+> `tools_url_check`, which is `url ~ '^https://'` and case-sensitive.
+> `refusalOf` (`lib/maker.ts:172`) maps `23514` to `{reason:'invalid',message}`
+> and shows the database's own message — so the person is shown a constraint
+> name, which is precisely what `lib/submit.ts`'s header says must never happen.
+
+**Fixed.** `public.url_key(text)` and a stored generated column `tools.url_key`
+with the unique index on it; `tools.url` keeps the address exactly as typed,
+for display and for the outbound link. The rule is written out in
+`docs/product-decisions.md` §19 as a table of ten addresses. `checkUrl` refuses
+a non-lower-case scheme with its own sentence, and `refusalOf` maps every CHECK
+constraint to a field and a sentence of ours — an unmapped one to a generic
+sentence — so a constraint name can no longer reach a screen.
+
+**Tested.** `db/test/adding_a_tool_test.sql` §17 inserts the first of the
+review's eight variants and asserts the other seven are refused `23505`, that
+`/Pricing` and `/pricing` are still two listings, and that the unique index
+exists. `tests/submit.test.mjs` checks the eight collapse to one key, that the
+JavaScript rule and `public.url_key` agree over fourteen addresses, and that
+`HTTPS://` is refused here with a sentence that does not echo the address.
+
+#### F3 — An admin, through the application role, reads any maker's unpublished draft and silently rewrites any maker's listing and statements  [HIGH]
+
+> Gate item 8: "a person cannot edit or publish another's tool… an admin cannot
+> reassign one except through a definer function that records who, from whom, to
+> whom and why". §19 calls `reassign_tool_owner` "the one recorded exception"
+> and says "that second door is granted to no login role". Ownership is indeed
+> safe. Content is not: an admin holds, through `foundit_app` and ordinary
+> routes, the power to read a maker's unpublished draft, rename it, rewrite its
+> summary, replace all its problem statements (recorded as `source = 'user'`,
+> i.e. as the maker's own words), re-categorise it and publish it. Nothing is
+> recorded anywhere.
+>
+> **On severity.** By the letter of the brief's rubric this is CRITICAL — a
+> signed-in user reads another person's unpublished draft and writes their
+> listing. I have graded it HIGH because it needs `profiles.is_admin`, which is
+> set only in the database and which no account created through the product has.
+
+**Fixed, by the supervisor's decision of 12 September 2026: `tool_is_mine`
+means mine.** The `auth.is_admin()` clause is out of the function rather than
+patched at each caller, because every caller wanted the narrow meaning —
+`tools_update`, `tool_categories_write`, `tool_problems_write`,
+`set_owner_statements`, `publish_tool`, `maker_search_demand` and the
+statements behind the submit and edit screens. `public.tool_is_visible` is
+untouched, so an admin still READS a draft, which is what Phase 8's operator
+dashboard needs; `0001` wrote the two functions apart for this reason. **Any
+admin power over a listing's content is Phase 8's recorded door**, designed the
+way `reassign_tool_owner` was, and §19 and §3 now say so.
+
+**Tested.** `db/test/adding_a_tool_test.sql` §16 is the review's own 5.1–5.5
+turned round: `tool_is_mine` false on another maker's listing and on her draft,
+the UPDATE touching zero rows and the row unchanged, `set_owner_statements`
+`42501`, `publish_tool` `42501`, the category delete touching nothing,
+`MY_DRAFT_SQL`'s predicate returning nothing, the demand panel empty — and then
+what an admin keeps, and that the maker's own edits still work.
+`tests/maker.test.mjs`, "AN ADMIN IS NOT A MAKER, through the statements the
+pages send", drives the same thing through the actual strings the pages send.
+
+#### F4 — The worker spends `MAX_EMBEDDING_CALLS_PER_DAY` at up to 3,200 tokens a request against a cost model that assumes 15, and nothing rate-limits an edit  [HIGH]
+
+> They count — one per tick — but the cost model prices a request at 15 tokens,
+> which is one query sentence. The worker added by this phase sends up to 32
+> **documents** per request … At the summary ceiling that is 3,200 tokens a
+> request, 213× the modelled figure. The test passes because it models the wrong
+> caller, and its own new comment says so …
+>
+> "Two worker processes" is not hypothetical. While reviewing I found two live
+> on this machine, each holding its own in-memory counter …
+>
+> And the queue is fillable without limit by one account: `allowPublish` is
+> called only in `publishDraft`. `saveListing` and `setProblems` have no limiter
+> at all, and every statement edit is a new queue row (F9). Fifty edits, fifty
+> jobs.
+
+**Fixed, in four places.**
+
+1. **A second ceiling in tokens.** `MAX_EMBEDDING_TOKENS_PER_DAY` = 1,500,000,
+   charged by both callers at what they send (`mayEmbedTokens`). A request cap
+   cannot bound a request whose size varies by two orders of magnitude.
+2. **The worker is in the arithmetic.** `lib/prices.ts` models it at its real
+   per-request ceiling — `EMBEDDINGS_WORKER_BATCH` × `EMBEDDING_DOCUMENT_TOKENS`
+   = 3,200 — and `worstCaseMonthly` has a fourth line for it.
+   **$4.10 a month against a $5 ceiling** at the fixture's measured input with
+   every call reasoning to its output ceiling; **$7.04 without the token cap**,
+   which the test asserts, so the bound cannot quietly stop binding. The numbers
+   are in `.env.example`.
+3. **An edit limiter.** Thirty saves per account per hour (`allowEdit`), on
+   `setProblems` and `saveListing`, refused with a sentence on the page they are
+   already on.
+4. **A ceiling on the queue itself**, 5,000 rows, past which the edit is still
+   saved, the queue row is declined with a line in the log, and nothing is lost
+   because the work predicates of `0005` and `0007` find it anyway.
+
+**And exactly one worker runs.** The shared-counter option was a row in
+`infra.daily_counters`, and it was not taken: `foundit_embed` holds no table
+privilege of any kind and buying a shared counter would have cost it one, or
+cost the schema a fourth definer function. An advisory lock costs neither. The
+worker takes a session-level `pg_try_advisory_lock` and exits 4 with a sentence
+if another holds it; `docs/development.md` has the systemd unit.
+
+**Tested.** `tests/rate-limit.test.mjs`: the worker's line of the worst case,
+the assertion that the old model is over $5, the token cap refusing a batch
+that does not fit and charging nothing when it does, `DailyCap.fits`, and the
+edit limiter. `tests/embed-worker.test.mjs` holds the advisory lock and asserts
+the second worker's exit code, its sentence, and that it printed no connection
+string and started no run. `db/test/adding_a_tool_test.sql` §20 lowers the
+queue ceiling to three inside the transaction and proves the edit still saves.
+
+#### F5 — `public.embedding_work` hands out the statement text of an unpublished tool, so a draft's sentence is embedded and stored  [MEDIUM]
+
+> The function left-joins `pt` to check the parent tool is published — and then
+> never uses it … For `kind = 'problem'` the body comes back whatever the
+> statement says, even when the tool is a draft. The worker then spends a
+> request and writes a vector onto a draft's statement. The function's own
+> comment claims the opposite … It is money spent on text nobody can search, a
+> vector written onto unpublished content, and a comment that says the case is
+> handled.
+
+**Fixed.** `when 'problem' then case when pt.id is not null then tp.statement end`.
+
+**Tested.** `db/test/adding_a_tool_test.sql` §8 now queues a LIVE statement on
+the seeded draft and asserts the body comes back null, that the worker retires
+it with `embedding_job_done` and no call, and — so the fix is a guard rather
+than a blanket null — that a published tool's statement still comes back with
+its text. The vanished-row case is still there beside it, and §14 of the review
+is right that a row that does not exist cannot tell the two apart.
+
+#### F6 — "Searches matched" on the maker dashboard is always 0, for two independent reasons, while the panel beneath it lists the sentences  [MEDIUM]
+
+> 1. On `/maker`, `MY_LISTINGS_SQL` selects the count, but the only SELECT
+>    policy on `search_event_tools` is `auth.is_admin()`, so for a maker the
+>    subquery counts nothing. Row-level security filters, it does not refuse —
+>    the exact defect class `lib/maker.ts`'s own header says every write in the
+>    file guards against, applied to a read.
+> 2. On `/maker/<slug>`, the column is not in `MAKER_DASHBOARD_SQL`'s output, so
+>    the marshaller reads `undefined` and coerces it to 0.
+>
+> So `/maker/receiptly` renders "0 · Searches matched · Last 30 days" directly
+> above a list of three sentences totalling seven searches, one of them quoted
+> in full.
+
+**Fixed.** `public.maker_listing_metrics(tool_id, days)`, a definer function
+with `public.tool_is_mine` in its WHERE clause, so an id that is not yours is a
+zero rather than an error. Both statements select it. `matched_count` is now
+**required** on `ListingRow`, so a statement that forgets it is a compile error
+rather than a rendered zero.
+
+**Tested.** `db/test/adding_a_tool_test.sql` §13 logs six searches, asserts the
+function counts six, asserts it equals the sum of the demand panel, and keeps
+the old direct count in the suite as evidence that it still answers zero for a
+maker. `tests/maker.test.mjs` asserts the dashboard's number equals the panel's
+sum for `dev_maker`'s Receiptly, that `/maker` and `/maker/receiptly` agree,
+and that both statements read it through the function.
+
+#### F7 — A refused publish spends a limiter token, and the Preview form stays re-postable after publishing  [MEDIUM]
+
+> The order is: tick, `myDraft`, whole-submission check, **spend a token**, then
+> publish. Anything `publish_tool` refuses has already cost the person one of
+> three for the day. Because `MY_DRAFT_SQL` does not filter on status, the
+> Preview page keeps serving an enabled "Publish it" button for an
+> already-published listing, so a double-click, a browser resubmit or a
+> back-button-and-retry each burn a token on a publish that does nothing — and
+> the person is then told they have hit the daily ceiling.
+
+**Fixed.** `allowPublish` gained a `peek` that answers and spends nothing; the
+token is taken after `publish_tool` succeeds. `MY_DRAFT_ONLY_SQL` adds
+`and t.status = 'draft'` for the submit flow, and `MY_LISTING_SQL` is how the
+flow tells "already published" from "not yours" and "not there" without
+spending anything to find out — a published listing sends the person to their
+own dashboard, which is the honest destination. The edit screen reads the
+unfiltered statement, because editing a published listing is most of what it is
+for.
+
+**Tested.** `tests/rate-limit.test.mjs`, "a peeked publish allowance answers and
+spends nothing": five peeks, then the two real publishes still there, then the
+refusal. `tests/maker.test.mjs` asserts `myDraft` is null for a published
+listing and `myListingToEdit` is not.
+
+#### F8 — One bad input charges an attempt against every job in its batch, so 31 good statements are parked with it  [MEDIUM]
+
+> When `embedTexts` throws, the worker loops over every job in the batch and
+> calls `embedding_job_failed` on each. Three such batches and all of them are
+> parked — including up to 31 perfectly good statements that happened to be
+> queued behind one bad one. The file's own comment claims the opposite … It
+> does not hold them behind it; it parks them beside it, and a parked job only
+> un-parks when its text changes again.
+
+**Fixed.** One whole-batch retry, then bisection, and only a request carrying
+ONE document that fails is that document's fault. A 400 is the only status
+worth bisecting for; a 401, a 429, a 5xx or a timeout is a fact about the
+request, so nothing is charged and the jobs stay queued. A batch in which every
+leaf fails alone is also treated as the provider's, because that is
+indistinguishable from a malformed request. The policy is in
+`scripts/embed-batch.mjs`, apart from the worker, so it can be driven with a
+stub that spends nothing.
+
+**Tested.** `tests/embed-worker.test.mjs`: one bad input among four leaves three
+embedded and charges one; a 401 across four charges nobody; every input failing
+alone charges nobody; a timeout is retried as a whole batch; a truncated input
+is still charged to itself; the wrong model stores nothing; and the cap is asked
+again inside the bisection.
+
+#### F9 — The queue's "one job per thing" key can never collapse two edits of the same statement  [MEDIUM]
+
+> Editing a statement does not update its row; it deletes it and inserts a new
+> one with a new identity. So `ref_id` changes on every edit and the unique key
+> can never fire for the case its comment describes. Fifty edits produce fifty
+> rows … the stated mechanism is not the one operating, and there is no cap on
+> `embedding_jobs` rows at all: with the worker stopped, the table grows one row
+> per edit with nothing to stop it.
+
+**Fixed, by making the edit an UPDATE.** `set_owner_statements` pairs the
+statements that are GOING, oldest position first, with the ones ARRIVING, in the
+order typed; each pair is one UPDATE of the existing row's text. Whatever is
+left over on either side is a delete or an insert, as before. A one-statement
+edit — which is what an edit almost always is — is one UPDATE of one row and one
+queue row, and the fiftieth edit overwrites the same job. **The reused row loses
+its vector in the same statement**, which delete-and-insert never had to think
+about: a row whose text changed while its embedding did not is a listing
+findable by words it no longer contains. And the row ceiling from F4 is there
+for the case where the worker is stopped.
+
+**Tested.** `db/test/adding_a_tool_test.sql` §19 edits one statement fifty times
+and asserts ≤ 1 queued job, one statement row, the SAME row id, no vector, and
+`source = 'user'` still. §7's existing assertions — a name change queues 0, a
+summary change queues 1, replacing one of two statements queues exactly the one
+that changed and the other keeps its embedding — all still hold.
+
+#### F10 — U+200D and U+202E survive into a stored statement and are rendered untouched  [LOW]
+
+> In scope, this is correct: the gate and §19 both name exactly those
+> characters, and all of them are stripped. But a zero-width joiner and a
+> right-to-left override are neither controls nor stripped, and they reach
+> `tool_problems.statement`, which is rendered as text on the tool page, in
+> results and on the maker dashboard. U+202E visually reverses everything after
+> it, which is a display-spoofing primitive in a field strangers read.
+>
+> Note also that the database's stripper removes rather than replaces, so
+> `"line one" + LF + "CANDIDATE 9: …"` becomes `line oneCANDIDATE 9: …` — two
+> words welded together.
+
+**Fixed.** `public.control_character_class()` gains U+200B–U+200D,
+U+202A–U+202E and U+2066–U+2069, and `lib/submit.ts` the same three ranges by
+`String.fromCharCode`. U+FEFF is deliberately allowed and §19 says why.
+`strip_control_characters` now replaces with a space, collapses runs of
+whitespace and trims — which is `cleanText`, step for step. `0018` also checks
+every existing row against the widened class rather than assuming, because
+PostgreSQL does not re-validate a CHECK when the function behind it changes.
+
+**Tested.** `db/test/adding_a_tool_test.sql` §18 writes the review's six
+statements through the one door plus three more, reads each back, and asserts
+nothing invisible survived; then the CHECK refusing U+202E and U+200D directly
+as the owner; then that the stripper replaces and collapses. §5's assertion
+changed from `ends the line here99` to `ends the line here 99`, which is the
+weld disappearing. `tests/submit.test.mjs` carries the widened list and asserts
+both spellings name the same ranges.
+
+#### F11 — `created_at` and `updated_at` are writable by the application role  [LOW]
+
+> `created_at` and `updated_at` are ordering keys …; `links` and `logo_path` are
+> free-form columns nothing in the flow writes. None is reachable today because
+> no statement in `lib/` names them — which is the only thing standing between a
+> maker and back-dating or bumping their own listing. §2's argument is that the
+> column list is the boundary; these four are on the wrong side of it.
+
+**Fixed.** All four move to `c_never` and the grants are regenerated by the same
+arithmetic `0017` used. What remains: INSERT on `flags, languages, name,
+platforms, pricing, slug, status, submitted_by, summary, url`; UPDATE on
+`flags, languages, name, platforms, pricing, summary`.
+
+**Tested.** §3 of the suite now asserts the EXACT set in both directions rather
+than sampling the forbidden one — which is why nothing caught this: a list of
+columns expected to be refused fails when one is missing from it and not when
+one is added. It also asserts `url_key` is writable by nobody, because
+PostgreSQL will not grant INSERT or UPDATE on a generated column.
+
+#### F12 — `revalidatePath` is called with a slug straight off the form  [LOW]
+
+> A signed-in person who successfully edits their own listing can name any slug
+> in the same POST and purge that path's cache. The impact is a cache miss for
+> somebody else's page, not a read or a write — but the slug is already on the
+> row and does not need to come from the form.
+
+**Fixed.** `saveListing` reads the row it is about to write through
+`myListing(toolId)` and every `revalidatePath` and the final redirect use the
+row's slug. The form's slug is used for one thing only: the address to send
+somebody back to while they are still being refused, before any write.
+
+**Tested.** `tests/maker.test.mjs` asserts `runMyListing` returns the row's own
+slug and status, answers null for a listing that is not yours and for one that
+does not exist, and — as text, because this is the kind of thing that gets
+tidied back — that `app/submit/actions.ts` reads the row and no longer takes a
+slug off the form.
+
+#### F13 — The per-address publish ceiling is forgeable off-tunnel, and the buckets reset on a recompile through the salt as well as through a restart  [LOW]
+
+> §19 does not restate it for publishing, which is the limit that now protects
+> the catalogue rather than the bill: reached directly, one attacker mints a
+> fresh per-address bucket per request by choosing a valid-looking IP, and only
+> the three-per-account ceiling remains — with free accounts. Worth one sentence
+> in §19.
+>
+> The second is a mechanism the docs get slightly wrong … The bucket map is
+> parked on `globalThis` and does survive a recompile; the **salt** is a
+> module-level const and is re-randomised, so every key changes and every
+> allowance is fresh anyway … The conclusion is the same and the reason written
+> down is not the reason.
+
+**Fixed.** The salt is parked on `globalThis` beside the buckets, so a recompile
+now forgets nobody. §19 has the forged-header sentence, and the "Known
+weaknesses" entry above is corrected — it blamed the buckets for something the
+salt was doing.
+
+**Tested.** `tests/markup.test.mjs` asserts the `globalThis` form AND that no
+module-level `const SALT =` remains, because "per process" is the property and
+the parking is how it is true.
+
+#### F14 — Coverage gaps in the new suites  [LOW]
+
+> - `db/test/adding_a_tool_test.sql` §8 tests `embedding_work` only for a
+>   *vanished* row … It never queues a live statement on an unpublished tool.
+> - Nothing anywhere drives `createDraft` against a real duplicate URL.
+> - Nothing asserts that the dashboard's "Searches matched" agrees with the
+>   demand panel.
+> - Nothing asserts `url` uniqueness survives a trailing slash or a host-case
+>   change.
+> - `tests/links.test.mjs` reaches only `/submit` of the eleven new routes …
+>   the maker and claim routes are covered by `tests/markup.test.mjs`'s
+>   file-existence list, which is a different question.
+> - `tests/rate-limit.test.mjs` does not count the worker's calls, and says so.
+
+**Fixed, each named gap by the test under the finding it belongs to**, plus:
+`tests/links.test.mjs` now asserts all eleven routes resolve, and walks each of
+them over HTTP — signed out always, and signed in as the maker when a session
+is supplied — asserting no 5xx and that a stranger is never shown a maker's
+dashboard. It skips with a sentence when no server is answering, because
+`npm test` runs without one. `tests/maker.test.mjs` is new and drives the
+maker's own statements against the database as dev_maker, dev_person and
+dev_admin. `tests/embed-worker.test.mjs` is new.
+
+#### The overclaims table, with the reviewer's verdicts verbatim
+
+Two rows of the "What is proved" table were wrong and are corrected above.
+Everything else in the review's row-by-row is reproduced here as it was
+written.
+
+| Row | Verdict |
+| --- | --- |
+| A draft is invisible in all eight retrieval paths | **Reproduced, and stronger than claimed.** |
+| A person inserts only their own draft | **Reproduced.** |
+| The application cannot write the seven columns | **Reproduced.** All ten forbidden INSERTs and all ten forbidden UPDATEs answered `permission denied for table tools`. (But see F11: four columns were on the writable side of the list.) |
+| A person-typed statement is `source = 'user'` by construction | **Reproduced for the door; qualified.** "But an admin writing through the same door lands `source = 'user'` on another person's listing (F3), so 'by construction' now means 'by a person, possibly not this person'." — closed: an admin cannot reach the door at all. |
+| A statement cannot forge a reranker candidate | **Reproduced.** The newline attack stored as one line. |
+| Publishing is the only door | **Reproduced.** |
+| An edit re-queues only what changed | **Reproduced exactly.** |
+| The worker survives a bad row | **Overclaim.** "True for a vanished row. False for an unpublished parent (F5) … And 'one absurd statement cannot hold the other thirty-one behind it forever' is false the other way — one failure parks all of them (F8)." — both closed; the table row above is corrected. |
+| The oracle stays split | **Reproduced.** |
+| The four claim outcomes | **Reproduced.** |
+| Nobody takes a listing over | **True about `owner_id`, and that is all it is about.** See F3 — closed by narrowing `tool_is_mine`. |
+| The one recorded exception | **Reproduced.** |
+| Nothing is joinable to a person | **Reproduced.** |
+| A sentence one person typed never reaches a maker | **Reproduced.** |
+| No policy evaluates to true | **Reproduced.** |
+| The tick is disabled in the HTML | **Reproduced verbatim.** |
+| The server never fetches the submitted URL | **Accepted on the test's evidence, not re-run.** |
+| Searchable within a minute — "4.7 s to vectors, 17 s to the page" | **Reproduced, slightly faster.** 3.4 s to the vectors. |
+| The caches reflect an edit on the next request | **Reproduced for a publish, as a stranger.** |
+| The publishing limit refuses with a page | **Reproduced.** "What the row does not say is that two of those three were spent on publishes that did nothing (F7)." — closed. |
+| §19: "A duplicate address is refused by `tools.url`'s unique constraint, with a message naming the existing listing's **public name only**." | **False** — "it is a 500 (F1) — and the constraint does not consider a trailing slash a duplicate at all (F2)." Both closed; §19 is rewritten. |
+| `0017` §4: "A statement edited three times in a minute is embedded once, with its latest text." | **False by mechanism** (F9). Closed by making an edit an UPDATE; the table row above is corrected. |
+
+On the "Known weaknesses" list the review said it "found nothing in it
+overstated" and named two entries as incomplete — the recompile reason (F13)
+and the worker's cap being priced at fifteen tokens (F4). Both are corrected in
+place above.
+
+#### What the review could not test, and what of it is now tested
+
+| It could not | Now |
+| --- | --- |
+| An admin over HTTP — "No row in `auth_core.user` maps to `dev_admin`" | Still not over HTTP. F3 is proved at the role layer, at the statement layer (`tests/maker.test.mjs`) and in the suite (§16), which between them cover `MY_DRAFT_SQL` and all four Server Actions' authorisation |
+| A statement the provider refuses one input at a time | Tested with a stub rather than a live provider: `tests/embed-worker.test.mjs` refuses one named input out of four and asserts the other three embed. Nothing the app can store exceeds `MAX_DOCUMENT_INPUT`, so a live one still cannot be constructed |
+| Two simultaneous claims | Still not run. `claim_tool` takes `for update` and the logic reads correct |
+| The production route cache | `npm run build` runs in this phase's gate with the dev server stopped, and the dev server is restarted once after. The route cache itself is still untested against a built server |
+| The per-address ceiling behind Cloudflare | Still off-tunnel. §19 now says what that means, which is what the review asked for |
+| Whether the 15-token cost constant is wrong for the *web* process too | It is right for the web process — one capped sentence, measured — and was wrong for the worker. Both are now priced separately and `tests/rate-limit.test.mjs` computes each |
 
 ## Tried and rejected
 

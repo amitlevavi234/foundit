@@ -198,18 +198,120 @@ functions: `public.embedding_work`, `public.embedding_job_done` and
 `app/`, `components/` or `lib/`, and the rule is right: the web process
 must never hold this role's credentials.
 
-A bad row does not stop a run. A job whose row was deleted or whose tool was
-unpublished comes back with a null body and is retired; a job the provider
-refuses is recorded with its reason and retried twice before being parked; a
-truncated input is refused rather than stored, because a vector of a prefix
-filed under the whole statement is a search that is subtly wrong forever. A
-parked job stays in the table where an operator can see it, and
+### Exactly one of these runs
+
+**A second worker is a second full daily allowance.** Both embedding ceilings
+are counters in memory, in the process that holds them, so two workers spend
+twice the budget and neither knows about the other. The Phase 7 review found
+two live on this machine at once — one left over from the implementer's
+evidence run — and costed the pair at $9.25 a month against a $5 ceiling.
+
+So the worker takes a **session-level advisory lock** at start-up and refuses
+to start if another holds it:
+
+```
+$ node --env-file=.env.local scripts/embed-worker.mjs
+another embed-worker already holds the advisory lock on this database.
+EXACTLY ONE runs at a time, because the daily embedding budget in
+lib/rate-limit.ts is per process and a second worker is a second full
+allowance. Stop the other one, or wait for it to finish; see
+docs/development.md for how it runs on the server.
+$ echo $?
+4
+```
+
+`pg_try_advisory_lock` and not `pg_advisory_lock`: the second one WAITS, and a
+second worker sitting silently in a queue looks exactly like a second worker
+that is running. The lock is held by a connection that is checked out for the
+life of the process and never handed back, so it is released when the process
+ends **however it ends** — there is no stale lock to clear by hand and no lease
+to renew. `tests/embed-worker.test.mjs` holds the lock itself and asserts the
+refusal and the exit code.
+
+**Before you start one, check nothing else is:**
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -like '*embed-worker*' } |
+  Select-Object ProcessId, CreationDate
+```
+
+**On the server** it is a unit rather than a terminal, which is what makes
+"exactly one" a property of the machine rather than of somebody's memory.
+`Restart=always` and `RestartSec` are the whole of it; the lock makes a
+double-start harmless, and systemd will not start a second copy of a unit it
+already has running:
+
+```ini
+# /etc/systemd/system/foundit-embed-worker.service
+[Unit]
+Description=Foundit embedding worker
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=foundit
+WorkingDirectory=/srv/foundit/current
+# The root-only file with DATABASE_URL_EMBED and EMBEDDINGS_API_KEY in it.
+# Not .env.local, and not readable by the web user.
+EnvironmentFile=/etc/foundit/worker.env
+ExecStart=/usr/bin/node scripts/embed-worker.mjs --interval=5
+Restart=always
+RestartSec=5
+# Exit 4 is "another worker holds the lock", which is not worth restarting for.
+RestartPreventExitStatus=4
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl enable --now foundit-embed-worker
+journalctl -u foundit-embed-worker -f     # job ids, counts, tokens; never text
+```
+
+### What a bad row costs, and what a bad request does not
+
+A bad row does not stop a run. A job whose row was deleted **or whose tool is
+not published** comes back with a null body and is retired; a job the provider
+refuses **by itself** is recorded with its reason and retried twice before
+being parked; a truncated input is refused rather than stored, because a vector
+of a prefix filed under the whole statement is a search that is subtly wrong
+forever. A parked job stays in the table where an operator can see it, and
 `public.queue_embedding` un-parks it the moment its text changes again.
 
-Its calls count against `MAX_EMBEDDING_CALLS_PER_DAY` — **in its own
-process**, which is the honest limitation: this worker and the web process each
-hold their own counter, and the vendor-side cap is the only ceiling actually
-shared between them.
+**A request that fails as a REQUEST is charged to nobody.** This was the Phase 7
+review's F8: the worker looped over every job in a failed batch and recorded a
+failure against each, so a provider outage parked up to thirty-one perfectly
+good statements beside whatever happened to be queued with them — and a parked
+job only un-parks when its text changes again, which for a maker means editing
+a sentence they had already written. Now a whole-request failure is retried
+once and then **bisected**, and only a request carrying ONE document that fails
+is that document's fault. A 400 is the only status worth bisecting for; a 401,
+a 429, a 5xx or a timeout is a fact about the request, so the jobs stay queued
+and the next tick tries them again:
+
+```
+the provider refused a request of 4; no job was charged an attempt (embeddings: HTTP 401)
+bisected a batch of 32: 1 input(s) failed alone, 31 embedded
+```
+
+### What it spends, and against what
+
+Its requests count against `MAX_EMBEDDING_CALLS_PER_DAY` and their SIZE counts
+against `MAX_EMBEDDING_TOKENS_PER_DAY`. The second ceiling is the Phase 7
+review's F4 and it is the one that is about money: a request from this process
+carries up to thirty-two documents, and the cost model priced every embedding
+request at fifteen tokens, which is one capped search sentence. `.env.example`
+has the arithmetic. Both counters are **in this process**, which is why exactly
+one of these runs.
 
 There is no `--from-fixture` and there cannot be: a queue is about text nobody
 has written before, so there is nothing recorded to load. With no
