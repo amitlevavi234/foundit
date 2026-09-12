@@ -48,7 +48,7 @@ import {
   runDeletion,
   type DeletionOutcome,
 } from './deletion';
-import { handleCandidates } from './handle';
+import { handleCandidates, neutralHandle } from './handle';
 
 /* ===========================================================================
  * The identity half of every request, and the writes a signed-in person makes.
@@ -124,7 +124,7 @@ export const currentViewer = cache(async (): Promise<Viewer | null> => {
   const existing = await readViewer(session.user.id);
   if (existing) return existing;
 
-  await ensureProfile(session.user.id, session.user.email ?? null, session.user.name ?? null);
+  await ensureProfile(session.user.id, session.user.name ?? null);
   return readViewer(session.user.id);
 });
 
@@ -153,23 +153,29 @@ async function readViewer(userId: string): Promise<Viewer | null> {
 /**
  * Make the profile row for a new account.
  *
- * The handle comes from the local part of the address (lib/handle.ts) and is
- * deduplicated by walking candidates until the database accepts one — the
- * uniqueness is the unique index's to enforce, not this loop's, so two people
- * signing up at the same instant with the same stem cannot both win.
+ * THE HANDLE COMES FROM THE NAME AND NEVER FROM THE ADDRESS. That is the Phase
+ * 6 review's F6: it used to be the local part, so somebody signing in with
+ * `amitlevavi234@gmail.com` was published as `@amitlevavi234` on a page
+ * strangers read. It is Google's name now, or — for every emailed-code sign-in,
+ * because Better Auth stores an empty name for those — a neutral word and a
+ * number. `email` is no longer an argument to this function at all, which is
+ * the only way to be sure it is not used.
  *
- * A hundred failures means a hundred people share a stem, and the
- * hundred-and-first gets a random handle rather than this looping. They can
+ * Deduplication is the unique index's, not this loop's: it walks candidates
+ * until the database accepts one, so two people signing up at the same instant
+ * with the same name cannot both win.
+ *
+ * A hundred failures means a hundred people share a name, and the
+ * hundred-and-first gets a neutral handle rather than this looping. They can
  * change it in Settings, which is where everybody can change it.
  */
 export async function ensureProfile(
   userId: string,
-  email: string | null,
   displayName: string | null,
 ): Promise<string | null> {
   const name = (displayName ?? '').trim().slice(0, 60) || null;
 
-  for (const candidate of handleCandidates(email)) {
+  for (const candidate of handleCandidates(name)) {
     const handle = await withIdentity({ userId }, async (tx) => {
       const { rows } = await tx.query<{ handle: string }>(CREATE_PROFILE_SQL, [candidate, name]);
       return rows[0]?.handle ?? null;
@@ -182,11 +188,11 @@ export async function ensureProfile(
     if (existing) return existing.handle;
   }
 
-  const random = `friend${Math.floor(Math.random() * 1_000_000)
-    .toString()
-    .padStart(6, '0')}`;
   return withIdentity({ userId }, async (tx) => {
-    const { rows } = await tx.query<{ handle: string }>(CREATE_PROFILE_SQL, [random, name]);
+    const { rows } = await tx.query<{ handle: string }>(CREATE_PROFILE_SQL, [
+      neutralHandle(),
+      name,
+    ]);
     return rows[0]?.handle ?? null;
   });
 }
