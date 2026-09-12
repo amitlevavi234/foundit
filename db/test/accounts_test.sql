@@ -273,6 +273,9 @@ $$;
 do $$
 declare n integer; tok text; other text;
 begin
+  -- As its owner: since 0015 nobody else can read the row at all without the
+  -- link, which is the thing this section is about.
+  perform pg_temp.be('dev_person');
   select share_token into tok from public.collections where slug::text = 'trip-to-greece';
   if tok is null then
     perform pg_temp.fail('the seeded shared collection has no token to test with');
@@ -308,19 +311,30 @@ begin
   exception when insufficient_privilege then null;
   end;
 
-  -- Revoking is setting the token back to null, and the old link dies with it.
+  -- Revoking is turning sharing off. 0015_phase6_review.sql made the token the
+  -- database's to write, so `is_public = false` is the whole statement and the
+  -- trigger takes the address with it; the old link dies immediately.
   perform pg_temp.be('dev_person');
-  update public.collections set share_token = null, is_public = false
+  update public.collections set is_public = false
    where slug::text = 'trip-to-greece';
   perform pg_temp.be(null);
   perform pg_temp.holding(tok);
   select count(*) into n from public.collections where slug::text = 'trip-to-greece';
   if n > 0 then perform pg_temp.fail('a revoked link still opened the collection'); end if;
 
-  -- Put it back for the sections below.
+  -- Share it again for the sections below. The token is a NEW one, because a
+  -- revoked address that came back would mean revoking had not been a
+  -- revocation at all.
   perform pg_temp.be('dev_person');
-  update public.collections set share_token = tok, is_public = true
+  update public.collections set is_public = true
    where slug::text = 'trip-to-greece';
+  select share_token into other from public.collections where slug::text = 'trip-to-greece';
+  if other is null then
+    perform pg_temp.fail('sharing again did not mint a token');
+  end if;
+  if other = tok then
+    perform pg_temp.fail('sharing again handed back the address that had just been revoked');
+  end if;
 end
 $$;
 
@@ -511,14 +525,259 @@ begin
   exception when insufficient_privilege then null;
   end;
 
-  -- Put it back for section 7's counting.
-  perform pg_temp.be('dev_person');
-  update public.reviews set deleted_at = null where id = rid;
+  -- It stays down. Section 7 is what the review of this phase added: the
+  -- author trying to put it back, and being refused.
 end
 $$;
 
 -- ===========================================================================
--- 7. Deleting an account leaves nothing behind
+-- 7. WHAT THE PHASE 6 ADVERSARIAL REVIEW FOUND
+--
+-- Three things, and they are one thing said three ways: a rule that lives in
+-- the statement the application happens to send is not a rule.
+--
+--   F1  an administrator's removal was undone by its author's next request,
+--       and the review could simply be written again.
+--   F4  an administrator could read a private saved list.
+--   the defence-in-depth item: `profiles_update` and `collections_write` are
+--       both "this row is yours" with no restriction on WHICH COLUMN, so
+--       `is_admin`, `plan` and `share_token` were writable by their subject.
+--
+-- Everything below is as `foundit_app`, under a claim, which is the only way
+-- any of it is ever reached.
+-- ===========================================================================
+
+-- (a) F1 — the removal §6 just made is not the author's to undo.
+do $$
+declare
+  n integer; rid bigint;
+  count_before integer; avg_before numeric;
+  count_after  integer; avg_after  numeric;
+begin
+  rid := pg_temp.review_of('receiptly', 'dev_person');
+  if rid is null then perform pg_temp.fail('the removed review is missing'); end if;
+
+  perform pg_temp.be('dev_admin');
+  if (select deleted_at from public.reviews where id = rid) is null then
+    perform pg_temp.fail('section 6 did not leave the review removed');
+  end if;
+  if not exists (select 1 from public.review_removals where review_id = rid) then
+    perform pg_temp.fail('the removal is not on the record');
+  end if;
+
+  select review_count, rating_avg into count_before, avg_before
+    from public.tools where slug::text = 'receiptly';
+  if count_before <> 0 or avg_before is not null then
+    perform pg_temp.fail(format('a removed review is still counted: %s reviews, average %s',
+                                count_before, avg_before));
+  end if;
+
+  perform pg_temp.be('dev_person');
+
+  -- (i) Put it back. This is the one the review reproduced: `reviews_update`
+  -- is `author_id = auth.uid()` and said nothing about deleted_at, so the
+  -- takedown lasted until the author's next request.
+  begin
+    update public.reviews set deleted_at = null where id = rid;
+    perform pg_temp.fail('the author cleared an administrator''s removal');
+  exception when insufficient_privilege then null;
+  end;
+
+  -- (ii) Rewrite it where it lies. A removed review the author can still edit
+  -- is a removed review whose text is not the text that was removed.
+  begin
+    update public.reviews
+       set body = 'and now I have rewritten it after the removal', rating = 1
+     where id = rid;
+    perform pg_temp.fail('the author edited a review after it was removed');
+  exception when insufficient_privilege then null;
+  end;
+
+  -- (iii) Write it again. `reviews_one_live_per_author` is partial, so the
+  -- removed row no longer occupies the slot and this was simply an INSERT —
+  -- the application's own UPSERT_REVIEW_SQL, sent verbatim.
+  begin
+    insert into public.reviews (tool_id, author_id, rating, body)
+    select t.id, auth.uid(), 4::smallint, nullif('the same review again', '')
+      from public.tools t
+     where t.slug = 'receiptly'::citext and t.status = 'published'
+    on conflict (tool_id, author_id) where deleted_at is null
+    do update set rating = excluded.rating, body = excluded.body;
+    perform pg_temp.fail('the author reposted a review an administrator removed');
+  exception when insufficient_privilege then null;
+  end;
+
+  -- And the counters say what they said before all three.
+  perform pg_temp.be('dev_admin');
+  select review_count, rating_avg into count_after, avg_after
+    from public.tools where slug::text = 'receiptly';
+  if count_after <> count_before or avg_after is distinct from avg_before then
+    perform pg_temp.fail(format('the refusals moved a counter: %s/%s became %s/%s',
+                                count_before, avg_before, count_after, avg_after));
+  end if;
+
+  -- Both mechanisms are on the table, not just the one that raised. The
+  -- trigger is what says the sentence; the restrictive policies are what a
+  -- later migration cannot forget.
+  select count(*) into n from pg_policies
+   where schemaname = 'public' and tablename = 'reviews'
+     and policyname in ('reviews_removal_is_not_undone', 'reviews_no_repost_after_removal')
+     and permissive = 'RESTRICTIVE';
+  if n <> 2 then
+    perform pg_temp.fail('the two restrictive policies on reviews are not both there');
+  end if;
+end
+$$;
+
+-- (b) A review its AUTHOR took down carries no removal, and is theirs to write
+--     again — which is the whole difference the section above turns on.
+do $$
+declare n integer; rid bigint;
+begin
+  perform pg_temp.be('dev_maker');
+  rid := pg_temp.review_of('anki', 'dev_maker');
+  if rid is null then perform pg_temp.fail('the seeded review on anki is missing'); end if;
+
+  update public.reviews set deleted_at = now() where id = rid;
+  get diagnostics n = row_count;
+  if n <> 1 then perform pg_temp.fail('the author could not take their own review down'); end if;
+
+  insert into public.reviews (tool_id, author_id, rating, body)
+  select t.id, auth.uid(), 5::smallint, nullif('written again, by me, about my own', '')
+    from public.tools t
+   where t.slug = 'anki'::citext and t.status = 'published'
+  on conflict (tool_id, author_id) where deleted_at is null
+  do update set rating = excluded.rating, body = excluded.body;
+  get diagnostics n = row_count;
+  if n <> 1 then
+    perform pg_temp.fail('a review its own author took down could not be written again');
+  end if;
+
+  -- Put it back the way section 8 expects to find it.
+  update public.reviews set deleted_at = now()
+   where tool_id = (select id from public.tools where slug::text = 'anki')
+     and author_id = 'dev_maker' and id <> rid;
+  update public.reviews set deleted_at = null where id = rid;
+end
+$$;
+
+-- (c) The writable columns on a profile are three, and `is_admin` is not one.
+do $$
+declare n integer;
+begin
+  perform pg_temp.be('dev_person');
+
+  begin
+    update public.profiles set is_admin = true where id = auth.uid();
+    perform pg_temp.fail('a person made themselves an administrator');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    update public.profiles set plan = 'premium' where id = auth.uid();
+    perform pg_temp.fail('a person gave themselves a paid plan');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    update public.profiles set created_at = now() where id = auth.uid();
+    perform pg_temp.fail('a person rewrote when they joined');
+  exception when insufficient_privilege then null;
+  end;
+
+  if auth.is_admin() then perform pg_temp.fail('and after all that, they are one'); end if;
+
+  -- UPDATE_PROFILE_SQL, which is the only statement Settings sends, unchanged.
+  update public.profiles
+     set display_name = nullif('Tomer', ''),
+         bio          = nullif('Still here.', ''),
+         handle       = coalesce(null::citext, handle)
+   where id = auth.uid();
+  get diagnostics n = row_count;
+  if n <> 1 then perform pg_temp.fail('Settings can no longer save a profile'); end if;
+end
+$$;
+
+-- (d) A share token is the database's to write. F7's "no exploit today, and
+--     the guarantee lives in the application" is now a rule.
+do $$
+declare n integer; cid bigint; tok text;
+begin
+  perform pg_temp.be('dev_person');
+  select id into cid from public.collections where slug::text = 'quiet-mornings';
+  if cid is null then perform pg_temp.fail('the seeded private collection is missing'); end if;
+
+  begin
+    update public.collections set share_token = '00000000000000000000000000000000'
+     where id = cid;
+    perform pg_temp.fail('the owner chose their own share token');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    insert into public.collections (owner_id, name, slug, is_public, share_token)
+    values (auth.uid(), 'Mine, at an address I picked', 'picked-address', true,
+            '11111111111111111111111111111111');
+    perform pg_temp.fail('a collection was created at a chosen address');
+  exception when insufficient_privilege then null;
+  end;
+
+  -- SHARE_COLLECTION_SQL and UNSHARE_COLLECTION_SQL, as the screens send them.
+  update public.collections set is_public = true
+   where id = cid and share_token is null;
+  get diagnostics n = row_count;
+  if n <> 1 then perform pg_temp.fail('the Share control can no longer share'); end if;
+
+  select share_token into tok from public.collections where id = cid;
+  if tok is null or tok !~ '^[0-9a-f]{32}$' then
+    perform pg_temp.fail('sharing did not mint 32 hex characters');
+  end if;
+
+  update public.collections set is_public = false where id = cid;
+  get diagnostics n = row_count;
+  if n <> 1 then perform pg_temp.fail('the Share control can no longer un-share'); end if;
+  if (select share_token from public.collections where id = cid) is not null then
+    perform pg_temp.fail('un-sharing left the address alive');
+  end if;
+end
+$$;
+
+-- (e) F4 — an administrator does not read a private saved list, and reads a
+--     shared one only the way everybody else does: by holding its link.
+do $$
+declare n integer; tok text;
+begin
+  perform pg_temp.be('dev_person');
+  select share_token into tok from public.collections where slug::text = 'trip-to-greece';
+  if tok is null then perform pg_temp.fail('the shared collection lost its token'); end if;
+
+  perform pg_temp.be('dev_admin');
+  if not auth.is_admin() then perform pg_temp.fail('dev_admin is not an admin'); end if;
+
+  select count(*) into n from public.collections;
+  if n > 0 then
+    perform pg_temp.fail(format('an administrator can see %s collection(s) with no link', n));
+  end if;
+  select count(*) into n from public.collection_items;
+  if n > 0 then
+    perform pg_temp.fail(format('an administrator can see %s saved item(s)', n));
+  end if;
+
+  -- Holding the link, they see the one collection it is for and nothing else —
+  -- exactly what a stranger holding it sees.
+  perform pg_temp.holding(tok);
+  select count(*) into n from public.collections;
+  if n <> 1 then
+    perform pg_temp.fail('the link did not open its collection for an administrator');
+  end if;
+  select count(*) into n from public.collections where slug::text = 'quiet-mornings';
+  if n > 0 then perform pg_temp.fail('a link opened a collection it is not for'); end if;
+  perform pg_temp.holding(null);
+end
+$$;
+
+-- ===========================================================================
+-- 8. Deleting an account leaves nothing behind
 --
 -- One statement against one row, and 0001's cascades do the rest. What this
 -- checks is that the cascade reaches everything personal, that it reaches
@@ -558,8 +817,12 @@ begin
   set role foundit_app;
 
   select count(*) into before_reviews     from public.reviews     where author_id = 'dev_person';
-  select count(*) into before_collections from public.collections where owner_id  = 'dev_person';
   perform pg_temp.be('dev_person');
+  -- Counted as themselves rather than as the admin: 0015 took
+  -- `or auth.is_admin()` out of collections_read, so an administrator can no
+  -- longer count somebody's saved lists at all, and a before-count of zero
+  -- through a policy would prove nothing about what the delete removed.
+  select count(*) into before_collections from public.collections where owner_id  = 'dev_person';
   select count(*) into before_likes  from public.tool_likes  where user_id = 'dev_person';
   select count(*) into before_claims from public.tool_claims where claimant_id = 'dev_person';
   select count(*) into before_items  from public.collection_items ci
@@ -589,11 +852,19 @@ begin
   if n > 0 then perform pg_temp.fail('their reviews survived'); end if;
   select count(*) into n from public.tool_likes where user_id = 'dev_person';
   if n > 0 then perform pg_temp.fail('their likes survived'); end if;
+
+  -- The collections are counted as the SCHEMA OWNER, past row-level security
+  -- altogether. Since 0015 nobody reachable through the application can see
+  -- another person's saved lists, so "an admin sees none" is true whether the
+  -- rows are gone or not, and the question here is whether they are gone.
+  reset role;
   select count(*) into n from public.collections where owner_id = 'dev_person';
   if n > 0 then perform pg_temp.fail('their collections survived'); end if;
   select count(*) into n from public.collection_items ci
     left join public.collections c on c.id = ci.collection_id where c.id is null;
   if n > 0 then perform pg_temp.fail('saved items were orphaned rather than deleted'); end if;
+  set role foundit_app;
+
   select count(*) into n from public.tool_claims where claimant_id = 'dev_person';
   if n > 0 then perform pg_temp.fail('their claims survived'); end if;
 

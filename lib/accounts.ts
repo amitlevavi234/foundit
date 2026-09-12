@@ -329,15 +329,17 @@ export async function deleteCollection(id: string): Promise<boolean> {
 /**
  * Turn sharing on, and hand back the link's token.
  *
- * The token is minted here with the platform's cryptographic random source —
- * 16 bytes, 128 bits — because the link IS the permission. `Math.random` would
- * be a guessable address for somebody's list, which is the whole failure.
+ * The token used to be minted here with `crypto.randomBytes` and sent as a
+ * parameter. It is not any more, and the Phase 6 review is why (F7): the link
+ * IS the permission, and what kept it 128 unguessable bits was this function
+ * being the only writer rather than any rule in the database. 0015 gives
+ * `foundit_app` no UPDATE privilege on the column and mints the value in a
+ * trigger, so what comes back below is the database's answer and there is
+ * nothing here to get wrong.
  */
 export async function shareCollection(id: string): Promise<string | null> {
-  const { randomBytes } = await import('node:crypto');
-  const token = randomBytes(16).toString('hex');
   return asViewer(async (tx) => {
-    const { rows } = await tx.query<{ share_token: string }>(SHARE_COLLECTION_SQL, [id, token]);
+    const { rows } = await tx.query<{ share_token: string }>(SHARE_COLLECTION_SQL, [id]);
     return rows[0]?.share_token ?? null;
   });
 }

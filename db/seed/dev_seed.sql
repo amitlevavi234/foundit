@@ -1959,16 +1959,18 @@ on conflict do nothing;
 
 -- One shared collection and one private one. `is_public` is no longer a
 -- permission by itself: 0013_accounts.sql made a shared collection readable
--- only by somebody holding its 128-bit token, and added a CHECK that the flag
--- and the token agree, so a row that says public and carries no token is now
--- refused. The literal below is an invented development value in a tracked
--- file on purpose — it is the address of two made-up collections of real
--- public tools, in a throwaway database, and /c/<token> needs something to
--- render.
-insert into public.collections (owner_id, name, slug, description, is_public, share_token) values
-  ('dev_person', 'Trip to Greece', 'trip-to-greece', 'Everything we used in June.', true,
-   '0f1e2d3c4b5a69788796a5b4c3d2e1f0'),
-  ('dev_person', 'Quiet mornings', 'quiet-mornings', null, false, null)
+-- only by somebody holding its token, and added a CHECK that the flag and the
+-- token agree, so a row that says public and carries no token is refused.
+--
+-- The token is NOT written here. 0015_phase6_review.sql made it the database's
+-- to mint and a supplied one an error, so this says `is_public` and the
+-- trigger writes the address — which also means the development link is a
+-- different 32 characters on every rebuild rather than a literal in a tracked
+-- file. `select share_token from public.collections where slug = 'trip-to-greece'`
+-- is how you find it; db/test/accounts_test.sql reads it the same way.
+insert into public.collections (owner_id, name, slug, description, is_public) values
+  ('dev_person', 'Trip to Greece', 'trip-to-greece', 'Everything we used in June.', true),
+  ('dev_person', 'Quiet mornings', 'quiet-mornings', null, false)
 on conflict do nothing;
 
 insert into public.collection_items (collection_id, tool_id, sort_order)
