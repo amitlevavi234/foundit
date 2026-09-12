@@ -210,15 +210,14 @@ try {
   process.exit(EXIT.CONFIG);
 }
 
-if (!embeddingsConfigured()) {
-  process.stderr.write(
-    'EMBEDDINGS_API_KEY is not set. It lives in .env.local, which is not committed;\n'
-      + 'run this as `node --env-file=.env.local scripts/embed-worker.mjs`.\n'
-      + 'With no key there is nothing this worker can do: unlike scripts/embed.mjs it\n'
-      + 'has no fixture to read, because a queue is about text nobody has seen before.\n',
-  );
-  process.exit(EXIT.CONFIG);
-}
+// THE KEY IS CHECKED AFTER THE LOCK, further down, and the order is the point:
+// "another worker is already running" is a fact about the MACHINE and
+// "EMBEDDINGS_API_KEY is not set" is a fact about this invocation's
+// configuration, so a second instance has to say the first thing whether or not
+// the second is also true. It used to be checked here, which made a second
+// worker on a machine with no key exit 1 with a configuration message — the
+// truth about the wrong problem, and a refusal that could not be tested
+// anywhere without a key (CI has none).
 
 // Every statement this worker sends. All of them function calls, because this
 // role may not touch a table.
@@ -429,6 +428,27 @@ try {
   if (lockHolder) lockHolder.release();
   await pool.end();
   process.exit(EXIT.DATABASE);
+}
+
+/* ---------------------------------------------------------------------------
+ * AND ONLY NOW THE KEY.
+ *
+ * This check sat above the pool until CI ran the second-worker test on a
+ * machine with no key and got exit 1 with a configuration message. Both
+ * sentences were true; the wrong one was said. A second worker's first duty is
+ * to say that it is a second worker, and it reaches the provider on no path
+ * between start-up and here — the lock above is the last thing it does.
+ * ------------------------------------------------------------------------ */
+if (!embeddingsConfigured()) {
+  process.stderr.write(
+    'EMBEDDINGS_API_KEY is not set. It lives in .env.local, which is not committed;\n'
+      + 'run this as `node --env-file=.env.local scripts/embed-worker.mjs`.\n'
+      + 'With no key there is nothing this worker can do: unlike scripts/embed.mjs it\n'
+      + 'has no fixture to read, because a queue is about text nobody has seen before.\n',
+  );
+  lockHolder.release();
+  await pool.end();
+  process.exit(EXIT.CONFIG);
 }
 
 let model;

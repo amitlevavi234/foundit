@@ -282,12 +282,36 @@ test('the worker refuses to start when another holds the advisory lock', async (
     assert.equal(rows[0].held, true, 'the test has to be the one holding it, or nothing is proved');
 
     // `--once` so that a worker which DID start would stop by itself. It must
-    // not start: the lock is taken before the model query and before anything
-    // reaches the provider, so this spends nothing whatever happens.
+    // not start: the lock is the last thing the worker does before it is
+    // usable, and it is taken before the key is checked and before anything
+    // reaches the provider.
+    //
+    // WITH NO KEY IN THE CHILD'S ENVIRONMENT, deliberately, and that is what CI
+    // caught. This ran green here because .env.local has a key, and on CI —
+    // which has none — the worker checked the key first and exited 1 with a
+    // configuration message. Both sentences were true and the wrong one was
+    // said. Deleting the key here means the test is the same test on both
+    // machines, and it pins the ORDER rather than trusting it.
+    //
+    // AND `fetch` IS POISONED, so "it made no network call" is asserted rather
+    // than reasoned about. A data: URL rather than a fixture file because it is
+    // three lines and belongs to this test; anything that reaches the provider
+    // exits 99 and prints a marker, so the exit code below could not be 4.
+    const NO_NETWORK =
+      'data:text/javascript,'
+      + encodeURIComponent(
+        'globalThis.fetch = () => {'
+          + ' process.stderr.write("NETWORK CALL FROM A LOCKED-OUT WORKER\\n");'
+          + ' process.exit(99); };',
+      );
+    const childEnv = { ...process.env };
+    delete childEnv.EMBEDDINGS_API_KEY;
+    delete childEnv.OPENAI_API_KEY;
+
     const child = spawn(
       process.execPath,
-      ['scripts/embed-worker.mjs', '--once'],
-      { cwd: new URL('..', import.meta.url), env: process.env },
+      ['--import', NO_NETWORK, 'scripts/embed-worker.mjs', '--once'],
+      { cwd: new URL('..', import.meta.url), env: childEnv },
     );
     let stderr = '';
     child.stderr.on('data', (chunk) => {
@@ -305,7 +329,19 @@ test('the worker refuses to start when another holds the advisory lock', async (
 
     assert.equal(code, 4, `a second worker must exit 4; it exited ${code}. stderr: ${stderr}`);
     assert.match(stderr, /already holds the advisory lock/, 'and it says why');
+    assert.doesNotMatch(
+      stderr,
+      /EMBEDDINGS_API_KEY is not set/,
+      'a second worker says it is a second worker, not that it is misconfigured',
+    );
     assert.doesNotMatch(stdout, /embed-worker: foundit_embed/, 'it must not have started a run');
+    // IT MADE NO NETWORK CALL. The poisoned `fetch` above would have printed
+    // this and exited 99.
+    assert.doesNotMatch(
+      stderr,
+      /NETWORK CALL FROM A LOCKED-OUT WORKER/,
+      'a locked-out worker reached the provider',
+    );
     // And nothing sensitive in either stream.
     for (const stream of [stdout, stderr]) {
       assert.doesNotMatch(stream, /postgresql:\/\//, 'no connection string is ever printed');

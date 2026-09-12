@@ -73,6 +73,51 @@ async function asPerson(who, fn) {
   }
 }
 
+/* ===========================================================================
+ * Making the demand this file needs, rather than finding it
+ *
+ * db/seed/dev_seed.sql creates no `search_events` and no `search_event_tools`
+ * at all — the catalogue is 224 listings and 504 statements and nothing has
+ * ever been searched for. So anything about "searches that found you" has to
+ * write its own, and it writes it through the SAME definer function the
+ * application calls when a real search returns a page: the id never leaves the
+ * database, the rank comes from `with ordinality` over the array, and there is
+ * no argument that could record a rank disagreeing with the order reported.
+ * ======================================================================== */
+
+/** Two sentences, one either side of public.maker_query_threshold() = 5. */
+const SENTENCE_FIVE = 'who paid for the milk in the flat and where did the receipts go';
+const SENTENCE_ONCE = 'a sentence exactly one search ever typed about a shared kitchen';
+
+/** One search, returning `toolIds` in that order, so the first is rank 1. */
+async function logSearch(tx, query, toolIds) {
+  await tx.query(
+    `select public.log_search_event_tools(
+       p_query          => $1::text,
+       p_result_count   => $2::int,
+       p_top_score      => 0.82::real,
+       p_had_good_match => true,
+       p_latency_ms     => 20,
+       p_match_judged   => true,
+       p_tool_ids       => $3::bigint[])`,
+    [query, toolIds.length, toolIds],
+  );
+}
+
+async function idOf(tx, slug) {
+  const { rows } = await tx.query('select id from public.tools where slug = $1::citext', [slug]);
+  assert.ok(rows[0], `the catalogue has no listing at /${slug}`);
+  return String(rows[0].id);
+}
+
+async function matchedCount(tx, toolId) {
+  const { rows } = await tx.query(
+    'select m.matched_count::int as n from public.maker_listing_metrics($1::bigint, 30) m',
+    [toolId],
+  );
+  return Number(rows[0].n);
+}
+
 test('the maker sees her own listings, with the numbers the cards draw', async (t) => {
   if (noDatabase(t)) return;
 
@@ -100,8 +145,34 @@ test('"Searches matched" on /maker is the real number, not the policy’s zero',
   // F6, FIRST HALF. The subquery read public.search_event_tools directly and
   // row-level security filtered it to nothing — the review measured 16 real
   // matches against a rendered 0 for Receiptly and 5 against 0 for Cupboard.
+  //
+  // THE DEMAND IS MADE HERE, and CI is why. The first version asserted that
+  // dev_maker's listings already had search_event_tools rows, which
+  // db/seed/dev_seed.sql never creates: they existed on the machine this was
+  // written on because the review had run live searches through /results, and
+  // on a database freshly applied they are absent. A test that needs a
+  // previous session's side effects is a test that passes for a reason nobody
+  // wrote down. So it logs its own, through the same definer function
+  // lib/sql.ts calls when a real search returns a page, and rolls it back.
   await asPerson('dev_maker', async (tx) => {
+    const receiptly = await idOf(tx, 'receiptly');
+    const before = await matchedCount(tx, receiptly);
+
+    for (let n = 0; n < 5; n += 1) await logSearch(tx, SENTENCE_FIVE, [receiptly]);
+    await logSearch(tx, SENTENCE_ONCE, [receiptly]);
+
+    const after = await matchedCount(tx, receiptly);
+    assert.equal(after, before + 6, 'six searches returned this listing, so six is the number');
+    assert.ok(after > 0, 'and it is not zero, which is what the page used to draw');
+
     const listings = await runMyListings(tx, 'dev_maker');
+    const onTheList = listings.find((l) => l.slug === 'receiptly');
+    assert.equal(onTheList.matchedCount, after, 'MY_LISTINGS_SQL reads the same number');
+
+    // Counted the way MY_LISTINGS_SQL used to — straight off the table — it is
+    // STILL zero, for every one of her listings, including the one that has
+    // just been returned by six searches. That is the defect preserved as
+    // evidence: row-level security filters, it does not refuse.
     const { rows } = await tx.query(
       `select t.id,
               (select count(*) from public.search_event_tools st
@@ -111,20 +182,13 @@ test('"Searches matched" on /maker is the real number, not the policy’s zero',
          from public.tools t where t.owner_id = 'dev_maker'`,
       [],
     );
-    const oldWay = new Map(rows.map((r) => [String(r.id), Number(r.the_old_way)]));
-
-    // Every one of the old counts is zero, because the policy is admin-only.
-    for (const value of oldWay.values()) {
-      assert.equal(value, 0, 'the direct subquery must still be filtered to nothing for a maker');
+    for (const row of rows) {
+      assert.equal(
+        Number(row.the_old_way),
+        0,
+        'the direct subquery must still be filtered to nothing for a maker',
+      );
     }
-
-    // And at least one of the new ones is not, or this test proves nothing.
-    const total = listings.reduce((sum, l) => sum + l.matchedCount, 0);
-    assert.ok(
-      total > 0,
-      'no listing of dev_maker’s has ever been returned by a search, so F6 cannot be '
-        + 'demonstrated against this catalogue — re-seed with db/seed/dev_seed.sql',
-    );
   });
 });
 
@@ -133,18 +197,56 @@ test('the dashboard’s number equals the demand panel’s sum', async (t) => {
 
   // F6, SECOND HALF, and the assertion the review asked for by name: the page
   // rendered "0 · Searches matched · Last 30 days" directly above a list of
-  // three sentences totalling seven searches.
+  // three sentences totalling seven searches, one of them quoted in full.
+  //
+  // Six searches of two sentences, five of one and one of the other, so the
+  // five-event threshold has something on both sides of it as well.
   await asPerson('dev_maker', async (tx) => {
+    const receiptly = await idOf(tx, 'receiptly');
+    for (let n = 0; n < 5; n += 1) await logSearch(tx, SENTENCE_FIVE, [receiptly]);
+    await logSearch(tx, SENTENCE_ONCE, [receiptly]);
+
     const dashboard = await runMakerDashboard(tx, 'receiptly', 'dev_maker');
     assert.ok(dashboard, 'dev_maker maintains receiptly');
+    assert.ok(dashboard.listing.matchedCount >= 6, 'the six searches are in the number');
 
-    const panel = dashboard.demand.reduce((sum, row) => sum + row.searches, 0);
+    // EVERY group, because `matched_count` counts events and the panel groups
+    // them: the two are the same arithmetic over the same rows, and this is
+    // the equality the review asked for.
+    const { rows: all } = await tx.query(
+      'select coalesce(sum(d.searches), 0)::int as total, count(*)::int as groups'
+        + ' from public.maker_search_demand($1::bigint, 30, 1000) d',
+      [receiptly],
+    );
     assert.equal(
       dashboard.listing.matchedCount,
-      panel,
-      `the card says ${dashboard.listing.matchedCount} and the panel beneath it sums to ${panel}`,
+      all[0].total,
+      `the card says ${dashboard.listing.matchedCount} and the demand sums to ${all[0].total}`,
     );
-    assert.ok(panel > 0, 'receiptly has to have some demand for this to mean anything');
+
+    // The panel AS DRAWN takes the ten busiest sentences (MAKER_DASHBOARD_SQL
+    // passes a limit of 10), so it equals the number when there are ten groups
+    // or fewer and is a truncation of it otherwise. Both are asserted rather
+    // than one of them being assumed, because how many sentences have found
+    // this listing is exactly the prior state this test must not depend on.
+    const drawn = dashboard.demand.reduce((sum, row) => sum + row.searches, 0);
+    if (all[0].groups <= 10) {
+      assert.equal(drawn, all[0].total, 'ten groups or fewer: the panel is the whole of it');
+    } else {
+      assert.ok(drawn <= all[0].total, 'more than ten: the panel is a truncation, never a surplus');
+    }
+
+    // The sentence five searches typed comes back WITH ITS WORDS, and the one
+    // typed once comes back withheld — the threshold, from the page's side.
+    const five = dashboard.demand.find((row) => row.queryText === SENTENCE_FIVE);
+    assert.ok(five, 'the five-search sentence is on the panel, with its words');
+    assert.equal(five.shown, true);
+    assert.ok(five.searches >= 5);
+    assert.equal(five.bestRank, 1, 'and it was handed the listing at rank 1');
+    assert.ok(
+      !dashboard.demand.some((row) => row.queryText === SENTENCE_ONCE),
+      'A SENTENCE ONE PERSON TYPED ONCE REACHED A MAKER',
+    );
 
     // And the two statements agree with each other, so /maker and
     // /maker/<slug> cannot show one maker two different numbers.
