@@ -15,7 +15,9 @@
 --   dev_admin   amit    is_admin
 --   (no claim)          a stranger
 --
--- Fifteen sections. The order is the order of the gate:
+-- Twenty sections. One to fifteen are the order of the gate; sixteen to
+-- twenty are the Phase 7 adversarial review's findings, each named by the
+-- finding it closes and each reproducing the review's own attack:
 --
 --    1. a draft is invisible everywhere — seeded so it WOULD rank first
 --    2. inserting a tool: only as yourself, only as a draft
@@ -32,6 +34,11 @@
 --   13. the maker's five-event threshold
 --   14. no policy evaluates to true; row-level security is on and forced
 --   15. the oracle stays split
+--   16. F3  an admin is not a maker: the review's 5.1-5.5, all refused
+--   17. F2  one listing per ADDRESS: the review's eight variants collide
+--   18. F10 the review's six statements, and the three more 0018 added
+--   19. F9  fifty edits of one statement leave one job, on the same row
+--   20. F4  the queue has a ceiling, and reaching it loses nothing
 -- ===========================================================================
 
 \set ON_ERROR_STOP on
@@ -281,41 +288,87 @@ $$;
 --
 -- Checked as a PRIVILEGE, which is what makes it true regardless of policy:
 -- has_column_privilege answers the question the grant decides.
+--
+-- SINCE 0018 THIS LISTS THE WHOLE SET RATHER THAN SAMPLING IT. The Phase 7
+-- review (F11) found `created_at`, `updated_at`, `links` and `logo_path` on
+-- the writable side — two ordering keys and two columns nothing in the flow
+-- writes — and the reason nothing caught it is that this section named the
+-- columns it expected to be refused rather than asserting what remained. An
+-- exhaustive comparison fails when a column is ADDED to the list as well as
+-- when one is missing from it, which is the direction that was not covered.
 -- ===========================================================================
 do $$
-declare bad text;
+declare
+  bad     text;
+  v_have  text;
+  c_update constant text := 'flags, languages, name, platforms, pricing, summary';
+  c_insert constant text :=
+    'flags, languages, name, platforms, pricing, slug, status, submitted_by, summary, url';
 begin
   select string_agg(c, ', ') into bad from unnest(array[
     'submitted_by', 'owner_id', 'claimable', 'made_by_owner', 'published_at',
     'like_count', 'save_count', 'open_count', 'review_count', 'rating_sum',
     'rating_count', 'status', 'slug', 'url', 'embedding', 'embedding_model',
-    'embedded_at'
+    'embedded_at',
+    -- 0018, F11.
+    'created_at', 'updated_at', 'links', 'logo_path'
   ]) as c
    where has_column_privilege('foundit_app', 'public.tools', c, 'UPDATE');
   if bad is not null then
     perform pg_temp.fail('foundit_app may UPDATE public.tools columns it must not: ' || bad);
   end if;
 
-  -- The eight the EditListing screen does edit must still be there, or the
+  -- The six the EditListing screen does edit must still be there, or the
   -- revoke above has quietly taken the feature with it.
   select string_agg(c, ', ') into bad from unnest(array[
-    'name', 'summary', 'logo_path', 'pricing', 'platforms', 'languages',
-    'flags', 'links'
+    'name', 'summary', 'pricing', 'platforms', 'languages', 'flags'
   ]) as c
    where not has_column_privilege('foundit_app', 'public.tools', c, 'UPDATE');
   if bad is not null then
     perform pg_temp.fail('foundit_app cannot UPDATE columns the edit screen needs: ' || bad);
   end if;
 
+  -- EXACTLY these, and nothing else. This is the assertion F11 needed.
+  select string_agg(a.attname, ', ' order by a.attname) into v_have
+    from pg_attribute a
+   where a.attrelid = 'public.tools'::regclass
+     and a.attnum > 0 and not a.attisdropped and a.attgenerated = ''
+     and has_column_privilege('foundit_app', 'public.tools', a.attname, 'UPDATE');
+  if v_have is distinct from c_update then
+    perform pg_temp.fail(format(
+      'the application UPDATEs [%s] on public.tools; 0018 says [%s]', v_have, c_update));
+  end if;
+
   -- On INSERT the four stamped columns are not writable either.
   select string_agg(c, ', ') into bad from unnest(array[
     'owner_id', 'claimable', 'made_by_owner', 'published_at',
     'like_count', 'save_count', 'open_count', 'review_count', 'rating_sum',
-    'rating_count', 'embedding', 'embedding_model', 'embedded_at'
+    'rating_count', 'embedding', 'embedding_model', 'embedded_at',
+    'created_at', 'updated_at', 'links', 'logo_path'
   ]) as c
    where has_column_privilege('foundit_app', 'public.tools', c, 'INSERT');
   if bad is not null then
     perform pg_temp.fail('foundit_app may INSERT public.tools columns it must not: ' || bad);
+  end if;
+
+  select string_agg(a.attname, ', ' order by a.attname) into v_have
+    from pg_attribute a
+   where a.attrelid = 'public.tools'::regclass
+     and a.attnum > 0 and not a.attisdropped and a.attgenerated = ''
+     and has_column_privilege('foundit_app', 'public.tools', a.attname, 'INSERT');
+  if v_have is distinct from c_insert then
+    perform pg_temp.fail(format(
+      'the application INSERTs [%s] into public.tools; 0018 says [%s]', v_have, c_insert));
+  end if;
+
+  -- And `url_key` is writable by nobody at all, because it is generated. A
+  -- column grant on one is not merely absent; PostgreSQL refuses to make one.
+  if has_column_privilege('foundit_app', 'public.tools', 'url_key', 'UPDATE')
+     or has_column_privilege('foundit_app', 'public.tools', 'url_key', 'INSERT') then
+    perform pg_temp.fail('public.tools.url_key is writable, so it is not generated any more');
+  end if;
+  if not has_column_privilege('foundit_app', 'public.tools', 'url_key', 'SELECT') then
+    perform pg_temp.fail('the application cannot read url_key, so the duplicate lookup cannot run');
   end if;
 
   -- And no write privilege at all on tool_problems.
@@ -493,8 +546,13 @@ begin
   if public.has_control_characters(v_out) then
     perform pg_temp.fail('the stored statement still carries the newline the attack needs');
   end if;
-  if v_out !~ 'ends the line here99' then
-    perform pg_temp.fail('the newline was not removed but something else happened: ' || v_out);
+  -- A SPACE, not a weld, and that is 0018's F10 fix. 0017's stripper REMOVED
+  -- the newline, so this came out as "ends the line here99" — two words joined
+  -- into one. lib/submit.ts's cleanText has always replaced with a space; the
+  -- database now does the same, so a write that reaches the function directly
+  -- reads the way a write through the form does.
+  if v_out !~ 'ends the line here 99' then
+    perform pg_temp.fail('the newline was not replaced with a space: ' || v_out);
   end if;
   set role foundit_app;
 end
@@ -658,6 +716,8 @@ declare
   n     bigint;
   v_job bigint;
   v_body text;
+  v_draft_problem bigint;
+  v_live_problem  bigint;
   bad   text;
 begin
   reset role;
@@ -703,8 +763,67 @@ begin
   if v_job is null then perform pg_temp.fail('embedding_work returned no job for a queued change'); end if;
   if v_body is null or v_body = '' then perform pg_temp.fail('embedding_work returned an empty body'); end if;
 
-  -- ...and a null body for a job whose row has gone, which is the bad row the
-  -- worker has to survive.
+  -- ...and a null body for a LIVE statement whose tool is not published,
+  -- which is F5 and is the case this section could not see. 0017 left-joined
+  -- `pt` to check exactly that and never consulted it, so a draft's sentence
+  -- came back in full, the worker spent a request on it and wrote a vector
+  -- onto unpublished content. The vanished-row case below is the one that was
+  -- tested — `ref_id = 999999999`, a row that does not exist — and a row that
+  -- does not exist cannot tell the two apart.
+  reset role;
+  select tp.id into v_draft_problem
+    from public.tool_problems tp
+    join public.tools t on t.id = tp.tool_id
+   where t.id = (select id from t7 where what = 'draft_tool')
+   order by tp.id
+   limit 1;
+  if v_draft_problem is null then
+    perform pg_temp.fail('the seeded draft has no statement to queue');
+  end if;
+  perform public.queue_embedding('problem', v_draft_problem);
+
+  set role foundit_embed;
+  select count(*) into n from public.embedding_work(64) w
+   where w.ref_id = v_draft_problem and w.kind = 'problem' and w.body is not null;
+  if n <> 0 then
+    perform pg_temp.fail(
+      'embedding_work handed out the statement text of an UNPUBLISHED tool; '
+      'a draft''s sentence would be embedded and a vector written onto it');
+  end if;
+  select count(*) into n from public.embedding_work(64) w
+   where w.ref_id = v_draft_problem and w.kind = 'problem' and w.body is null;
+  if n <> 1 then
+    perform pg_temp.fail('the draft''s statement is not in the queue at all, so nothing was proved');
+  end if;
+
+  -- The worker retires it without a call — `embedding_job_done` is what it
+  -- calls for a null body, and it is finished rather than failed.
+  select job_id into v_job from public.embedding_work(64) where ref_id = v_draft_problem;
+  if not public.embedding_job_done(v_job) then
+    perform pg_temp.fail('a job for a draft''s statement could not be retired');
+  end if;
+
+  -- A published tool's statement still comes back with its text, so the fix
+  -- is a guard rather than a blanket null.
+  reset role;
+  select tp.id into v_live_problem
+    from public.tool_problems tp
+    join public.tools t on t.id = tp.tool_id and t.status = 'published'
+   where tp.statement is not null
+   order by tp.id
+   limit 1;
+  perform public.queue_embedding('problem', v_live_problem);
+  set role foundit_embed;
+  select count(*) into n from public.embedding_work(200) w
+   where w.ref_id = v_live_problem and w.kind = 'problem' and w.body is not null;
+  if n <> 1 then
+    perform pg_temp.fail('embedding_work stopped handing out a PUBLISHED tool''s statement');
+  end if;
+  select job_id into v_job from public.embedding_work(200) where ref_id = v_live_problem;
+  perform public.embedding_job_done(v_job);
+
+  -- ...and a null body for a job whose row has gone, which is the other bad
+  -- row the worker has to survive.
   reset role;
   perform public.queue_embedding('problem', 999999999);
   set role foundit_embed;
@@ -1014,6 +1133,43 @@ begin
     perform pg_temp.fail(format('%s rows under the threshold carried their text', n));
   end if;
 
+  -- --- F6: the number above the panel is the sum of the panel ---------------
+  --
+  -- The review found /maker/receiptly rendering "0 · Searches matched" directly
+  -- above a list of three sentences totalling seven searches, for two
+  -- independent reasons: MY_LISTINGS_SQL counted public.search_event_tools
+  -- directly, where the only SELECT policy is auth.is_admin() and row-level
+  -- security FILTERS rather than refusing; and MAKER_DASHBOARD_SQL did not
+  -- select the column at all, so the marshaller read undefined and coerced it
+  -- to zero. 0018 reads it through a definer function, like the sentences.
+  --
+  -- Six searches were logged above: one of one sentence and five of another.
+  select m.matched_count into n from public.maker_listing_metrics(v_mine, 30) m;
+  if n <> 6 then
+    perform pg_temp.fail(format('maker_listing_metrics counted %s of 6 searches', n));
+  end if;
+
+  select coalesce(sum(d.searches), 0) into v_n
+    from public.maker_search_demand(v_mine, 30, 200) d;
+  if n <> v_n then
+    perform pg_temp.fail(format(
+      'the dashboard says %s searches matched and the demand panel beneath it sums to %s',
+      n, v_n));
+  end if;
+
+  -- Counting it the way MY_LISTINGS_SQL used to — straight off the table —
+  -- still answers zero, which is the defect preserved as evidence rather than
+  -- as an anecdote.
+  select count(*) into n
+    from public.search_event_tools st
+    join public.search_events e on e.id = st.event_id
+   where st.tool_id = v_mine and e.created_at >= now() - interval '30 days';
+  if n <> 0 then
+    perform pg_temp.fail(
+      'a maker can now count search_event_tools directly, so the policy changed '
+      'and the definer function is no longer the reason the number is right');
+  end if;
+
   -- Somebody else's listing: nothing at all.
   --
   -- NOT `maker_tool`: §11 reassigned that one to dev_person, which is the
@@ -1039,6 +1195,17 @@ begin
   select count(*) into n from public.maker_search_demand(v_not_mine, 3650, 200);
   if n <> 0 then
     perform pg_temp.fail('a person read the search demand for a listing that is not theirs');
+  end if;
+
+  -- And the count beside it is zero for a listing that is not theirs, which is
+  -- the same answer it gives for a listing that does not exist.
+  select m.matched_count into n from public.maker_listing_metrics(v_not_mine, 3650) m;
+  if n <> 0 then
+    perform pg_temp.fail('a person read the matched count for a listing that is not theirs');
+  end if;
+  select m.matched_count into n from public.maker_listing_metrics(999999999, 3650) m;
+  if n <> 0 then
+    perform pg_temp.fail('maker_listing_metrics answered for a listing that does not exist');
   end if;
 
   -- A maker cannot read the join table directly either.
@@ -1141,6 +1308,494 @@ begin
   end if;
 end
 $$;
+
+-- ===========================================================================
+-- 16. F3 — an admin is not a maker
+--
+-- The Phase 7 review's strongest finding. `public.tool_is_mine` carried
+-- `or auth.is_admin()` from 0001, and once a listing could be written from a
+-- web request that meant an admin held, through `foundit_app` and ordinary
+-- routes, the power to read any maker's unpublished draft, rename it, rewrite
+-- its summary, replace every problem statement (recorded as `source = 'user'`,
+-- which is to say as the maker's own words), re-categorise it and publish it —
+-- with nothing recorded anywhere.
+--
+-- This is the review's own reproduction, 5.1 to 5.5, turned round: each of
+-- them must now refuse or return nothing, dev_maker's own edits must still
+-- work, and `public.tool_is_visible` must be exactly as it was — an admin
+-- still READS, which is what Phase 8's operator dashboard needs, and 0001
+-- wrote the two functions apart for this reason.
+-- ===========================================================================
+do $$
+declare
+  v_draft bigint := (select id from t7 where what = 'draft_tool');
+  v_hers  bigint;
+  n       bigint;
+  code    text;
+  v_name  text;
+begin
+  reset role;
+  -- A published listing dev_maker still owns. NOT t7's `maker_tool`: §11
+  -- reassigned that one to dev_person on purpose.
+  select t.id into v_hers
+    from public.tools t
+   where t.owner_id = 'dev_maker' and t.status = 'published'
+   order by t.id limit 1;
+  if v_hers is null then
+    perform pg_temp.fail('dev_maker owns no published listing to attack');
+  end if;
+  select t.name into v_name from public.tools t where t.id = v_hers;
+
+  set role foundit_app;
+  perform pg_temp.be('dev_admin');
+
+  -- The claim is real, or the rest of this section proves nothing.
+  if not auth.is_admin() then
+    perform pg_temp.fail('dev_admin is not an admin, so this section is vacuous');
+  end if;
+
+  -- 5.1 — tool_is_mine on somebody else's listing, and on their draft.
+  if public.tool_is_mine(v_hers) then
+    perform pg_temp.fail('tool_is_mine is true for an admin on another maker''s listing');
+  end if;
+  if public.tool_is_mine(v_draft) then
+    perform pg_temp.fail('tool_is_mine is true for an admin on another maker''s draft');
+  end if;
+
+  -- 5.2 — editing another person's published listing. Row-level security
+  -- FILTERS rather than refusing, so the assertion is the row count and the
+  -- row itself, not the absence of an error.
+  update public.tools
+     set name = 'edited by an admin', summary = 'an admin rewrote this summary through foundit_app'
+   where id = v_hers;
+  get diagnostics n = row_count;
+  if n <> 0 then
+    perform pg_temp.fail(format('an admin edited another maker''s listing: %s row(s)', n));
+  end if;
+  reset role;
+  select count(*) into n from public.tools t
+   where t.id = v_hers and t.name = v_name;
+  if n <> 1 then
+    perform pg_temp.fail('another maker''s listing changed under an admin''s UPDATE');
+  end if;
+  set role foundit_app;
+  perform pg_temp.be('dev_admin');
+
+  -- 5.3 — rewriting another person's problem statements through the one door.
+  code := pg_temp.refused(format(
+    'select public.set_owner_statements(%s, array[%L])', v_hers,
+    'an admin replaced every statement on this listing'));
+  if code <> '42501' then
+    perform pg_temp.fail('an admin rewrote another maker''s statements; got ' || code);
+  end if;
+
+  -- 5.4 — publishing another person's draft.
+  code := pg_temp.refused(format('select public.publish_tool(%s)', v_draft));
+  if code <> '42501' then
+    perform pg_temp.fail('an admin published another maker''s draft; got ' || code);
+  end if;
+
+  -- ...and re-categorising it, which goes through tool_categories_write.
+  delete from public.tool_categories where tool_id = v_hers;
+  get diagnostics n = row_count;
+  if n <> 0 then
+    perform pg_temp.fail('an admin re-categorised another maker''s listing');
+  end if;
+
+  -- 5.5 — reading another maker's draft through MY_DRAFT_SQL's predicate,
+  -- which is the statement /submit/problems, /submit/constraints and
+  -- /submit/preview all read.
+  select count(*) into n from public.tools t
+   where t.id = v_draft and public.tool_is_mine(t.id);
+  if n <> 0 then
+    perform pg_temp.fail('an admin read another maker''s draft through MY_DRAFT_SQL''s predicate');
+  end if;
+
+  -- And the demand panel for somebody else's listing is empty for an admin
+  -- too: maker_search_demand and maker_listing_metrics are both tool_is_mine.
+  select count(*) into n from public.maker_search_demand(v_hers, 3650, 200);
+  if n <> 0 then
+    perform pg_temp.fail('an admin read another maker''s search demand');
+  end if;
+
+  -- --- what an admin KEEPS -------------------------------------------------
+  --
+  -- Reading is not writing. tool_is_visible is untouched, so `tools_read` and
+  -- `tool_problems_read` still show an admin a published listing and a draft,
+  -- which is what Phase 8's operator dashboard is going to be built on.
+  if not public.tool_is_visible(v_hers) then
+    perform pg_temp.fail('tool_is_visible stopped being true for an admin on a published tool');
+  end if;
+  if not public.tool_is_visible(v_draft) then
+    perform pg_temp.fail('tool_is_visible stopped being true for an admin on a draft');
+  end if;
+  select count(*) into n from public.tools t where t.id = v_draft;
+  if n <> 1 then
+    perform pg_temp.fail('an admin can no longer READ a draft, which 0018 did not intend');
+  end if;
+  -- An admin still reads the raw search join, under its own policy.
+  select count(*) into n from public.search_event_tools;
+  if n = 0 then
+    perform pg_temp.fail('an admin can no longer read search_event_tools');
+  end if;
+
+  -- --- and the maker's own edits still work --------------------------------
+  perform pg_temp.be('dev_maker');
+  if not public.tool_is_mine(v_hers) then
+    perform pg_temp.fail('a maker can no longer edit her own listing');
+  end if;
+  update public.tools set name = v_name || ' (edited by its maker)' where id = v_hers;
+  get diagnostics n = row_count;
+  if n <> 1 then
+    perform pg_temp.fail('a maker''s own edit to her own listing touched no row');
+  end if;
+  perform public.set_owner_statements(v_hers, array[
+    'A sentence the maker of this listing typed about her own tool'
+  ]);
+
+  -- ...and a plain signed-in person still cannot.
+  perform pg_temp.be('dev_person');
+  if public.tool_is_mine(v_hers) then
+    perform pg_temp.fail('tool_is_mine is true for a stranger');
+  end if;
+end
+$$;
+
+-- ===========================================================================
+-- 17. F2 — one listing per ADDRESS, not per byte string
+--
+-- 0001's UNIQUE is on `url`, a plain text column, case-sensitive, with nothing
+-- normalising. The review listed eight ways to write one address and published
+-- the trailing-slash one through the real flow to prove the constraint is a
+-- formality. `public.url_key` and the unique index over it are the fix, and
+-- these are the review's own eight variants.
+-- ===========================================================================
+do $$
+declare
+  v_keys text[];
+  n      bigint;
+  code   text;
+  v_id   bigint;
+begin
+  reset role;
+
+  select array_agg(distinct public.url_key(v)) into v_keys
+    from unnest(array[
+      'https://urlkeyprobe.example',
+      'https://urlkeyprobe.example/',
+      'https://urlkeyprobe.example#x',
+      'https://urlkeyprobe.example?ref=1',
+      'https://www.urlkeyprobe.example',
+      'https://Urlkeyprobe.example',
+      'HTTPS://urlkeyprobe.example',
+      'https://urlkeyprobe.example/.'
+    ]) as v;
+  if array_length(v_keys, 1) <> 1 then
+    perform pg_temp.fail(format(
+      'the eight ways of writing one address produce %s keys: %s',
+      array_length(v_keys, 1), array_to_string(v_keys, ' | ')));
+  end if;
+  if v_keys[1] <> 'https://urlkeyprobe.example' then
+    perform pg_temp.fail('url_key normalised to something unexpected: ' || v_keys[1]);
+  end if;
+
+  -- What it must NOT collapse. A path is case-sensitive on a case-sensitive
+  -- server, and two different pages on one host are two different tools.
+  if public.url_key('https://x.example/Pricing') = public.url_key('https://x.example/pricing') then
+    perform pg_temp.fail('url_key lower-cased the PATH, so /Pricing and /pricing are one listing');
+  end if;
+  if public.url_key('https://x.example/a') = public.url_key('https://x.example/b') then
+    perform pg_temp.fail('url_key collapsed two different paths');
+  end if;
+  if public.url_key('https://a.example') = public.url_key('https://b.example') then
+    perform pg_temp.fail('url_key collapsed two different hosts');
+  end if;
+
+  -- And the constraint is real: each variant collides with a row holding the
+  -- first of them.
+  insert into public.tools
+    (slug, name, url, summary, pricing, platforms, languages, flags, status,
+     claimable, submitted_by, owner_id, made_by_owner)
+  values
+    ('urlkey-first', 'Url Key First', 'https://urlkeyprobe.example',
+     'The first of eight ways to write one address, so the other seven can collide with it.',
+     'free', '{web}', '{English}', '{}', 'draft', false, 'dev_person', 'dev_person', true)
+  returning id into v_id;
+  insert into t7 values ('urlkey_first', v_id);
+
+  -- 23505 is the unique index doing its job. `HTTPS://` is the one variant
+  -- that never reaches it: `tools_url_check` is `url ~ '^https://'` and
+  -- case-sensitive, so it is refused 23514 one step earlier — which is why
+  -- lib/submit.ts refuses a non-lower-case scheme with a sentence of its own
+  -- rather than letting a person meet a constraint name.
+  foreach code in array array[
+    'https://urlkeyprobe.example',
+    'https://urlkeyprobe.example/',
+    'https://urlkeyprobe.example#x',
+    'https://urlkeyprobe.example?ref=1',
+    'https://www.urlkeyprobe.example',
+    'https://Urlkeyprobe.example',
+    'https://urlkeyprobe.example/.'
+  ] loop
+    if pg_temp.refused(format(
+         'insert into public.tools (slug, name, url, summary, pricing, platforms, '
+         'languages, flags, status, claimable, submitted_by, owner_id, made_by_owner) '
+         'values (%L, %L, %L, %L, ''free'', ''{web}'', ''{English}'', ''{}'', ''draft'', '
+         'false, ''dev_person'', ''dev_person'', true)',
+         'urlkey-' || md5(code), 'Url Key Variant', code,
+         'A second listing of exactly the same page, written a different way.')) <> '23505'
+    then
+      perform pg_temp.fail('a second listing of ' || code || ' was accepted');
+    end if;
+  end loop;
+
+  -- A genuinely different page on the same host is still a different listing.
+  insert into public.tools
+    (slug, name, url, summary, pricing, platforms, languages, flags, status,
+     claimable, submitted_by, owner_id, made_by_owner)
+  values
+    ('urlkey-other', 'Url Key Other', 'https://urlkeyprobe.example/pricing',
+     'A different page on the same host, which is a different address and a different listing.',
+     'free', '{web}', '{English}', '{}', 'draft', false, 'dev_person', 'dev_person', true);
+
+  -- The index exists and is unique, so this is not a coincidence of the data.
+  select count(*) into n from pg_index i
+    join pg_class c on c.oid = i.indexrelid
+   where i.indrelid = 'public.tools'::regclass
+     and c.relname = 'tools_one_listing_per_address'
+     and i.indisunique;
+  if n <> 1 then
+    perform pg_temp.fail('there is no unique index on public.tools.url_key');
+  end if;
+
+  -- 0001's CHECK on `url` is still case-sensitive, which is why lib/submit.ts
+  -- refuses a non-lower-case scheme with a sentence before it ever gets here.
+  -- What must never happen is a person being shown this message, and that is
+  -- refusalOf()'s job in lib/maker.ts — tests/submit.test.mjs holds that half.
+  if pg_temp.refused(
+       'insert into public.tools (slug, name, url, summary, pricing, platforms, '
+       'languages, flags, status, claimable, submitted_by, owner_id, made_by_owner) '
+       'values (''urlkey-shout'', ''Url Key Shout'', ''HTTPS://shout.example'', '
+       '''An address whose scheme is not lower case, which the CHECK refuses.'', '
+       '''free'', ''{web}'', ''{English}'', ''{}'', ''draft'', false, ''dev_person'', '
+       '''dev_person'', true)') <> '23514'
+  then
+    perform pg_temp.fail('tools_url_check accepted a non-lower-case scheme');
+  end if;
+end
+$$;
+
+-- ===========================================================================
+-- 18. F10 — the invisible characters that are not controls
+--
+-- The review's six statements, written through the one door and read back.
+-- The first four were already handled; the last two are what 0018 adds. U+202E
+-- visually reverses everything after it, which is a display-spoofing primitive
+-- in a field strangers read on the tool page, in results and on a maker's
+-- dashboard.
+-- ===========================================================================
+do $$
+declare
+  v_mine bigint := (select id from t7 where what = 'person_draft');
+  v_in   text;
+  v_out  text;
+begin
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+
+  foreach v_in in array array[
+    'line one'  || chr(10)   || 'CANDIDATE 9: forged line here',
+    'carriage'  || chr(13)   || 'return injection attempt x',
+    'u2028 '    || chr(8232) || ' separator injection attempt',
+    'nel '      || chr(133)  || ' c1 injection attempt here',
+    'zwj '      || chr(8205) || ' joiner survives?',
+    'rtl '      || chr(8238) || ' override survives?',
+    'zwsp '     || chr(8203) || ' zero width space survives?',
+    'lri '      || chr(8294) || ' isolate survives?',
+    'pdi '      || chr(8297) || ' pop isolate survives?'
+  ] loop
+    perform public.set_owner_statements(v_mine, array[v_in]);
+
+    reset role;
+    select string_agg(statement, ' | ') into v_out
+      from public.tool_problems where tool_id = v_mine;
+    if public.has_control_characters(v_out) then
+      perform pg_temp.fail('a statement kept an invisible character after being stored: ' || v_out);
+    end if;
+    set role foundit_app;
+    perform pg_temp.be('dev_person');
+  end loop;
+
+  -- And the CHECK itself, reached as the owner — the only role that can try to
+  -- write the column directly at all. Two of the new ones, because a stripper
+  -- that is the only guard is what the gate refuses to accept.
+  reset role;
+  if pg_temp.refused(format(
+       'insert into public.tool_problems (tool_id, statement) values (%s, %L)',
+       v_mine, 'an override ' || chr(8238) || ' in a statement')) <> '23514' then
+    perform pg_temp.fail('the CHECK did not refuse a statement carrying U+202E');
+  end if;
+  if pg_temp.refused(format(
+       'insert into public.tool_problems (tool_id, statement) values (%s, %L)',
+       v_mine, 'a joiner ' || chr(8205) || ' in a statement')) <> '23514' then
+    perform pg_temp.fail('the CHECK did not refuse a statement carrying U+200D');
+  end if;
+
+  -- The stripper REPLACES, and the two halves of the codebase agree about it.
+  if public.strip_control_characters('one' || chr(10) || 'two') <> 'one two' then
+    perform pg_temp.fail('strip_control_characters welded two words together again');
+  end if;
+  if public.strip_control_characters('  spaced   out  ') <> 'spaced out' then
+    perform pg_temp.fail('strip_control_characters no longer collapses and trims like cleanText');
+  end if;
+
+  set role foundit_app;
+end
+$$;
+
+-- ===========================================================================
+-- 19. F9 — fifty edits of one statement leave one job
+--
+-- `embedding_jobs_one_per_ref` is `unique (kind, ref_id)` and its comment said
+-- "a statement edited three times in a minute is embedded once, with its
+-- latest text". It could not: an edit DELETED the row and INSERTED a new one,
+-- so `ref_id` changed every time and the key never fired for the case it
+-- describes. The review edited one statement fifty times and got fifty rows.
+-- ===========================================================================
+do $$
+declare
+  v_mine bigint := (select id from t7 where what = 'person_draft');
+  v_id   bigint;
+  v_was  bigint;
+  n      bigint;
+begin
+  reset role;
+  delete from public.embedding_jobs;
+
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+  perform public.set_owner_statements(v_mine, array['the sentence that is about to be edited fifty times']);
+
+  reset role;
+  select tp.id into v_was from public.tool_problems tp where tp.tool_id = v_mine;
+  delete from public.embedding_jobs;
+
+  for n in 1..50 loop
+    set role foundit_app;
+    perform pg_temp.be('dev_person');
+    perform public.set_owner_statements(v_mine,
+      array[format('the sentence that is about to be edited, revision %s of fifty', n)]);
+    reset role;
+  end loop;
+
+  select count(*) into n from public.embedding_jobs;
+  if n > 1 then
+    perform pg_temp.fail(format('fifty edits of one statement left %s queued jobs', n));
+  end if;
+
+  -- One row, and it is the SAME row: that is why the key can collapse them.
+  select count(*) into n from public.tool_problems tp where tp.tool_id = v_mine;
+  if n <> 1 then
+    perform pg_temp.fail(format('fifty edits of one statement left %s statements', n));
+  end if;
+  select tp.id into v_id from public.tool_problems tp where tp.tool_id = v_mine;
+  if v_id <> v_was then
+    perform pg_temp.fail('the statement row was replaced rather than edited, so ref_id moved again');
+  end if;
+
+  -- And the vector went with the text. A row whose statement changed while its
+  -- embedding did not is a listing findable by words it no longer contains.
+  select count(*) into n from public.tool_problems tp
+   where tp.tool_id = v_mine and tp.embedding is not null;
+  if n <> 0 then
+    perform pg_temp.fail('an edited statement kept the vector of its old text');
+  end if;
+
+  -- It still says `source = 'user'` — a row rewritten through this door is a
+  -- person-typed row whatever it used to be.
+  select count(*) into n from public.tool_problems tp
+   where tp.tool_id = v_mine and tp.source <> 'user';
+  if n <> 0 then
+    perform pg_temp.fail('an edited statement lost its provenance');
+  end if;
+
+  set role foundit_app;
+end
+$$;
+
+-- ===========================================================================
+-- 20. F4 — the queue has a ceiling, and reaching it loses nothing
+--
+-- With the worker stopped, the table grew one row per edit with nothing to
+-- stop it. The ceiling is 5,000 against a catalogue of 224 listings and 504
+-- statements; this section lowers it to three inside the transaction so the
+-- behaviour can be exercised without writing five thousand rows.
+-- ===========================================================================
+reset role;
+
+create or replace function public.embedding_jobs_ceiling()
+returns int language sql immutable set search_path = '' as $fn$ select 3 $fn$;
+
+do $$
+declare
+  v_mine bigint := (select id from t7 where what = 'person_draft');
+  n      bigint;
+  v_text text;
+begin
+  reset role;
+  delete from public.embedding_jobs;
+
+  -- Three is the ceiling, so three go in...
+  perform public.queue_embedding('problem', 900000001);
+  perform public.queue_embedding('problem', 900000002);
+  perform public.queue_embedding('problem', 900000003);
+  select count(*) into n from public.embedding_jobs;
+  if n <> 3 then
+    perform pg_temp.fail(format('three jobs under a ceiling of three left %s rows', n));
+  end if;
+
+  -- ...and the fourth does not.
+  perform public.queue_embedding('problem', 900000004);
+  select count(*) into n from public.embedding_jobs;
+  if n <> 3 then
+    perform pg_temp.fail(format('the queue grew past its ceiling to %s rows', n));
+  end if;
+
+  -- An existing job is still re-queued at the ceiling, or a parked statement
+  -- could never be un-parked by fixing it.
+  perform public.embedding_job_failed(
+    (select id from public.embedding_jobs where ref_id = 900000001), 'a made-up reason');
+  perform public.queue_embedding('problem', 900000001);
+  select count(*) into n from public.embedding_jobs
+   where ref_id = 900000001 and attempts = 0 and failed_at is null;
+  if n <> 1 then
+    perform pg_temp.fail('a job already in the queue could not be un-parked at the ceiling');
+  end if;
+
+  -- AND THE EDIT IS STILL SAVED. This is the whole of what the ceiling costs:
+  -- the row is written, the person is told nothing, and the work predicates of
+  -- 0005 and 0007 find it on the next sweep of scripts/embed.mjs.
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+  perform public.set_owner_statements(v_mine, array[
+    'a statement written while the embedding queue was full to its ceiling'
+  ]);
+  reset role;
+  select tp.statement into v_text from public.tool_problems tp where tp.tool_id = v_mine;
+  if v_text <> 'a statement written while the embedding queue was full to its ceiling' then
+    perform pg_temp.fail('an edit was lost because the embedding queue was full');
+  end if;
+  select count(*) into n from public.embedding_jobs;
+  if n > 3 then
+    perform pg_temp.fail('the ceiling did not hold against a real edit');
+  end if;
+
+  delete from public.embedding_jobs;
+  set role foundit_app;
+end
+$$;
+
+reset role;
 
 select 'All Phase 7 checks passed.' as result;
 
