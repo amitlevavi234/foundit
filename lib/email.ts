@@ -17,21 +17,28 @@
  * Nothing about the visitor travels with it: not their address, not their
  * session, not what they were doing when they asked.
  *
- * WHEN THERE IS NO PROVIDER. Two different answers, and the difference between
- * them is the whole of the safety here:
+ * WHERE THE CODE GOES, in the order the decision is actually made:
  *
- *   in production      the code option is not offered. `emailConfigured()` is
- *                      false, the sign-in screen draws the control disabled and
- *                      says "Email sign-in is not set up yet", and nothing
- *                      pretends a code was sent.
- *   in development     and ONLY in development, and ONLY when somebody has set
- *                      AUTH_DEV_CODE_TO_LOG=1 on purpose, the code is printed
- *                      to the server log so the flow can be walked end to end
- *                      with no account anywhere. `devCodeLoggingAllowed()` is
- *                      the whole of that decision, it is exported so that
- *                      tests/email.test.mjs can prove production cannot reach
- *                      it whatever the second variable says, and there is no
- *                      third way to turn it on.
+ *   AUTH_DEV_CODE_TO_LOG=1, outside production
+ *                      the code is printed to the server log and NOTHING IS
+ *                      SENT — whether or not a provider is configured. That
+ *                      last clause is the Phase 6 review's F5 and it is a real
+ *                      change: the check used to sit inside the "there is no
+ *                      provider" branch, so on a development machine with a
+ *                      real key in .env.local the switch was inert and asking
+ *                      for a code put a real email in whatever inbox was typed.
+ *                      A safety rail that is off exactly when it is needed is
+ *                      worse than none, because somebody is relying on it.
+ *   a provider, and no switch
+ *                      one POST, below.
+ *   no provider, no switch
+ *                      nothing is sent and nothing is printed. In production
+ *                      the control is drawn disabled and says "Email sign-in is
+ *                      not set up yet"; nothing pretends a code was sent.
+ *
+ * `devCodeLoggingAllowed()` is the whole of the first decision. It is exported
+ * so tests/email.test.mjs can prove production cannot reach it whatever the
+ * second variable says, and there is no third way to turn it on.
  *
  * No `server-only` import, for the same reason lib/embeddings.ts has none:
  * tests/email.test.mjs drives this in plain Node with a stubbed fetch. What
@@ -104,20 +111,21 @@ interface ProviderError {
  * either.
  */
 export async function sendSignInCode(recipient: string, code: string): Promise<SendResult> {
-  if (!emailConfigured()) {
-    if (devCodeLoggingAllowed()) {
-      // Development only, on purpose, and loud about being a development
-      // thing. This is the line that makes the flow testable with no provider
-      // account and no spend; `devCodeLoggingAllowed` is what stops it ever
-      // being reachable in production.
-      console.warn(
-        `[development] sign-in code for ${recipient}: ${code} — ` +
-          'printed because AUTH_DEV_CODE_TO_LOG=1 and this is not production',
-      );
-      return { delivered: true, reason: 'logged' };
-    }
-    return { delivered: false, reason: 'not-configured' };
+  // FIRST, and before anything looks at whether a provider exists. Development
+  // only, on purpose, and loud about being a development thing: this is the
+  // line that makes the flow walkable with no provider account and no spend,
+  // and — since the Phase 6 review — the line that means a development machine
+  // holding a real key cannot put a code in a stranger's inbox by accident.
+  // `devCodeLoggingAllowed` is what stops it ever being reachable in production.
+  if (devCodeLoggingAllowed()) {
+    console.warn(
+      `[development] sign-in code for ${recipient}: ${code} — ` +
+        'printed because AUTH_DEV_CODE_TO_LOG=1 and this is not production; nothing was sent',
+    );
+    return { delivered: true, reason: 'logged' };
   }
+
+  if (!emailConfigured()) return { delivered: false, reason: 'not-configured' };
 
   const key = trimmed(process.env.RESEND_API_KEY);
   const from = trimmed(process.env.EMAIL_FROM);

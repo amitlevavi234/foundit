@@ -138,6 +138,68 @@ test('in development, with the switch on, the code is printed instead of sent', 
   });
 });
 
+test('THE SWITCH FORCES THE LOG EVEN WITH A PROVIDER CONFIGURED', async () => {
+  // The Phase 6 review's F5, and the reason this test exists. The check used to
+  // live inside the "there is no provider" branch, so on a development machine
+  // whose .env.local holds a real RESEND_API_KEY — which is every machine that
+  // has ever tested delivery once — AUTH_DEV_CODE_TO_LOG=1 did nothing at all
+  // and asking for a code posted a real email to whatever address was typed.
+  // The reviewer declined to exercise the code flow because of it.
+  await withEnv(
+    {
+      NODE_ENV: 'development',
+      AUTH_DEV_CODE_TO_LOG: '1',
+      RESEND_API_KEY: 'k',
+      EMAIL_FROM: 'no-reply@mail.example',
+    },
+    async () => {
+      assert.equal(emailConfigured(), true, 'a provider IS configured, which is the whole point');
+
+      const real = globalThis.fetch;
+      const { stub, calls } = fakeFetch();
+      globalThis.fetch = stub;
+      try {
+        const lines = await capturingLogs(async () => {
+          const result = await sendSignInCode('noa@example.com', '482915');
+          assert.equal(result.delivered, true);
+          assert.equal(result.reason, 'logged', 'logged, not sent');
+        });
+        assert.deepEqual(calls, [], 'NOTHING may reach api.resend.com');
+        assert.equal(lines.length, 1);
+        assert.match(lines[0], /482915/);
+        assert.match(lines[0], /nothing was sent/);
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+  );
+
+  // And it is still unreachable in production with the same provider set.
+  await withEnv(
+    {
+      NODE_ENV: 'production',
+      AUTH_DEV_CODE_TO_LOG: '1',
+      RESEND_API_KEY: 'k',
+      EMAIL_FROM: 'no-reply@mail.example',
+    },
+    async () => {
+      const real = globalThis.fetch;
+      const { stub, calls } = fakeFetch();
+      globalThis.fetch = stub;
+      try {
+        const lines = await capturingLogs(async () => {
+          const result = await sendSignInCode('noa@example.com', '482915');
+          assert.equal(result.reason, 'sent', 'production sends, and never prints');
+        });
+        assert.deepEqual(lines, []);
+        assert.equal(calls.length, 1);
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+  );
+});
+
 test('a real send is one POST to one address, with four fields and the key in a header', async () => {
   await withEnv({ RESEND_API_KEY: 'secret-key-value', EMAIL_FROM: 'Foundit <no-reply@mail.example>' }, async () => {
     const real = globalThis.fetch;
