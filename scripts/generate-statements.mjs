@@ -195,7 +195,13 @@ const counts = {
   generated: 0,
   refusedShape: 0,
   refusedVerifier: 0,
+  /** Within cosine DUPLICATE_AT of a statement the tool already carries. */
   refusedDuplicate: 0,
+  /** Word for word one the tool already carries — the table's unique index. */
+  refusedIdentical: 0,
+  /** The tool reached public.statements_wanted() (SQLSTATE FN001, 0011). */
+  refusedCeiling: 0,
+  /** Anything else the database said no to, counted per row rather than fatal. */
   refusedStore: 0,
   stored: 0,
   generatorTokensIn: 0,
@@ -299,15 +305,40 @@ try {
       }
 
       // --- gate 4: the database -------------------------------------------
-      const { rows } = await client.query(STORE_SQL, [
-        tool.tool_id,
-        candidate,
-        GENERATOR_MODEL,
-        VERIFIER_MODEL,
-      ]);
-      if (rows[0]?.id === null || rows[0]?.id === undefined) {
+      //
+      // PER ROW, not per run. Before the Phase 5 review this call was inside
+      // the outer try/catch, so one over-length candidate — or one missing
+      // model name, or one tool that went unpublished while the job was
+      // running — abandoned the other 790. A batch job that stops on the first
+      // bad row is a batch job somebody has to babysit.
+      //
+      // And the two refusals are counted apart since `0011`: the CEILING now
+      // raises FN001 and a null means one thing, that this tool already carries
+      // this exact statement. A run that did nothing because it was finished
+      // and a run that did nothing because it kept writing duplicates used to
+      // look identical.
+      let stored;
+      try {
+        const { rows } = await client.query(STORE_SQL, [
+          tool.tool_id,
+          candidate,
+          GENERATOR_MODEL,
+          VERIFIER_MODEL,
+        ]);
+        stored = rows[0]?.id ?? null;
+      } catch (error) {
+        if (error.code === 'FN001') {
+          counts.refusedCeiling += 1;
+          process.stdout.write(`  - ${context.name}: already at the ceiling\n`);
+          break;
+        }
         counts.refusedStore += 1;
-        process.stdout.write(`  - ${context.name}: the database refused it (already enough, or identical)\n`);
+        process.stdout.write(`  - ${context.name}: the database refused it (${error.code ?? 'error'}: ${error.message})\n`);
+        continue;
+      }
+      if (stored === null) {
+        counts.refusedIdentical += 1;
+        process.stdout.write(`  - ${context.name}: this tool already carries that statement word for word\n`);
         continue;
       }
       counts.stored += 1;
@@ -322,7 +353,9 @@ try {
   process.stdout.write(`generated               ${counts.generated}\n`);
   process.stdout.write(`rejected — shape        ${counts.refusedShape}\n`);
   process.stdout.write(`rejected — verifier     ${counts.refusedVerifier}\n`);
-  process.stdout.write(`rejected — duplicate    ${counts.refusedDuplicate}\n`);
+  process.stdout.write(`rejected — duplicate    ${counts.refusedDuplicate} (within cosine ${DUPLICATE_AT})\n`);
+  process.stdout.write(`rejected — identical    ${counts.refusedIdentical} (word for word)\n`);
+  process.stdout.write(`rejected — at ceiling   ${counts.refusedCeiling}\n`);
   process.stdout.write(`rejected — database     ${counts.refusedStore}\n`);
   process.stdout.write(`stored                  ${counts.stored}\n`);
   process.stdout.write(`generator calls         ${counts.generatorCalls} (${counts.generatorTokensIn} in, ${counts.generatorTokensOut} out)\n`);

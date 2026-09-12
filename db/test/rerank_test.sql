@@ -459,12 +459,18 @@ begin
   if v_full is null then
     raise notice 'no published tool is at the ceiling; the refusal was not exercised';
   else
-    select public.store_generated_statement(
-      v_full, 'Another situation entirely, for a tool that has enough already',
-      'gpt-5-mini', 'gpt-5-nano') into v_id;
-    if v_id is not null then
+    -- Since 0011 this RAISES rather than returning null, so that the job can
+    -- count "this tool is full" separately from "this tool already has this
+    -- statement". Both used to be a null and the job could not tell a finished
+    -- run from one writing duplicates.
+    begin
+      select public.store_generated_statement(
+        v_full, 'Another situation entirely, for a tool that has enough already',
+        'gpt-5-mini', 'gpt-5-nano') into v_id;
       perform pg_temp.fail('a tool at the ceiling accepted another statement');
-    end if;
+    exception
+      when sqlstate 'FN001' then null;
+    end;
   end if;
 end
 $$;
@@ -500,6 +506,187 @@ begin
 end
 $$;
 
-select 'RERANK TEST PASSED — 0010 refuses what it says it refuses' as result;
+-- ===========================================================================
+-- 12. 0011: the application cannot write a statement's provenance, nor its
+--     vector.
+--
+--     The Phase 5 review's finding. 0001 granted foundit_app table-wide INSERT
+--     and UPDATE on tool_problems for the Phase 7 maker flow, and a table-wide
+--     grant covers a column added later — so 0010's three provenance columns
+--     were writable by the application from the moment they existed. Today
+--     row-level security makes it unreachable because nobody owns a listing;
+--     PHASE 6 IS WHAT MAKES IT REACHABLE, which is why the column privileges
+--     are gone now.
+--
+--     Checked as privileges rather than behaviourally, and on purpose: a
+--     behavioural test would need a tool this role owns, which needs an
+--     account, which is Phase 6 — so the test would pass today by accident and
+--     say nothing about the thing it is named after.
+-- ===========================================================================
+do $$
+declare bad text;
+begin
+  select string_agg(format('%s:%s', column_name, privilege_type), ', ' order by column_name)
+    into bad
+    from information_schema.column_privileges
+   where table_schema = 'public' and table_name = 'tool_problems'
+     and grantee = 'foundit_app'
+     and privilege_type in ('INSERT', 'UPDATE')
+     and column_name in ('source', 'generated_model', 'verified_model', 'embedding');
+  if bad is not null then
+    perform pg_temp.fail(format(
+      'foundit_app can write a statement''s provenance or its vector: %s', bad));
+  end if;
+
+  -- And it still has the privileges Phase 7 needs, or the revoke went too far.
+  if not exists (
+    select 1 from information_schema.column_privileges
+     where table_schema = 'public' and table_name = 'tool_problems'
+       and grantee = 'foundit_app' and privilege_type = 'UPDATE'
+       and column_name = 'statement'
+  ) then
+    perform pg_temp.fail('foundit_app can no longer edit a statement at all; the revoke was too wide');
+  end if;
+end
+$$;
+
+-- And behaviourally, for the half that does not need an owner: a direct write
+-- naming the column is refused before row-level security is even consulted.
+set local role foundit_app;
+do $$
+begin
+  begin
+    update public.tool_problems set source = 'generated' where false;
+    perform pg_temp.fail('foundit_app can UPDATE tool_problems.source');
+  exception
+    when insufficient_privilege then null;
+  end;
+
+  begin
+    insert into public.tool_problems (tool_id, statement, source)
+    values (1, 'a statement the application labelled itself', 'generated');
+    perform pg_temp.fail('foundit_app can INSERT a source');
+  exception
+    when insufficient_privilege then null;
+  end;
+
+  begin
+    update public.tool_problems set embedding = null where false;
+    perform pg_temp.fail('foundit_app can UPDATE tool_problems.embedding — 0005''s oracle is open');
+  exception
+    when insufficient_privilege then null;
+  end;
+end
+$$;
+reset role;
+
+-- ===========================================================================
+-- 13. 0011: the shape CHECK refuses what its comment claims.
+--
+--     0010's version tested only the keys that were PRESENT, so `[{}]` stored
+--     and so did an element with a third key. A row of that shape is then
+--     refused by lib/rerank.ts on the way out, which pins that page to the
+--     Phase 4 order for as long as the row lives.
+-- ===========================================================================
+set local role foundit_app;
+do $$
+declare
+  bad jsonb;
+  shapes jsonb[] := array[
+    '[{}]'::jsonb,                                              -- the review's
+    '[{"slug": "alpha", "relevance": 1, "why": "x"}]'::jsonb,   -- a third key
+    '[{"slug": "alpha"}]'::jsonb,                               -- no relevance
+    '[{"relevance": 1}]'::jsonb,                                -- no slug
+    '[{"slug": "alpha", "relevance": 1.5}]'::jsonb              -- not an integer
+  ];
+begin
+  foreach bad in array shapes loop
+    begin
+      perform public.store_query_rerank(
+        'a sentence about shapes', pg_temp.hash('tightened'), bad, public.rerank_model());
+      perform pg_temp.fail(format('a judgement of shape %s was accepted', bad));
+    exception
+      when check_violation then null;
+    end;
+  end loop;
+
+  -- And the good shape still stores, or the constraint refuses everything.
+  perform public.store_query_rerank(
+    'a sentence about shapes', pg_temp.hash('tightened'),
+    '[{"slug": "alpha", "relevance": 3}, {"slug": "bravo", "relevance": 0}]'::jsonb,
+    public.rerank_model());
+  if public.query_rerank('a sentence about shapes', pg_temp.hash('tightened')) is null then
+    perform pg_temp.fail('a well-formed judgement was refused by the tightened CHECK');
+  end if;
+end
+$$;
+reset role;
+
+-- ===========================================================================
+-- 14. 0011: the ceiling raises rather than returning null.
+--
+--     Two different refusals used to look identical to the job: "this tool is
+--     full" and "this tool already has this statement".
+-- ===========================================================================
+-- As the OWNER, because finding a tool at the ceiling means reading
+-- public.tool_problems and foundit_embed holds no grant on it — which is
+-- section 10's point and not something to weaken for a test's convenience. The
+-- refusal is the function's and does not depend on who calls it; section 10
+-- exercises the same path as foundit_embed against a tool it found through the
+-- queue.
+do $$
+declare
+  v_full bigint;
+  v_id   bigint;
+begin
+  select tp.tool_id into v_full
+    from public.tool_problems tp
+   group by tp.tool_id
+  having count(*) >= public.statements_wanted()
+   limit 1;
+
+  if v_full is null then
+    raise notice 'no tool is at the ceiling; the FN001 path was not exercised';
+  else
+    begin
+      perform public.store_generated_statement(
+        v_full, 'A situation for a tool that is already full up',
+        'gpt-5-mini', 'gpt-5-nano');
+      perform pg_temp.fail('a tool at the ceiling did not raise');
+    exception
+      when sqlstate 'FN001' then null;
+    end;
+  end if;
+end
+$$;
+
+-- The owner can find a tool under the ceiling and prove the OTHER null still
+-- means what it now means: this exact statement is already there.
+do $$
+declare
+  v_tool bigint;
+  v_text text;
+  v_id   bigint;
+begin
+  -- The queue is the authority on "under the ceiling", so the test asks it
+  -- rather than re-deriving the predicate and getting it subtly different — an
+  -- earlier version of this block did exactly that and picked a tool the
+  -- section above had just filled.
+  select w.tool_id into v_tool from public.statement_work(1) w;
+
+  if v_tool is null then
+    raise notice 'no tool is under the ceiling; the duplicate path was not exercised';
+  else
+    select tp.statement into v_text
+      from public.tool_problems tp where tp.tool_id = v_tool limit 1;
+    select public.store_generated_statement(v_tool, v_text, 'gpt-5-mini', 'gpt-5-nano') into v_id;
+    if v_id is not null then
+      perform pg_temp.fail('a statement this tool already carries was written twice');
+    end if;
+  end if;
+end
+$$;
+
+select 'RERANK TEST PASSED — 0010 and 0011 refuse what they say they refuse' as result;
 
 rollback;
