@@ -969,11 +969,11 @@ $$;
 -- ===========================================================================
 do $$
 declare
-  v_mine bigint := (select id from t7 where what = 'person_draft');
-  v_hers bigint := (select id from t7 where what = 'maker_tool');
-  v_text text;
-  v_n    bigint;
-  n      bigint;
+  v_mine     bigint := (select id from t7 where what = 'person_draft');
+  v_not_mine bigint;
+  v_text     text;
+  v_n        bigint;
+  n          bigint;
 begin
   set role foundit_app;
   perform pg_temp.be('dev_person');
@@ -1015,7 +1015,28 @@ begin
   end if;
 
   -- Somebody else's listing: nothing at all.
-  select count(*) into n from public.maker_search_demand(v_hers, 3650, 200);
+  --
+  -- NOT `maker_tool`: §11 reassigned that one to dev_person, which is the
+  -- whole point of §11, so asking about it here would be asking about their
+  -- own listing. The test failed exactly that way the first time it ran after
+  -- §11 was written, which is the right kind of failure — a suite whose
+  -- sections share a transaction has to keep track of what the earlier ones
+  -- did.
+  reset role;
+  select t.id into v_not_mine
+    from public.tools t
+   where t.owner_id is not null
+     and t.owner_id <> 'dev_person'
+   order by t.id
+   limit 1;
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+
+  if v_not_mine is null then
+    perform pg_temp.fail('no listing belongs to somebody other than dev_person to test with');
+  end if;
+
+  select count(*) into n from public.maker_search_demand(v_not_mine, 3650, 200);
   if n <> 0 then
     perform pg_temp.fail('a person read the search demand for a listing that is not theirs');
   end if;
