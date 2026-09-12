@@ -129,7 +129,23 @@ Or stop after 30 turns, saying plainly what is blocking.
 ## Phase 6 — accounts
 
 ```text
-/goal Phase 6 of docs/build-phases.md is complete: Better Auth with Google and a 6-digit emailed code, the save gate appearing only on save/like/review/add, saved collections, sharing, likes, rate-and-review, profile, settings, and account deletion that leaves nothing behind. Written database-rules-first: for each new table or policy, the migration and its test land before the screen, and `bash db/apply.sh` plus the permission tests are pasted showing all checks passing — including a NEW test proving a tool's owner cannot edit or delete a review on their own listing. The per-request identity fails closed when absent; show a test proving an unset claim is treated as a stranger. Codes are rate-limited per address and per IP. Or stop after 35 turns.
+/goal Phase 6 of docs/build-phases.md is complete AND its gate has passed. Read docs/build-phases.md (Phase 6), docs/product-decisions.md (§2, §4, §5), research/09-auth-stack-choice.md (§4 recommendation, §5 the full working pattern, §6 email), docs/development.md, db/migrations/0001_init.sql (auth.uid, profiles, reviews, tool_likes, collections, collection_items, their policies) and docs/loop-progress.md first. Every claim is settled by pasting real command output, never by summarising.
+
+Done means all ten:
+1. Better Auth runs inside the Next.js process against plain PostgreSQL with sessions in the database; its tables live in their own schema, reached through their own database role (`foundit_auth`) that holds nothing else; `foundit_app` holds no grant on them. Paste the grants.
+2. Every application query runs as `foundit_app` inside a transaction that sets `request.jwt.claims` from the validated session, and an absent or malformed claim is a stranger. Paste a test proving an unset claim, an empty claim and a claim for a deleted user are all treated as anonymous.
+3. Database-rules-first: for every new table or policy, the migration and its test land before the screen, and `bash db/test.sh` passes; the tests include a NEW one proving a tool's owner cannot edit or delete a review on their own listing, an admin can remove but not edit one, and nobody can edit another's review.
+4. Sign-in works end to end on the development machine with Google and with the 6-digit emailed code; when Google or the email provider is not configured, the control says so and nothing pretends. Codes are 6 digits, hashed at rest, expire in 5 minutes, allow 3 attempts, and are rate-limited per address and per IP; paste the limiter refusing.
+5. The save gate appears only at the moment someone saves, likes, reviews or adds — never before the first results — and the skippable prompt never appears before the first results.
+6. Saved collections, sharing a collection by link, likes, rate-and-review, profile, public profile and settings are built from their artboards, with the same outbound-link, no-Apple, no-fetch and focus rules as every earlier screen; tests/links.test.mjs and tests/markup.test.mjs keep passing.
+7. Account deletion leaves nothing behind: paste a select across every table (profiles, reviews, likes, collections, items, claims, auth tables) before and after deleting a test account showing zero rows for that id, and `search_events` unchanged because it never held the id.
+8. No secret in any tracked file; the Google client secret, the email API key and the Better Auth secret are read from the environment only; the server never fetches a URL a stranger supplied; nothing new is joinable between `search_events` and a person.
+9. `npm test`, `npm run lint`, `npx tsc --noEmit`, `npm run build`, `bash db/test.sh` and a keyless fixture `--baseline` run all pass.
+10. Review: a FRESH Opus 5 subagent that has not seen the work attacks the policies (as a stranger, a user, a tool owner, an admin), the session wrapper, the code flow, the limiter, the deletion and the screens. Paste its findings verbatim, then fix each or justify it explicitly.
+
+Constraints that cannot be traded: never disable row-level security or write a policy evaluating to true; the app never connects as the owner; no Apple sign-in; nobody edits another's review and only an admin removes one; the server never fetches a URL a stranger supplied; search logs never joinable to a person. Update docs/loop-progress.md before finishing. Do not start Phase 7.
+
+Or stop after 35 turns, saying plainly what is blocking.
 ```
 
 ## Phase 7 — adding a tool
