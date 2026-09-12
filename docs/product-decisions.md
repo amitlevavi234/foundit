@@ -77,6 +77,11 @@ catalogue is worth policing.
   `research/13` §2.1) requires exactly that route, plus telling the author why.
   So when removal is built (Phase 6/7) it comes with: the reason recorded, the
   author told, and the removal visible in the operator dashboard.
+- **A removal now tells its author** (built 12 September 2026, Phase 8). It shows
+  on their Settings page with the date, the listing and the reason an
+  administrator wrote down, and — where email is configured — one plain-text
+  message says the same three things and points at `/contact` for an appeal. The
+  Settings copy is the one that works when the mail bounces.
 - Reports of a review or a listing come in through the contact and report pages
   (`/contact`, `/report`) and reach the team by email (§5).
 - Deleting your own account removes your own reviews.
@@ -256,6 +261,42 @@ shared collection only the way anybody else does: by holding its link. The dashb
 loses nothing it was going to use — the "saves" figure it wants is a count, and Phase 8
 will get counts from a definer function that returns numbers rather than rows.
 
+### Built 12 September 2026: what each panel actually reads, and what says "not recorded yet"
+
+The dashboard exists. Eight panels, twelve `admin_*` functions, one round
+trip. This is the dated record of what is behind each figure, because the table
+above is what the page was *meant* to show and a dashboard is only worth
+reading if somebody has written down where every number comes from.
+
+| Panel | What it reads | What it does NOT show, and why |
+| --- | --- | --- |
+| Demand | `search_events` over 30 days: searches per day, how many were judged, how many were judged and found nothing good, and the unanswered sentences grouped on `query_hash`, counted, newest first | Nothing about who searched. The panel carries §17's note in words: since the ranking change, on a *judged* search "nothing good" means the page was empty |
+| What people ask for | The same table, the most frequent sentences over 30 days with counts | Same |
+| Catalogue | `tools`, `tool_claims` and `ownership_changes` over 7 days; the listings added and by which handle; the published listings `search_event_tools` has never returned | "Added by" and "never matched" are two functions on purpose. One names a people table and one names a search table, and no function may name both |
+| People | Per handle: listings added, live reviews written, likes given as a count, last seen as a day, joined as a day | No address — one is not reachable from `public` at all. No saved lists: `0015` took the operator out of `collections_read` and a function here would put it back. Likes are a number, never a list |
+| Words | Reviews written and reviews removed, per day | **Reports say "Not recorded" in words.** §5 sends them to an inbox and writes nothing down, so there is no number here and a 0 would read as "nobody has reported anything" |
+| Money | The in-process counters in `lib/rate-limit.ts` — reader, reranker and embedding requests — plus the worst case at the caps from `lib/prices.ts` against `MAX_MONTHLY_SPEND`, and `pg_database_size` through a definer | **There is no month-to-date figure.** The counters live in memory so that nothing about a visitor is written down, which means a restart forgets them; the panel is headed "Since this process started" rather than pretending. The embedding worker's spend is counted by the worker and is not visible here |
+| Backups | `infra.ops_events`: the last backup, restore test and update check | **All three say "Never recorded".** Phase 9's jobs are the writers and none of them exists; the reader returns one row per kind with `recorded = false` and the other columns null, so there is no zero to draw |
+| Server | Disk, memory, swap and uptime from the application process's own view — Node's `os`, a `statfs` of the working directory, and `/proc/meminfo` for swap | Labelled "the application process's own view", because in a container the memory figure is the host's. Swap says "Not available" where there is no `/proc`. "Whether unattended updates are current" is not here: it is a machine fact and arrives with Phase 9's update check, in the panel above |
+
+**The privacy line held, and it is now a test rather than a promise.**
+`db/test/admin_test.sql` §2 reads `pg_get_functiondef` for every `admin_*`
+function and fails if one names a table from the search list and a table from
+the people list. `public.tools` is on neither list, which is why the catalogue
+panel is three functions instead of one.
+
+**Search text is shown to the operator with no threshold.** A sentence one
+person typed once is on this page, deliberately, and that is the opposite of
+the five §19 requires before a *maker* sees one. The operator is the data
+controller and a maker is a stranger.
+
+**Two figures got writers in this phase**, because a dashboard may not show a
+number nothing records: `tools.open_count` (§12 below) and
+`profiles.last_seen_day`, which is a DAY and never a time, stamped at most once
+a day by the statement the application already runs to find out who is asking.
+Before it, "last seen" would have had to be `profiles.updated_at`, which means
+"last edited their display name" wearing another column's name.
+
 ## 11. Paid accounts, later (added 10 September 2026)
 
 Premium accounts are expected eventually, not soon. Two consequences to plan for now,
@@ -281,6 +322,44 @@ How it behaves:
 - Carries `rel="noopener noreferrer"`, so the opened page cannot reach back into ours.
 - The click is counted — this is the "opened from Foundit" number on the maker
   dashboard — and the count is recorded without attaching it to a person.
+
+### Decided 12 September 2026: the click is counted, and here is how
+
+§12 has said since 10 September that the click is counted. It was not.
+`tools.open_count` existed from `0001_init.sql` with no writer anywhere in the
+codebase, so "Opened from Foundit" was 0 on every maker's dashboard — the
+oldest unkept promise in the product, and visible on a screen since Phase 7.
+Phase 8's gate asked whether this section *permits* counting a click without
+identifying the visitor. **It does, in so many words** — "the count is recorded
+without attaching it to a person" — so the count is built rather than the
+promise deleted.
+
+**How.** `components/OutboundLink.tsx` is a client component; the anchor's
+`href` is still the maker's own address, and an `onClick` beside it posts a
+Server Action, `recordOpen(slug)`, which calls
+`public.record_tool_open(citext)` — a definer function that increments the
+counter on a *published* listing and does nothing else.
+
+**What it cannot do, by construction.** It takes a slug and there is no second
+argument to give it. It reads no setting: not `auth.uid()`, not a cookie, not
+an address. It returns nothing, so there is no id to correlate on. It writes no
+log line, because a line naming a listing beside a timestamp, next to a web
+server's access log naming an address beside the same timestamp, is exactly the
+join this product does not make. Two people opening the same listing are the
+same statement.
+
+**What it is not.** Not a redirect through us. A redirect would have been
+easier and it would have put a Foundit URL in the status bar of every result
+card, in every copied link, and in the history of every person who follows one
+— and it would have routed somebody with JavaScript off through our server for
+the sake of a counter. With JavaScript off the link still works and the click
+is not counted, which is the right way round: the recommendation is the product
+and the number is a number on a dashboard.
+
+**What it does not bound.** It counts CLICKS, not people. Nothing stops the
+same visitor pressing the link a hundred times, and the maker dashboard says
+"opens" rather than "visitors" for that reason — the same honesty §19 applies
+to the five-search threshold, which bounds events and not humans.
 
 Note that **the browser opening a link is not the same as our server fetching one**
 (§5 of the plan). The visitor's own browser goes to the maker's site, exactly as it

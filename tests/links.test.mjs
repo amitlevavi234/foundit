@@ -124,6 +124,24 @@ function linksIn(source) {
   return found;
 }
 
+/**
+ * Absolute paths that are not routes and were never meant to be.
+ *
+ * The scanner looks for a quoted string starting with `/`, which is the shape
+ * every internal link has — and also the shape a path ON THE MACHINE has. The
+ * list is exhaustive and each entry needs a reason here, for the same reason
+ * the fetch allow-list in tests/markup.test.mjs does: a rule with no exception
+ * gets deleted the first time one is needed, and a rule with an unwritten
+ * exception is a rule nobody can check.
+ *
+ *   /proc/meminfo  lib/server-stats.ts, for the Server panel's swap figure.
+ *                  Node's `os` has no swap at all, so it comes from the file
+ *                  Linux reports it in — and on a machine with no /proc the
+ *                  panel says "not available from this process" rather than
+ *                  drawing a zero.
+ */
+const NOT_ROUTES = new Set(['/proc/meminfo']);
+
 const SOURCES = [
   ...walk(join(ROOT, 'app')),
   ...walk(join(ROOT, 'components')),
@@ -131,7 +149,9 @@ const SOURCES = [
 ].filter((path) => /\.(tsx?|jsx?|mjs)$/.test(path));
 
 const LINKS = SOURCES.flatMap((path) =>
-  linksIn(readFileSync(path, 'utf8')).map((href) => ({ href, source: rel(path) })),
+  linksIn(readFileSync(path, 'utf8'))
+    .filter((href) => !NOT_ROUTES.has(href))
+    .map((href) => ({ href, source: rel(path) })),
 );
 
 // --- the tests -------------------------------------------------------------
@@ -392,6 +412,135 @@ test('every Phase 7 route answers the MAKER without a 500', async (t) => {
         `${step} sent her somewhere other than her own listings for a draft that is not hers`,
       );
     }
+  }
+});
+
+/* ===========================================================================
+ * Phase 8: every /admin route, to everybody who is not an administrator
+ *
+ * docs/phase-goals.md Phase 8 item 3: every admin route is refused to a
+ * stranger and to a signed-in non-administrator, "proven by a test that walks
+ * all of them from the route tree (not a hand-written list)".
+ *
+ * FROM THE ROUTE TREE IS THE WHOLE POINT. A list of two paths in this file is
+ * a list that does not grow when somebody adds /admin/reports next month, and
+ * the route nobody added to the list is the route nobody checked. `ROUTES` is
+ * already read from the filesystem at the top of this file, so filtering it is
+ * free and a third admin page is walked the day its directory exists.
+ *
+ * WHAT THIS CANNOT SEE, said plainly: a Server Action is a POST with a
+ * generated id in a header, so it cannot be posted from here without the id.
+ * The POST below therefore proves only that these paths do not answer an
+ * unsolicited POST with a 200. The action itself is covered from both ends
+ * instead — tests/markup.test.mjs asserts that no screen or action decides
+ * admin-ness, and db/test/admin_test.sql §6 proves the database refuses the
+ * removal to a maker, to an ordinary account and to a stranger.
+ * ======================================================================== */
+
+/** Every /admin route, read from app/ rather than typed out here. */
+const ADMIN_ROUTES = ROUTES.filter((r) => r.segments[0] === 'admin')
+  .map((r) => `/${r.segments.join('/')}`)
+  .sort();
+
+test('there are admin routes, and the tree is where they come from', () => {
+  assert.ok(
+    ADMIN_ROUTES.includes('/admin'),
+    `/admin is not in the route table; found ${JSON.stringify(ADMIN_ROUTES)}`,
+  );
+  assert.ok(ADMIN_ROUTES.includes('/admin/reviews'), '/admin/reviews is not in the route table');
+  // None of them is dynamic, so every one is walkable as written. If that ever
+  // stops being true, this fails rather than quietly walking a literal
+  // "[slug]" directory.
+  for (const path of ADMIN_ROUTES) {
+    assert.doesNotMatch(path, /\[/, `${path} is dynamic and the walk below cannot reach it`);
+  }
+});
+
+/** The not-found page's own words, from app/not-found.tsx. */
+const NOT_FOUND = /Nothing here/;
+
+/** Anything on an admin screen that a non-administrator must never read. */
+const ADMIN_ONLY = [
+  /What people ask for/,
+  /Found nothing good/,
+  /Opened from Foundit/,
+  /pg_database_size/,
+  /Removing is not editing/,
+  /Never recorded/,
+];
+
+async function assertRefused(origin, path, cookie, who) {
+  const response = await fetch(`${origin}${path}`, {
+    redirect: 'manual',
+    headers: cookie ? { cookie } : {},
+    signal: AbortSignal.timeout(30_000),
+  });
+  assert.ok(response.status < 500, `${path} answered ${response.status} to ${who}`);
+
+  const body = await response.text();
+  assert.match(body, NOT_FOUND, `${path} did not answer ${who} with the not-found page`);
+  for (const secret of ADMIN_ONLY) {
+    assert.doesNotMatch(body, secret, `${path} showed ${who} something from the dashboard`);
+  }
+  // And the tab does not confirm the route either: the title a real 404
+  // carries, byte for byte (app/admin/metadata.ts).
+  assert.doesNotMatch(
+    body,
+    /<title>(Dashboard|Reviews) · Foundit<\/title>/,
+    `${path} told ${who} the route exists in its <title>`,
+  );
+}
+
+test('every admin route answers a stranger with the not-found page', async (t) => {
+  const origin = baseUrl();
+  if (!origin || !(await reachable(origin))) {
+    t.skip('no server answering, so the admin routes could not be walked.');
+    return;
+  }
+
+  for (const path of ADMIN_ROUTES) {
+    await assertRefused(origin, path, null, 'a signed-out stranger');
+  }
+
+  // An unsolicited POST is not a way in either. Without Next's action id this
+  // is not the Server Action; what it proves is that the path does not answer
+  // a bare POST with a page.
+  for (const path of ADMIN_ROUTES) {
+    const response = await fetch(`${origin}${path}`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'review=1&reason=because+i+said+so',
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.ok(response.status < 500, `POST ${path} answered ${response.status}`);
+    if (response.status === 200) {
+      const body = await response.text();
+      for (const secret of ADMIN_ONLY) {
+        assert.doesNotMatch(body, secret, `POST ${path} answered a stranger with the dashboard`);
+      }
+    }
+  }
+});
+
+test('every admin route answers a signed-in NON-ADMIN with the not-found page', async (t) => {
+  const origin = baseUrl();
+  const cookie = process.env.FOUNDIT_TEST_SESSION;
+  if (!origin || !(await reachable(origin))) {
+    t.skip('no server answering, so the signed-in admin walk could not run.');
+    return;
+  }
+  if (!cookie || cookie.trim() === '') {
+    t.skip(
+      'FOUNDIT_TEST_SESSION is not set, so the signed-in walk could not run. It is a session '
+        + 'cookie for an ordinary account — deliberately NOT an administrator, which is the '
+        + 'thing this test is about.',
+    );
+    return;
+  }
+
+  for (const path of ADMIN_ROUTES) {
+    await assertRefused(origin, path, cookie, 'a signed-in non-administrator');
   }
 });
 

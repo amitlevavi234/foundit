@@ -13,6 +13,7 @@ import {
   DELETE_OWN_REVIEW_SQL,
   LIKE_SQL,
   PUBLIC_PROFILE_SQL,
+  RECORD_TOOL_OPEN_SQL,
   RENAME_COLLECTION_SQL,
   SAVED_SQL,
   SAVE_TOOL_SQL,
@@ -419,6 +420,39 @@ export async function writeReview(
     const { rowCount } = await tx.query(UPSERT_REVIEW_SQL, [slug, rating, text]);
     return (rowCount ?? 0) > 0;
   });
+}
+
+/**
+ * Count one click out to a maker's site.
+ *
+ * NO IDENTITY, AND THAT IS THE WHOLE POINT. Everything else in this file runs
+ * through `asViewer`, which attaches `auth.uid()` to the transaction; this one
+ * uses `withIdentity({ userId: null })` deliberately, so the statement that
+ * moves the counter carries no claim at all. A signed-in person's click and a
+ * stranger's are the same statement, and there is nothing in the transaction
+ * for a future edit to start recording.
+ *
+ * The slug is checked here only to keep a wildly wrong value from becoming a
+ * round trip; `public.record_tool_open` matches on `slug = $1` against a
+ * published listing, so an invented one is a statement that updates no rows.
+ */
+export async function recordToolOpen(slug: string): Promise<void> {
+  if (typeof slug !== 'string' || slug === '' || slug.length > 120) return;
+  try {
+    await withIdentity({ userId: null }, async (tx) => {
+      await tx.query(RECORD_TOOL_OPEN_SQL, [slug]);
+    });
+  } catch (error) {
+    // Silent about everything but the code, for the reason logSearchEvent is
+    // silent: a line saying which listing was opened, beside a timestamp a web
+    // server's access log already has an address on, is the join this product
+    // does not make.
+    console.error(
+      `an outbound click was not counted (${
+        (error as { code?: string } | null)?.code ?? 'unknown'
+      })`,
+    );
+  }
 }
 
 export async function deleteOwnReview(slug: string): Promise<boolean> {

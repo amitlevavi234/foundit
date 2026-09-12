@@ -23,13 +23,28 @@ import type { PricingModel } from './types';
  * Reads
  * ======================================================================== */
 
-/** The signed-in person's own profile row. Not profiles_public: this is them. */
+/**
+ * The signed-in person's own profile row. Not profiles_public: this is them.
+ *
+ * IT ALSO STAMPS "LAST SEEN", AND THAT IS WHY IT IS HERE rather than in a call
+ * of its own. This is the statement every signed-in request already sends, so
+ * folding `public.note_seen_today()` into its select list makes the operator
+ * dashboard's People panel honest at the cost of no extra round trip. The
+ * function writes `current_date` onto `auth.uid()`'s own row and only on the
+ * first request of a day — the second finds no row to update and writes
+ * nothing at all, so `profiles.updated_at` does not move either (0019 §2).
+ *
+ * The column it returns is not read by anything on this side; it is selected
+ * so the call is part of the statement rather than a discarded expression a
+ * future refactor would delete as dead.
+ */
 export const VIEWER_SQL = `
   select p.id,
          p.handle::text as handle,
          p.display_name,
          p.bio,
-         p.is_admin
+         p.is_admin,
+         public.note_seen_today() as last_seen_day
     from public.profiles p
    where p.id = auth.uid()`;
 
@@ -374,6 +389,16 @@ export const DELETE_OWN_REVIEW_SQL = `
      and author_id = auth.uid()
      and deleted_at is null
   returning id`;
+
+/**
+ * One click on the link out to a maker's site.
+ *
+ * A function call and not an UPDATE, because `foundit_app` holds no UPDATE
+ * privilege on `tools.open_count` and should not: a counter anybody signed in
+ * could write is a counter nobody should read. 0019 §3 is the writer, it takes
+ * the slug and nothing else, and it returns nothing.
+ */
+export const RECORD_TOOL_OPEN_SQL = `select public.record_tool_open($1::citext)`;
 
 export const UPDATE_PROFILE_SQL = `
   update public.profiles

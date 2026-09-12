@@ -348,24 +348,31 @@ test('and it sends the model, the length, and the capped sentence — nothing el
   }
 });
 
-test('a sign-in code email carries four fields, and no fifth', () => {
+test('every email carries four fields, and no fifth', () => {
   // Phase 6's addition to this file, and the reason it is here rather than in
   // a test of its own: the other two request bodies are enumerated exactly
   // like this, and the thing that must never happen to any of the three is a
   // field arriving that nobody decided on.
   //
-  // What goes out is one recipient, one subject, one line of text — and the
-  // code is in the subject as well as the body so it can be read from a
-  // phone's notification without opening anything (research/09 §6). No HTML,
-  // no image, no tracking pixel, no link of any kind: a sign-in code that
-  // looks like marketing arrives in Spam, and a link in one is a phishing
-  // lesson taught by us.
+  // What goes out is one recipient, one subject, a few lines of text — and for
+  // the sign-in code, the code is in the subject as well as the body so it can
+  // be read from a phone's notification without opening anything (research/09
+  // §6). No HTML, no image, no tracking pixel, no link of any kind: a sign-in
+  // code that looks like marketing arrives in Spam, and a link in one is a
+  // phishing lesson taught by us.
+  //
+  // PHASE 8 ADDED A SECOND MESSAGE AND NOT A SECOND TRANSPORT. The review-
+  // removal notice goes through the same private `post`, so this stays one
+  // assertion about one request body — which is the property worth having,
+  // because a third message must not be able to introduce a fifth field.
   const source = read(join(ROOT, EMAIL_FILE));
 
-  const body = /body:\s*JSON\.stringify\(\{([\s\S]*?)\n      \}\)/.exec(source);
+  const body = /body:\s*JSON\.stringify\(\{([\s\S]*?)\}\),/.exec(source);
   assert.ok(body, 'the request body must be one JSON.stringify of an object literal');
 
-  const keys = [...body[1].matchAll(/^\s{8}([A-Za-z_$][\w$]*)[,:]/gm)].map((m) => m[1]);
+  const keys = [...body[1].matchAll(/(?:^|[{,])\s*([A-Za-z_$][\w$]*)\s*(?=[,:}]|$)/g)].map(
+    (m) => m[1],
+  );
   assert.deepEqual(
     keys.sort(),
     ['from', 'subject', 'text', 'to'].sort(),
@@ -888,4 +895,245 @@ test('the maker dashboard never decides the query-text threshold itself', () => 
     /from public\.search_event_tools[\s\S]{0,400}group by/,
     'lib must not aggregate the join table itself; the threshold lives in the function',
   );
+});
+
+/* ===========================================================================
+ * Phase 8: the operator dashboard
+ *
+ * The rules above already cover these files — SOURCES walks app/ recursively —
+ * so the fetch allow-list, the no-target rule and the no-Apple rule apply to
+ * them the moment they exist. What this section adds is what a recursive walk
+ * cannot check: that the screens the phase promised are there, that nothing on
+ * them decides who may read them, and that no figure on them is invented.
+ * ======================================================================== */
+
+const PHASE_8_PAGES = ['app/admin/page.tsx', 'app/admin/reviews/page.tsx'];
+
+test('the admin screens exist, are dynamic, and are never indexed', () => {
+  for (const path of PHASE_8_PAGES) {
+    const source = read(join(ROOT, path));
+    assert.ok(source.length > 0, `${path} is missing`);
+    assert.match(source, /export const dynamic = 'force-dynamic'/, `${path} must be dynamic`);
+
+    // NOT a `metadata` export, and that is the point. Next resolves a
+    // segment's metadata before the component runs, so a fixed title would
+    // survive notFound() and confirm the route to anybody who guessed it.
+    assert.doesNotMatch(
+      source,
+      /export const metadata\b/,
+      `${path} must resolve its title per-viewer, not export a fixed one`,
+    );
+    assert.match(
+      source,
+      /export async function generateMetadata/,
+      `${path} must resolve its title with generateMetadata`,
+    );
+    assert.match(source, /adminMetadata\(/, `${path} must go through app/admin/metadata.ts`);
+  }
+
+  // And both branches of that helper are noindex, including the one a stranger
+  // gets — a 404 that asks to be crawled is still a 404 in a search index.
+  const helper = read(join(ROOT, 'app/admin/metadata.ts'));
+  const robots = [...helper.matchAll(/robots:\s*\{[^}]*\}/g)].map((m) => m[0]);
+  assert.equal(robots.length, 2, 'app/admin/metadata.ts must set robots on both answers');
+  for (const block of robots) {
+    assert.match(block, /\bindex:\s*false/, `robots must be index: false — ${block}`);
+  }
+});
+
+test('every admin route ends at the not-found page and never at a sign-in gate', () => {
+  // docs/phase-goals.md Phase 8 item 3: "The page for a non-admin is the
+  // not-found page, not a hint that /admin exists." A redirect to the sign-in
+  // screen would be exactly that hint — it says there is something here worth
+  // signing in for — so neither screen may redirect, and both call notFound().
+  for (const path of PHASE_8_PAGES) {
+    const source = read(join(ROOT, path));
+    assert.match(source, /\bnotFound\(\)/, `${path} must answer with the not-found page`);
+    assert.doesNotMatch(
+      source,
+      /redirect\(\s*['"`]\/sign-in/,
+      `${path} must not send anybody to sign in; that confirms the route exists`,
+    );
+  }
+});
+
+test('NO SCREEN AND NO ACTION DECIDES WHO IS AN ADMINISTRATOR', () => {
+  // The rule lib/accounts.ts states and this phase inherits, applied to the
+  // one place it would be most tempting to break: every panel is an admin_*
+  // function that checks auth.is_admin() itself and raises 42501 (0019), and
+  // the removal is two ordinary statements the policies and the trigger
+  // refuse. A comparison in TypeScript here would be a second opinion about
+  // the same question, and a second opinion is what eventually disagrees.
+  //
+  // app/admin/metadata.ts is deliberately NOT on this list. It reads the flag,
+  // and what it decides with it is the text of the <title> element — because
+  // Next resolves a segment's metadata before the component throws notFound(),
+  // so a fixed title survived the refusal and confirmed the route. It decides
+  // what a tab is called and never what may be read.
+  //
+  // Comments are stripped first, so a file SAYING that it does not read the
+  // flag is not mistaken for a file that does.
+  const withoutComments = (source) =>
+    source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  for (const path of [
+    ...PHASE_8_PAGES,
+    'app/admin/actions.ts',
+    'lib/admin.ts',
+    'lib/admin-sql.ts',
+  ]) {
+    const source = withoutComments(read(join(ROOT, path)));
+    assert.doesNotMatch(
+      source,
+      /\bisAdmin\b/,
+      `${path} reads an admin flag; the database is what decides`,
+    );
+  }
+
+  // And nothing anywhere in the application writes the flag.
+  for (const path of SOURCES) {
+    assert.doesNotMatch(
+      read(path),
+      /set\s+is_admin\s*=|is_admin\s*:\s*(true|false)/,
+      `${rel(path)} writes profiles.is_admin; it is set by an operator as the schema owner`,
+    );
+  }
+});
+
+test('the dashboard reads admin functions and never the search tables', () => {
+  // Every figure comes through an admin_* function, which is what makes
+  // db/test/admin_test.sql §2 a complete statement about the page: the rule
+  // that search text and a person are never joined is enforced over function
+  // bodies, and a page with a SELECT of its own would be outside it.
+  const sql = read(join(ROOT, 'lib/admin-sql.ts'));
+
+  assert.doesNotMatch(
+    sql,
+    /\b(from|join)\s+public\.(search_events|search_event_tools|query_\w+)\b/i,
+    'no statement in the application may read the search tables directly',
+  );
+
+  for (const fn of [
+    'public.admin_demand',
+    'public.admin_unmet_demand',
+    'public.admin_top_queries',
+    'public.admin_catalogue_counts',
+    'public.admin_catalogue_added',
+    'public.admin_catalogue_unmatched',
+    'public.admin_signups',
+    'public.admin_people',
+    'public.admin_words',
+    'public.admin_ops_events',
+    'public.admin_database_bytes',
+    'public.admin_reviews',
+  ]) {
+    assert.ok(sql.includes(fn), `${fn} is not read by lib/admin-sql.ts`);
+  }
+
+  // The People panel is public activity, so it may not name a collection: a
+  // private saved list is the opposite of what somebody did in public, which
+  // is why 0015 took the operator out of collections_read.
+  assert.doesNotMatch(sql, /collections/i, 'the dashboard must not read anybody\u2019s saved lists');
+});
+
+test('a panel with no writer says so in words and never shows a zero', () => {
+  const page = read(join(ROOT, 'app/admin/page.tsx'));
+
+  // The three figures §10 asks for that nothing writes yet, each of which has
+  // to appear as a sentence rather than as a number.
+  assert.match(page, /Never recorded/, 'the ops panel must say "never recorded"');
+  assert.match(page, /Not recorded/, 'reports must say they are not recorded');
+  assert.match(
+    page,
+    /reach the team by email and are written down nowhere/i,
+    'and must say WHY reports are not a number',
+  );
+  assert.match(page, /Not available/, 'a figure this process cannot read says so');
+
+  // The honest label on the money panel: in-process counters are not a month
+  // to date and the page may not call them one.
+  assert.match(page, /Since this process started/, 'the money panel names its own window');
+});
+
+test('the numbers are tabular, and a wide table scrolls inside its own box', () => {
+  const css = read(join(ROOT, 'styles/components.css'));
+
+  for (const [rule, pattern] of [
+    ['.admstat-n', /\.admstat-n\s*\{[^}]*\}/],
+    ['.admtable .n', /\.admtable \.n\s*\{[^}]*\}/],
+  ]) {
+    const found = pattern.exec(css);
+    assert.ok(found, `${rule} is missing from styles/components.css`);
+    assert.match(found[0], /tabular-nums/, `${rule} must be tabular-nums`);
+  }
+
+  const scroller = /\.admscroll\s*\{[^}]*\}/.exec(css);
+  assert.ok(scroller, '.admscroll is missing from styles/components.css');
+  assert.match(
+    scroller[0],
+    /overflow:\s*auto/,
+    'a wide table must scroll inside its own container rather than moving the page',
+  );
+  assert.match(
+    scroller[0],
+    /max-height:/,
+    'and a long one must be bounded, or the dashboard is a wall of rows',
+  );
+
+  // And the page never hands a table straight to the document.
+  for (const path of PHASE_8_PAGES) {
+    const source = read(join(ROOT, path));
+    const tables = [...source.matchAll(/<table className="admtable"/g)];
+    const scrollers = [...source.matchAll(/<div className="admscroll">/g)];
+    assert.equal(
+      tables.length,
+      scrollers.length,
+      `${path} has ${tables.length} tables and ${scrollers.length} scrolling containers`,
+    );
+  }
+});
+
+test('the outbound link counts a click and still points straight at the tool', () => {
+  const link = read(join(ROOT, 'components/OutboundLink.tsx'));
+
+  // The href is the maker's address and nothing of ours, which is what a
+  // redirect route would have taken away (docs/product-decisions.md §12).
+  assert.match(link, /href=\{link\.href\}/, 'the anchor points at the maker, not at us');
+
+  // The beacon is a Server Action and never a fetch of our own: the allow-list
+  // above is three files and this is not one of them.
+  assert.doesNotMatch(link, /(^|[^.\w])fetch\s*\(/, 'the beacon must not be a fetch');
+  assert.match(link, /recordOpen\(slug\)/, 'the click posts the slug');
+
+  // And what it posts is the slug and nothing else.
+  const actions = read(join(ROOT, 'app/tools/actions.ts'));
+  const recordOpen = /export async function recordOpen\(([^)]*)\)[\s\S]*?\n\}/.exec(actions);
+  assert.ok(recordOpen, 'app/tools/actions.ts must export recordOpen');
+  assert.equal(
+    recordOpen[1].replace(/\s+/g, ' ').trim(),
+    'slug: string',
+    'recordOpen takes the listing and nothing else — no visitor, no session, no address',
+  );
+  assert.doesNotMatch(
+    recordOpen[0],
+    /currentUserId|cookies\(|headers\(|console\./,
+    'recordOpen must not read who is asking and must not log',
+  );
+});
+
+test('the removal tells the author, and the notice is not a second transport', () => {
+  const admin = read(join(ROOT, 'lib/admin.ts'));
+  assert.match(admin, /sendReviewRemoved/, 'the author is emailed the reason');
+  assert.match(
+    admin,
+    /RECORD_REMOVAL_SQL[\s\S]{0,600}REMOVE_REVIEW_SQL/,
+    'the reason is written BEFORE the review comes down; 0013\u2019s trigger requires it',
+  );
+  assert.doesNotMatch(admin, /(^|[^.\w])fetch\s*\(/, 'lib/admin.ts must not open a socket');
+
+  // The Settings copy, which works whatever happens to the mail.
+  const settings = read(join(ROOT, 'app/settings/page.tsx'));
+  assert.match(settings, /myRemovals/, 'Settings must read the author\u2019s own removals');
+  assert.match(settings, /Removing is not editing/, 'and say what a removal is');
+  assert.match(settings, /\/contact/, 'and where to appeal');
 });

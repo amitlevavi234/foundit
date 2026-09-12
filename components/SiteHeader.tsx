@@ -71,7 +71,11 @@ export async function SiteHeader({ active, anonymous = false }: SiteHeaderProps)
         </NavLink>
 
         {viewer ? (
-          <AccountMenu handle={viewer.handle} displayName={viewer.displayName} />
+          <AccountMenu
+            handle={viewer.handle}
+            displayName={viewer.displayName}
+            isAdmin={viewer.isAdmin}
+          />
         ) : (
           <ButtonLink href="/sign-in" size="sm" style={{ marginLeft: 8 }}>
             Sign in
@@ -133,7 +137,15 @@ function NavLink({
  * URL; this is the neighbouring one, and the answer is the same shape: draw it
  * ourselves.
  */
-function AccountMenu({ handle, displayName }: { handle: string; displayName: string | null }) {
+function AccountMenu({
+  handle,
+  displayName,
+  isAdmin,
+}: {
+  handle: string;
+  displayName: string | null;
+  isAdmin: boolean;
+}) {
   const name = displayName?.trim() || `@${handle}`;
   const initial = (displayName?.trim() || handle).slice(0, 1).toUpperCase();
 
@@ -153,6 +165,14 @@ function AccountMenu({ handle, displayName }: { handle: string; displayName: str
         <Link href="/saved">Saved</Link>
         <Link href={`/u/${handle}`}>Your public profile</Link>
         <Link href="/settings">Settings</Link>
+        {/* THE LINK IS A CONVENIENCE AND NOT A LOCK. `is_admin` comes from the
+            profile row the database just handed us, so a person who is not an
+            administrator does not see it — and if they type /admin anyway they
+            get the not-found page, and if they send the SQL themselves every
+            admin_* function raises 42501 (0019, db/test/admin_test.sql §1).
+            docs/phase-goals.md Phase 8 item 7 puts it plainly: the link's
+            absence is not what protects anything. */}
+        {isAdmin ? <Link href="/admin">Dashboard</Link> : null}
         <form action={signOut}>
           <button type="submit">Sign out</button>
         </form>

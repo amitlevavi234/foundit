@@ -207,7 +207,7 @@ export function SavedView({ data, origin, justShared = false }: SavedViewProps) 
                       </form>
 
                       <div className="toolcard-out">
-                        <OutboundButton url={item.url} size="sm">
+                        <OutboundButton url={item.url} slug={item.slug} size="sm">
                           Open
                         </OutboundButton>
                         <OutboundDomain url={item.url} />

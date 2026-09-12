@@ -117,7 +117,7 @@ export default async function SharedCollectionPage({ params }: SharedProps) {
                   <div className="toolcard-foot">
                     <span />
                     <div className="toolcard-out">
-                      <OutboundButton url={item.url} size="sm">
+                      <OutboundButton url={item.url} slug={item.slug} size="sm">
                         Open
                       </OutboundButton>
                       <OutboundDomain url={item.url} />

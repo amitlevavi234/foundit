@@ -2218,3 +2218,253 @@ dl.facts dd {
 .makerpage {
   padding: 20px 24px 96px;
 }
+
+/* --- the operator dashboard -----------------------------------------------
+ * design/canvas/ has no admin artboard, so this is built from
+ * Components.dc.html in the same language as the rest of the site: the ink
+ * border, the offset shadow, Bricolage for a number and Onest for a sentence.
+ * Two things are new here, and both exist because the component sheet draws no
+ * table at all — it is a sheet of cards, chips and rows.
+ *
+ *   `.admtable` is a real <table>, because these ARE tables: a heading row and
+ *   a column of figures that have to line up down the page. The alternative
+ *   was a grid of divs wearing ARIA roles, which is a table that a screen
+ *   reader has to be told about.
+ *
+ *   `.admscroll` is the container it scrolls INSIDE. At 375px a seven-column
+ *   table cannot fit and must not push the page sideways, so the overflow
+ *   belongs to a box around the table rather than to the document.
+ *
+ * Numbers are `font-variant-numeric: tabular-nums` everywhere without
+ * exception: a column of counts that shifts by a pixel per digit is a column
+ * nobody can scan.
+ */
+.admpage {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 8px 24px 96px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-16);
+}
+
+.admsection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-7);
+}
+
+.admsection > .section-head {
+  margin-bottom: 0;
+}
+
+/* The period a panel covers, beside its title and never inside it. */
+.admperiod {
+  font-size: var(--t-meta);
+  color: var(--c-muted);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+.admrow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--s-9);
+}
+
+/* One figure. The MakerDashboard's three lines — number, label, qualifier. */
+.admstat {
+  background: var(--c-surface);
+  border: var(--border);
+  border-radius: var(--r-xl);
+  padding: 18px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.admstat-n {
+  font-family: var(--font-display);
+  font-weight: var(--fw-display);
+  letter-spacing: var(--ls-display);
+  line-height: var(--lh-display);
+  font-size: var(--t-display-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A figure nothing records is a sentence, not a numeral, and is never 0. */
+.admstat-n.unrecorded {
+  font-family: var(--font-body);
+  font-weight: var(--fw-semibold);
+  letter-spacing: normal;
+  font-size: var(--t-body-lg);
+  line-height: var(--lh-snug);
+  color: var(--c-muted);
+}
+
+.admstat-label {
+  font-size: var(--t-body-sm);
+  font-weight: var(--fw-heading);
+  margin-top: var(--s-1);
+}
+
+.admstat-sub {
+  font-size: var(--t-micro);
+  color: var(--c-muted);
+  line-height: 1.45;
+}
+
+/* Both axes, on purpose. A fifty-row table is 2,100px tall, and three of them
+ * made the dashboard nine thousand pixels of scrolling — which is the "wall"
+ * this page is meant not to be. Capped, each table is a box the owner scans
+ * and scrolls if they want more, and the page stays a page. The cap also
+ * settles the horizontal question: `overflow-x: auto` alone computes the other
+ * axis to `auto` anyway, so saying `overflow: auto` is what is actually
+ * happening rather than half of it. */
+.admscroll {
+  overflow: auto;
+  max-height: 420px;
+  border: var(--border);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+}
+
+/* The heading row stays put while the rows underneath it move. */
+.admscroll .admtable thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.admtable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-meta);
+  min-width: 520px;
+}
+
+.admtable th,
+.admtable td {
+  text-align: left;
+  padding: 10px var(--s-6);
+  border-bottom: var(--border-quiet);
+  vertical-align: top;
+}
+
+.admtable thead th {
+  background: var(--c-sunk);
+  font-weight: var(--fw-heading);
+  font-size: var(--t-micro);
+  color: var(--c-muted);
+  white-space: nowrap;
+  border-bottom: var(--border-soft);
+}
+
+.admtable tbody tr:last-child th,
+.admtable tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.admtable .n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The sentence somebody typed. It wraps; it is never truncated into a lie. */
+.admtable .said {
+  font-weight: var(--fw-medium);
+  min-width: 220px;
+}
+
+.admtable .quiet {
+  color: var(--c-muted);
+}
+
+/* A panel with nothing in it yet says so in a sentence of its own. */
+.admnote {
+  margin: 0;
+  padding: var(--s-6) var(--s-7);
+  border: var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--c-sunk);
+  color: var(--c-muted);
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-body);
+}
+
+/* A thirty-day sparkline made of divs: one column per day, no library. */
+.admbars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 72px;
+  padding: var(--s-5) var(--s-7);
+  border: var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.admbars > span {
+  flex: 1;
+  min-width: 3px;
+  border-radius: 2px 2px 0 0;
+  background: var(--c-violet);
+  /* A day with nothing in it is a hairline rather than nothing at all, so the
+     row reads as thirty days and not as however many were busy. */
+  min-height: 2px;
+}
+
+.admbars > span.none {
+  background: var(--c-track);
+}
+
+.admbars > span.bad {
+  background: var(--c-coral);
+}
+
+/* One review on /admin/reviews. */
+.admreview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+  padding: var(--s-9) var(--s-10);
+  border-bottom: var(--border-soft);
+}
+
+.admreview:last-child {
+  border-bottom: 0;
+}
+
+.admreview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-7);
+  flex-wrap: wrap;
+}
+
+.admreview-body {
+  margin: 0;
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-body);
+  max-width: 68ch;
+}
+
+.admreview-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.admreview-form .field {
+  flex: 1 1 320px;
+}
+
+@media (max-width: 900px) {
+  .admpage {
+    padding: 8px 16px 80px;
+    gap: var(--s-14);
+  }
+}

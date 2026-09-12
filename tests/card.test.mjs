@@ -37,6 +37,29 @@ const LINK_STUB =
       '}\n',
   );
 
+/**
+ * The Server Actions the card's outbound link posts to.
+ *
+ * Since Phase 8 `components/OutboundLink.tsx` is a client component that tells
+ * the server a link out was followed (docs/product-decisions.md §12), so
+ * importing the card now pulls in `app/tools/actions.ts` — and that pulls in
+ * next/cache, next/navigation, the connection pool and the authentication
+ * library, none of which a test of MARKUP has any business starting.
+ *
+ * A `'use server'` module is a reference on the client and never code, so
+ * standing in for it with functions that do nothing is exactly what the
+ * browser receives. What this test asserts is the HTML, and the HTML is the
+ * same either way.
+ */
+const ACTIONS_STUB =
+  'data:text/javascript,' +
+  encodeURIComponent(
+    'export async function recordOpen() {}\n' +
+      'export async function toggleLike() {}\n' +
+      'export async function postReview() {}\n' +
+      'export async function removeMyReview() {}\n',
+  );
+
 function isFile(url) {
   try {
     return statSync(fileURLToPath(url)).isFile();
@@ -48,6 +71,7 @@ function isFile(url) {
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === 'next/link') return { url: LINK_STUB, shortCircuit: true };
+    if (specifier === '@/app/tools/actions') return { url: ACTIONS_STUB, shortCircuit: true };
 
     let target = specifier;
     if (target.startsWith('@/')) target = new URL(target.slice(2), ROOT).href;

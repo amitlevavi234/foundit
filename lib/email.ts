@@ -10,17 +10,30 @@
  * **the server never fetches an address a stranger supplied** — is untouched by
  * a request to one address written out in full below.
  *
- * WHAT GOES OUT. One recipient, one subject, one line of text. No HTML, no
+ * WHAT GOES OUT. One recipient, one subject, a few lines of text. No HTML, no
  * image, no tracking pixel, no link of any kind — research/09 §6 on why a
  * sign-in code that looks like marketing arrives in Spam, and a code in the
  * subject line can be read from a notification without opening the mail.
  * Nothing about the visitor travels with it: not their address, not their
  * session, not what they were doing when they asked.
  *
- * WHERE THE CODE GOES, in the order the decision is actually made:
+ * TWO MESSAGES SINCE PHASE 8, AND ONE TRANSPORT. The sign-in code, and the
+ * notice that an administrator took a review down — which the Digital
+ * Services Act (Arts 16–17, research/13 §2.1) requires and
+ * docs/product-decisions.md §4 promised when removal was built. They share
+ * `post()` below, so there is still exactly one `fetch` in this file and
+ * exactly one address in it, which is the shape tests/markup.test.mjs holds
+ * this module to. A third message is a third template function and not a
+ * second transport.
+ *
+ * WHERE A MESSAGE GOES, in the order the decision is actually made. It is the
+ * same decision for both messages: the switch covers EVERYTHING this file
+ * sends, not only the code, because the reason it exists — a development
+ * machine holding a real key must not put mail in a stranger's inbox — is not
+ * a fact about sign-in:
  *
  *   AUTH_DEV_CODE_TO_LOG=1, outside production
- *                      the code is printed to the server log and NOTHING IS
+ *                      the message is printed to the server log and NOTHING IS
  *                      SENT — whether or not a provider is configured. That
  *                      last clause is the Phase 6 review's F5 and it is a real
  *                      change: the check used to sit inside the "there is no
@@ -125,6 +138,82 @@ export async function sendSignInCode(recipient: string, code: string): Promise<S
     return { delivered: true, reason: 'logged' };
   }
 
+  return post(
+    recipient,
+    // The code is in the subject as well as the body so it can be read from a
+    // phone's notification without opening anything.
+    `${code} is your Foundit sign-in code`,
+    `${code} is your Foundit sign-in code. It expires in five minutes ` +
+      'and can be used once.\n\n' +
+      'If you did not ask to sign in, you can ignore this — somebody typed ' +
+      'your address and nothing has happened to your account.\n',
+  );
+}
+
+/** What the author is told, and the only shape this message ever takes. */
+export interface ReviewRemovalNotice {
+  /** The listing the review was about, by its public name. */
+  toolName: string;
+  /** The day it came down, already formatted for a person to read. */
+  when: string;
+  /** The reason an administrator wrote down, verbatim. */
+  reason: string;
+}
+
+/**
+ * Tell somebody an administrator took their review down.
+ *
+ * The Digital Services Act route needs three things when a review comes down
+ * (research/13 §2.1, docs/product-decisions.md §4): the reason recorded, the
+ * author told, and the removal visible to the operator. This is the second,
+ * and the author is told twice — here, and on their own Settings page, which
+ * is the copy that works when this one bounces.
+ *
+ * WHAT IS NOT IN IT. Not the review's own text, which the author already has
+ * and which does not need a second copy in an inbox; not the handle of the
+ * administrator who removed it, because appeal goes to the team rather than to
+ * a person; not a link, for the reason the code has none. The route to appeal
+ * is the /contact page, written as a path, and that is the whole of it.
+ *
+ * `notice.reason` is written by an administrator in the dashboard — it is the
+ * one piece of this message somebody typed, it is capped at 500 characters by
+ * public.review_removals' own CHECK, and it reaches this function as text that
+ * goes into a plain-text body. There is nothing here for it to be markup in.
+ */
+export async function sendReviewRemoved(
+  recipient: string,
+  notice: ReviewRemovalNotice,
+): Promise<SendResult> {
+  if (devCodeLoggingAllowed()) {
+    console.warn(
+      `[development] review-removal notice for ${recipient} about ${notice.toolName} — ` +
+        'printed because AUTH_DEV_CODE_TO_LOG=1 and this is not production; nothing was sent',
+    );
+    return { delivered: true, reason: 'logged' };
+  }
+
+  return post(
+    recipient,
+    `Your review of ${notice.toolName} was removed`,
+    `Your review of ${notice.toolName} was removed on ${notice.when}.\n\n` +
+      `The reason recorded was: ${notice.reason}\n\n` +
+      'Removing is not editing: nobody changed a word of what you wrote, it was ' +
+      'taken down whole, and the reason above is on the record.\n\n' +
+      'If you think that was wrong, tell us at /contact on Foundit and a person ' +
+      'will read it.\n',
+  );
+}
+
+/**
+ * The transport. One recipient, four fields, one address, one request.
+ *
+ * Private, and the only caller of `fetch` in this codebase that is not a model
+ * provider. Every template above decides its own subject and text and then
+ * comes here, so the rules tests/markup.test.mjs asserts — the literal
+ * address, the key only in a header, four body fields and no fifth — are
+ * asserted once about one function rather than once per message.
+ */
+async function post(recipient: string, subject: string, text: string): Promise<SendResult> {
   if (!emailConfigured()) return { delivered: false, reason: 'not-configured' };
 
   const key = trimmed(process.env.RESEND_API_KEY);
@@ -144,18 +233,10 @@ export async function sendSignInCode(recipient: string, code: string): Promise<S
         authorization: `Bearer ${key}`,
         'content-type': 'application/json',
       },
-      // Four fields. The code is in the subject as well as the body so it can
-      // be read from a phone's notification without opening anything.
-      body: JSON.stringify({
-        from,
-        to: recipient,
-        subject: `${code} is your Foundit sign-in code`,
-        text:
-          `${code} is your Foundit sign-in code. It expires in five minutes ` +
-          'and can be used once.\n\n' +
-          'If you did not ask to sign in, you can ignore this — somebody typed ' +
-          'your address and nothing has happened to your account.\n',
-      }),
+      // Four fields, whatever the message is. No html, no reply_to, no tags,
+      // no headers of our own: a field this object does not have is a field no
+      // template can add.
+      body: JSON.stringify({ from, to: recipient, subject, text }),
       signal: controller.signal,
     });
 

@@ -1,4 +1,8 @@
+'use client';
+
 import type { ReactNode } from 'react';
+
+import { recordOpen } from '@/app/tools/actions';
 
 import { buttonClassName, type ButtonSize, type ButtonVariant } from './Button';
 import { Icon } from './Icon';
@@ -18,6 +22,32 @@ import { outboundLink } from '@/lib/outbound';
  *   - the domain shown beside it, so people can see where they are going.
  *
  * The visitor's browser makes that request. Our server never does.
+ *
+ * WHY THIS IS A CLIENT COMPONENT SINCE PHASE 8, and what that bought.
+ * §12 has said since 10 September that the click is counted, and it was not:
+ * `tools.open_count` had no writer anywhere in the codebase and the maker
+ * dashboard drew 0 on every listing and said so rather than inventing a
+ * figure. Counting it needs the click to reach our server, and there are only
+ * two ways to do that: send the visitor through a redirect of ours, or leave
+ * the anchor pointing straight at the maker and tell the server separately.
+ *
+ * THIS IS THE SECOND, deliberately. A redirect would mean the href on every
+ * result card was a Foundit URL — so the status bar would stop telling people
+ * where they are going, a copied link would be ours rather than the maker's,
+ * and a person with JavaScript off would be routed through us for a counter.
+ * Instead the `href` is exactly what it was, and `onClick` posts a Server
+ * Action beside it. `void` and never awaited: the new tab is already opening
+ * and nobody waits on bookkeeping (lib/db.ts's rule about the search log,
+ * applied to a click).
+ *
+ * WHAT THE BEACON CARRIES: the slug, and nothing else. There is no visitor
+ * argument to `recordOpen`, and none to `public.record_tool_open` underneath
+ * it — no cookie is read, no address is taken and nothing is written to a log.
+ * Two people opening the same listing are the same statement.
+ *
+ * WITH JAVASCRIPT OFF, THE LINK STILL WORKS AND THE CLICK IS NOT COUNTED.
+ * That is the right way round: the recommendation is the product and the
+ * counter is a number on a dashboard, so the counter is what degrades.
  */
 export interface OutboundLinkProps {
   url: string | null | undefined;
@@ -27,6 +57,14 @@ export interface OutboundLinkProps {
   className?: string;
   /** Hide the trailing external-link glyph. The default is to show it. */
   hideIcon?: boolean;
+  /**
+   * The listing this link is on, so the click can be counted.
+   *
+   * Optional, because the component sheet at /components renders three of
+   * these to show the rule and none of them is a listing. Absent, nothing is
+   * counted and the link is exactly what it always was.
+   */
+  slug?: string;
 }
 
 export function OutboundButton({
@@ -36,6 +74,7 @@ export function OutboundButton({
   size = 'md',
   className,
   hideIcon = false,
+  slug,
 }: OutboundLinkProps) {
   const link = outboundLink(url);
   if (!link) return null;
@@ -46,6 +85,7 @@ export function OutboundButton({
       target={link.target}
       rel={link.rel}
       className={buttonClassName(variant, size, className)}
+      onClick={slug ? () => void recordOpen(slug) : undefined}
     >
       {children}
       {hideIcon ? null : (

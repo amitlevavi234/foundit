@@ -14,6 +14,7 @@ import {
   RESEND_URL,
   devCodeLoggingAllowed,
   emailConfigured,
+  sendReviewRemoved,
   sendSignInCode,
 } from '../lib/email.ts';
 
@@ -249,6 +250,127 @@ test('a provider failure is a reason, never the key and never the body', async (
       assert.match(result.reason, /^HTTP 422/);
       assert.ok(!result.reason.includes('secret-key-value'), 'the key is not in the reason');
       assert.ok(!result.reason.includes('482915'), 'nor is the code');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+/* ===========================================================================
+ * Phase 8: the review-removal notice
+ *
+ * The Digital Services Act route needs the author told (research/13 §2.1,
+ * docs/product-decisions.md §4), and this is the half of that which leaves the
+ * machine. It is tested against a stubbed fetch exactly like the sign-in code,
+ * and for the same reason: nothing in this repository may put real mail in
+ * anybody's inbox.
+ * ======================================================================== */
+
+const NOTICE = {
+  toolName: 'Splitwise',
+  when: '12 Sep 2026',
+  reason: 'names a person who did not consent to being named',
+};
+
+test('THE DEV SWITCH COVERS THE REMOVAL NOTICE TOO, not only the code', async () => {
+  // The Phase 6 review's F5, applied to a message F5 predates. A development
+  // machine holding a real RESEND_API_KEY — which is this one — must not put a
+  // "your review was removed" mail in whatever address a throwaway test
+  // account used, and the reason the switch exists is not a fact about
+  // sign-in.
+  await withEnv(
+    {
+      NODE_ENV: 'development',
+      AUTH_DEV_CODE_TO_LOG: '1',
+      RESEND_API_KEY: 'k',
+      EMAIL_FROM: 'no-reply@mail.example',
+    },
+    async () => {
+      assert.equal(emailConfigured(), true, 'a provider IS configured, which is the point');
+
+      const real = globalThis.fetch;
+      const { stub, calls } = fakeFetch();
+      globalThis.fetch = stub;
+      try {
+        const lines = await capturingLogs(async () => {
+          const result = await sendReviewRemoved('noa@example.com', NOTICE);
+          assert.equal(result.delivered, true);
+          assert.equal(result.reason, 'logged', 'logged, not sent');
+        });
+        assert.deepEqual(calls, [], 'NOTHING may reach api.resend.com');
+        assert.equal(lines.length, 1);
+        assert.match(lines[0], /nothing was sent/);
+        // The log line names the listing and not the words of the review.
+        assert.match(lines[0], /Splitwise/);
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+  );
+});
+
+test('the notice says which review, when, why, and where to appeal', async () => {
+  await withEnv(
+    { RESEND_API_KEY: 'secret-key-value', EMAIL_FROM: 'Foundit <no-reply@mail.example>' },
+    async () => {
+      const real = globalThis.fetch;
+      const { stub, calls } = fakeFetch();
+      globalThis.fetch = stub;
+      try {
+        const result = await sendReviewRemoved('noa@example.com', NOTICE);
+        assert.equal(result.delivered, true);
+        assert.equal(result.reason, 'sent');
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].url, RESEND_URL, 'the same one address as the code');
+        assert.equal(calls[0].init.method, 'POST');
+        assert.equal(calls[0].init.headers.authorization, 'Bearer secret-key-value');
+
+        const body = JSON.parse(calls[0].init.body);
+        assert.deepEqual(Object.keys(body).sort(), ['from', 'subject', 'text', 'to']);
+        assert.equal(body.to, 'noa@example.com');
+        assert.match(body.subject, /Splitwise/, 'the subject names the listing');
+        assert.match(body.subject, /removed/);
+
+        // The four things docs/product-decisions.md §4 promises the author.
+        assert.match(body.text, /Splitwise/, 'which review');
+        assert.match(body.text, /12 Sep 2026/, 'when');
+        assert.match(
+          body.text,
+          /names a person who did not consent to being named/,
+          'why, in the words an administrator wrote',
+        );
+        assert.match(body.text, /\/contact/, 'and where to appeal');
+
+        // Plain and boring, exactly like the code: no markup, no link to
+        // click, no HTML field, and not a copy of what they wrote.
+        assert.doesNotMatch(body.text, /<[a-z]/i);
+        assert.doesNotMatch(body.text, /https?:/);
+        assert.equal(body.html, undefined);
+        // "Removing is not editing" is the sentence the product makes, and it
+        // is the one thing an author reading this needs to be told.
+        assert.match(body.text, /not editing/i);
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+  );
+});
+
+test('with no provider, the notice is not sent and nothing is printed', async () => {
+  // The author is told twice — here, and on their own Settings page. This is
+  // the path where the first one does not exist, and it must fail quietly
+  // rather than pretend.
+  await withEnv({ NODE_ENV: 'production' }, async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = async () => assert.fail('nothing may be sent with no provider');
+    try {
+      const lines = await capturingLogs(async () => {
+        const result = await sendReviewRemoved('noa@example.com', NOTICE);
+        assert.equal(result.delivered, false);
+        assert.equal(result.reason, 'not-configured');
+      });
+      assert.deepEqual(lines, []);
     } finally {
       globalThis.fetch = real;
     }

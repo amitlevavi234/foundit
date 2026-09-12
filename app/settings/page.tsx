@@ -8,6 +8,7 @@ import { Icon } from '@/components/Icon';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { currentViewer } from '@/lib/accounts';
+import { myRemovals } from '@/lib/admin';
 
 import { saveProfile } from './actions';
 
@@ -60,9 +61,22 @@ const TROUBLE: Record<string, string> = {
   save: 'That did not save. Nothing was changed.',
 };
 
+const REMOVAL_DATE = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
 export default async function Settings({ searchParams }: SettingsProps) {
   const viewer = await currentViewer();
   if (!viewer) redirect('/sign-in?next=%2Fsettings');
+
+  // The author's half of docs/product-decisions.md §4. Empty for everybody who
+  // has never had a review taken down, which is everybody, which is why the
+  // section is not drawn at all rather than drawn empty: a heading saying
+  // "Reviews we removed: none" on every account is a sentence nobody needs.
+  const removals = await myRemovals();
 
   const params = await searchParams;
   const problem = first(params.problem);
@@ -186,6 +200,48 @@ export default async function Settings({ searchParams }: SettingsProps) {
               </div>
             </form>
           </section>
+
+          {removals.length > 0 ? (
+            <section>
+              <h2 className="h2" style={{ fontSize: 26, marginBottom: 6 }}>
+                Reviews that were removed
+              </h2>
+              <p className="muted" style={{ margin: 0, fontSize: 'var(--t-body-sm)' }}>
+                An administrator took {removals.length === 1 ? 'this review' : 'these reviews'} down.
+                Removing is not editing — nobody changed a word of what you wrote, it was taken
+                down whole, and the reason is on the record.
+              </p>
+
+              {removals.map((removal) => (
+                <div className="setrow" key={`${removal.toolSlug}-${removal.createdAt}`}>
+                  <div>
+                    <span className="setrow-label">
+                      Your review of{' '}
+                      <Link href={`/tools/${removal.toolSlug}`}>{removal.toolName}</Link>
+                    </span>
+                    <p className="setrow-help">
+                      Removed on {REMOVAL_DATE.format(new Date(removal.createdAt))}. The reason
+                      recorded was: {removal.reason}
+                    </p>
+                  </div>
+                  <span />
+                </div>
+              ))}
+
+              <div className="setrow">
+                <div>
+                  <span className="setrow-label">If you think that was wrong</span>
+                  <p className="setrow-help">
+                    Tell us and a person will read it. We do not put removed reviews back
+                    automatically, and we do not take the reason off the record.
+                  </p>
+                </div>
+                <Link href="/contact" className="btn btn-xs">
+                  Contact us
+                </Link>
+              </div>
+            </section>
+          ) : null}
 
           <section>
             <h2 className="h2" style={{ fontSize: 26, marginBottom: 6 }}>

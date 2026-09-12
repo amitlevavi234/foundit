@@ -711,7 +711,7 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
             className="slab slab-ink"
             style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}
           >
-            <OutboundButton url={tool.url} className="btn-outbound">
+            <OutboundButton url={tool.url} slug={tool.slug} className="btn-outbound">
               Open {tool.name}
             </OutboundButton>
             <div

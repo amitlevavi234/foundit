@@ -228,7 +228,7 @@ export function ToolCard({
               never asks that address for anything. */}
           {url ? (
             <div className="toolcard-out">
-              <OutboundButton url={url} size="sm">
+              <OutboundButton url={url} slug={slug} size="sm">
                 {big ? `Open ${name}` : 'Open'}
               </OutboundButton>
               <OutboundDomain url={url} />

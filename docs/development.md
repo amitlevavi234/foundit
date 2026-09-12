@@ -534,6 +534,44 @@ docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
   -c "alter role foundit_auth login noinherit password 'local_development_only_auth'"
 ```
 
+## Making yourself an administrator (and why no screen can)
+
+The operator dashboard at `/admin` is behind `profiles.is_admin`, and **nothing
+in the application can write that column.** `0015_phase6_review.sql` revoked
+`UPDATE` on `public.profiles` from `foundit_app` and granted it back on three
+columns — `display_name`, `bio`, `handle` — so a signed-in person sending a
+statement of their own choosing is refused by the privilege rather than by a
+policy, and an administrator is refused too. There is no form, no Server Action
+and no API route that sets it. `db/test/admin_test.sql` §5 tries it as an
+ordinary account and as an administrator and fails if either succeeds.
+
+So it is set out of band, **as the schema owner**, which is the one connection
+the application never has:
+
+```bash
+# Sign in first, through /sign-in, so the profile row exists.
+docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
+  -c "update public.profiles set is_admin = true where handle = 'your_handle'"
+```
+
+Take it away the same way, and take it away when you are finished with it:
+
+```bash
+docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
+  -c "update public.profiles set is_admin = false where handle = 'your_handle'"
+```
+
+On the server the same statement runs through the tunnel as `foundit_owner`
+(see *Credentials, and the two roles* above). It is deliberately a thing you
+have to mean to do.
+
+**The Dashboard link in the account menu is a convenience and not the lock.**
+It is drawn only for an administrator, but a person who types `/admin` gets the
+not-found page — the same page, with the same title, that a mistyped URL gets —
+and a person who sends the SQL themselves gets `42501` from every one of the
+twelve `admin_*` functions. The link's absence protects nothing, and it is
+not supposed to.
+
 ## What the owner must create
 
 Two accounts, neither of which an agent can make for you, and both of which the
