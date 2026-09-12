@@ -538,14 +538,41 @@ begin
       'foundit_app can write a statement''s provenance or its vector: %s', bad));
   end if;
 
-  -- And it still has the privileges Phase 7 needs, or the revoke went too far.
-  if not exists (
+  -- REPLACED BY 0017, and the original sentence is worth keeping so the change
+  -- is visible. Phase 5 asserted here that foundit_app must KEEP UPDATE on
+  -- `statement`, "or the revoke went too far", because Phase 7 was expected to
+  -- edit statements through the column grant and row-level security.
+  --
+  -- Phase 7 decided otherwise, and the reason is the hole this very section is
+  -- about. `source` defaults to 'seed'. An application that can INSERT a
+  -- statement without being able to write `source` writes a stranger's sentence
+  -- into the catalogue recorded as something we wrote by hand — 0011's
+  -- carefully corrected comment on that column, wrong again, one row at a time.
+  --
+  -- So 0017 took INSERT, UPDATE and DELETE on this table away from the
+  -- application altogether and made public.set_owner_statements the one door,
+  -- with no `source` parameter. The assertion is now the opposite one.
+  if exists (
+    select 1 from information_schema.table_privileges
+     where table_schema = 'public' and table_name = 'tool_problems'
+       and grantee = 'foundit_app'
+       and privilege_type in ('INSERT', 'UPDATE', 'DELETE')
+  ) or exists (
     select 1 from information_schema.column_privileges
      where table_schema = 'public' and table_name = 'tool_problems'
-       and grantee = 'foundit_app' and privilege_type = 'UPDATE'
-       and column_name = 'statement'
+       and grantee = 'foundit_app'
+       and privilege_type in ('INSERT', 'UPDATE', 'DELETE')
   ) then
-    perform pg_temp.fail('foundit_app can no longer edit a statement at all; the revoke was too wide');
+    perform pg_temp.fail(
+      'foundit_app can write public.tool_problems directly; since 0017 every '
+      || 'person-typed statement goes through public.set_owner_statements, '
+      || 'which is what makes source = ''user'' true by construction');
+  end if;
+
+  -- And the door it is supposed to use exists and is granted.
+  if not has_function_privilege('foundit_app',
+       'public.set_owner_statements(bigint, text[])', 'EXECUTE') then
+    perform pg_temp.fail('the one door for a person-typed statement is not granted to foundit_app');
   end if;
 end
 $$;

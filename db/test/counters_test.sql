@@ -172,25 +172,57 @@ $$;
 -- application role is not and cannot become — so setting the flag by hand
 -- gains nothing, and the number on a listing remains something that can only
 -- be moved by liking, saving or reviewing.
+--
+-- TIGHTENED BY 0017, and the difference is the interesting part. When this was
+-- written the refusal was row-level security FILTERING: the UPDATE ran, matched
+-- nothing, and reported zero rows. 0017 took foundit_app's table-wide UPDATE on
+-- public.tools away and gave back a column list that excludes all six counters,
+-- so the same statement is now refused on PRIVILEGE — before any policy is
+-- consulted, and whatever rows it would have matched.
+--
+-- Both are a pass. The assertion accepts either and names which one happened,
+-- because a test that demanded the weaker answer would have failed on the day
+-- the stronger one arrived, which is exactly what it did.
 -- ===========================================================================
 do $$
-declare n integer;
+declare
+  n         integer;
+  refused   boolean;
 begin
   perform pg_temp.be('dev_person');
   perform set_config('foundit.counters', 'on', true);
 
-  update public.tools set like_count = 9999 where slug::text = 'cupboard';
-  get diagnostics n = row_count;
-  if n > 0 then
+  begin
+    refused := false;
+    update public.tools set like_count = 9999 where slug::text = 'cupboard';
+    get diagnostics n = row_count;
+  exception when insufficient_privilege then
+    refused := true;
+    n := 0;
+  end;
+  if not refused and n > 0 then
     perform pg_temp.fail('the application wrote a counter directly by setting the flag');
   end if;
 
   perform set_config('foundit.counters', 'off', true);
 
-  update public.tools set like_count = 9999 where slug::text = 'cupboard';
-  get diagnostics n = row_count;
-  if n > 0 then
+  begin
+    refused := false;
+    update public.tools set like_count = 9999 where slug::text = 'cupboard';
+    get diagnostics n = row_count;
+  exception when insufficient_privilege then
+    refused := true;
+    n := 0;
+  end;
+  if not refused and n > 0 then
     perform pg_temp.fail('the application wrote a counter directly');
+  end if;
+
+  -- And say out loud which layer said no, so a future reader knows whether the
+  -- column grant is still doing the work.
+  if not refused then
+    raise notice 'counters: the application role was filtered by row-level security, '
+      'not refused on privilege — check 0017''s column list on public.tools';
   end if;
 end
 $$;
