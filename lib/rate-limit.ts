@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import { READER_REQUESTS_PER_READING } from './reader-model.ts';
+import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
 
 /**
  * What stops one stranger with a script from spending the whole month's budget
@@ -62,10 +63,37 @@ import { READER_REQUESTS_PER_READING } from './reader-model.ts';
  * The asymmetry is the price list: a reading is ~1,850 input tokens twice over,
  * and embedding a capped sentence is fifteen. The embedder could be ten times
  * more generous and still cost nothing; the reader could not.
+ *
+ * PHASE 5 MOVED TWO OF THESE, AND IT IS WORTH SAYING WHY RATHER THAN LEAVING
+ * THE NUMBERS TO BE NOTICED. The reranker is a third paid call and the dearest
+ * of the three per request — it carries thirty listings rather than one
+ * sentence. The ceiling did not move, so something had to: at the old reader
+ * cap of 1,200 the three together cost $9.05 a month at worst, which is not a
+ * ceiling, it is a hope.
+ *
+ * So the caps are now set TOGETHER, from one number: how many searches a day a
+ * stranger may make us pay for. One search is two reader requests, one rerank
+ * request and at most one embedding request, so
+ *
+ *   reader    2 x 320 = 640 requests/day    $2.24 a month
+ *   rerank        320 = 320 requests/day    $1.80 a month
+ *   embedding    2,000 requests/day         $0.02 a month
+ *                                   total   $4.05 a month
+ *
+ * against a $5 ceiling. The embedder keeps its generous number because it costs
+ * nothing and because it is the one call that still helps when the other two
+ * have been spent.
+ *
+ * 320 first-ever sentences a day is a small product's traffic, and that is the
+ * honest position: the caps bound the BILL, not the traffic, and a sentence
+ * somebody has typed before costs nothing against any of them. When there is
+ * real traffic the ceiling is the thing to revisit, in `lib/prices.ts`, on
+ * purpose.
  */
 export const DEFAULT_SEARCHES_PER_IP_PER_HOUR = 60;
 export const DEFAULT_EMBEDDING_CALLS_PER_DAY = 2000;
-export const DEFAULT_READER_CALLS_PER_DAY = 1200;
+export const DEFAULT_READER_CALLS_PER_DAY = 640;
+export const DEFAULT_RERANK_CALLS_PER_DAY = 320;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -94,6 +122,7 @@ export interface Limits {
   searchesPerIpPerHour: number;
   embeddingCallsPerDay: number;
   readerCallsPerDay: number;
+  rerankCallsPerDay: number;
 }
 
 /** The configured ceilings. Read at call time so a test can set them. */
@@ -110,6 +139,10 @@ export function limits(): Limits {
     readerCallsPerDay: positiveInt(
       process.env.MAX_READER_CALLS_PER_DAY,
       DEFAULT_READER_CALLS_PER_DAY,
+    ),
+    rerankCallsPerDay: positiveInt(
+      process.env.MAX_RERANK_CALLS_PER_DAY,
+      DEFAULT_RERANK_CALLS_PER_DAY,
     ),
   };
 }
@@ -267,6 +300,7 @@ declare global {
         buckets: TokenBuckets;
         embeddings: DailyCap;
         reader: DailyCap;
+        rerank: DailyCap;
         circuit: RefusalCircuit;
       }
     | undefined;
@@ -280,6 +314,7 @@ function state() {
     buckets: new TokenBuckets(),
     embeddings: new DailyCap(),
     reader: new DailyCap(),
+    rerank: new DailyCap(),
     circuit: new RefusalCircuit(),
   };
   return globalThis.__founditLimiter;
@@ -347,6 +382,18 @@ export function mayCallEmbeddings(requests = 1): boolean {
  */
 export function mayCallReader(requests = READER_REQUESTS_PER_READING): boolean {
   return state().reader.take(limits().readerCallsPerDay, requests);
+}
+
+/**
+ * The same, for the reranker. False means the Phase 4 order stands.
+ *
+ * One request per judgement, and the default says so through the constant
+ * rather than through a literal — the reader's cap was wrong for a month
+ * because the number of requests per operation was written down in one place
+ * and assumed in another.
+ */
+export function mayCallRerank(requests = RERANK_REQUESTS_PER_JUDGEMENT): boolean {
+  return state().rerank.take(limits().rerankCallsPerDay, requests);
 }
 
 /* ===========================================================================
@@ -435,7 +482,7 @@ export function refusalsTrusted(): boolean {
 }
 
 /** Today's paid-call counts. For the eval and for the admin panel in Phase 8. */
-export function paidCallsToday(): { embeddings: number; reader: number } {
+export function paidCallsToday(): { embeddings: number; reader: number; rerank: number } {
   const s = state();
-  return { embeddings: s.embeddings.count, reader: s.reader.count };
+  return { embeddings: s.embeddings.count, reader: s.reader.count, rerank: s.rerank.count };
 }

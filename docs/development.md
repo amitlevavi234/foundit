@@ -215,6 +215,35 @@ can never delete an answer.
 Two calls, together, is about $0.00028 a search against a ceiling of $0.002, and
 a cached sentence costs neither.
 
+## Judging the candidates (Phase 5)
+
+```bash
+node eval/run.mjs --record-reranks           # call the model for anything the
+                                             # fixture does not hold, and write
+                                             # the answers into it. COSTS MONEY.
+node eval/run.mjs                            # measure, using the recorded ones
+node eval/run.mjs --no-rerank                # measure the Phase 4 search
+node eval/run.mjs --rerank-n=50              # judge fifty candidates instead
+```
+
+The reranker is the third paid call and the only one whose recording lives in
+the harness rather than in a script of its own. That is deliberate: it needs the
+sentence planned, the vectors resolved and the search run before it knows what
+its candidates are, and all three of those already exist here. A second
+implementation of "plan, search, take the top N" is exactly the divergence the
+last two reviews each caught.
+
+`--record-reranks` is the one path in `eval/run.mjs` that spends anything, it is
+never on by default, and it says so on stdout. It **extends** the fixture rather
+than re-recording it, for the same reason `scripts/read.mjs` does: this model is
+not deterministic, so re-judging a sentence already in the file moves the
+headline for a reason nobody changed.
+
+The cache is keyed on the sentence **and** on a hash of the candidate slugs, so
+a run at a different `--rerank-n` is a different question and gets its own
+entries. That is what made measuring 20, 30 and 50 a matter of running it three
+times rather than of clearing anything.
+
 ## Writing problem statements (Phase 5, and reverted)
 
 ```bash
@@ -264,6 +293,8 @@ node eval/run.mjs --plan=rules      # lib/constraints.ts alone: what Phase 3 shi
 node eval/run.mjs --accept=none     # the reader, contributing no constraints
 node eval/run.mjs --no-refuse       # ignore "this is not a request for software"
 node eval/run.mjs --embed=text      # embed the sentence rather than its restatement
+node eval/run.mjs --no-rerank       # the Phase 4 search, with no judgement over it
+node eval/run.mjs --rerank-n=20     # judge twenty candidates rather than the shipped N
 ```
 
 Every one of those was run before the defaults were chosen, and the table is in

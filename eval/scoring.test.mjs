@@ -647,6 +647,29 @@ process.stdout.write('\nthe gate compares like with like\n');
     pickBaseline(rows, true).sameMode, false);
 }
 {
+  // REVERTED, added in Phase 5, and it means something different from
+  // WITHDRAWN. A withdrawn row described a code path nobody ran; a reverted row
+  // is a real measurement of a real change that was then taken out again
+  // because it did not move the number. Both belong in the table — deleting
+  // either hides what happened — and neither may be gated against, because the
+  // code that produced it is not in the tree.
+  const rows = parseBaselines([
+    '| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | What changed |',
+    '| - | - | - | - | - | - | - | - |',
+    '| 2026-09-10 | aaa1111 | 2 | no | 60 | 0.4497 | 0.4878 | first trustworthy |',
+    '| 2026-09-12 | ddd4444 | 5 | yes | 60 | 0.7800 | 0.7508 | **REVERTED** — generated statements, deleted again |',
+  ].join('\n'));
+  check('a reverted row is not a recorded baseline', rows.length, 1);
+  check('and the gate does not adopt its number either', rows[0].commit, 'aaa1111');
+  // And the word only counts where a marker belongs: at the START of the note.
+  const talking = parseBaselines([
+    '| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | What changed |',
+    '| - | - | - | - | - | - | - | - |',
+    '| 2026-09-12 | eee5555 | 5 | yes | 60 | 0.76 | 0.87 | the reranker; the row above was reverted |',
+  ].join('\n'));
+  check('a row is not reverted by talking about reversion', talking.length, 1);
+}
+{
   // baselines.md written before the column existed: fall back to the newest
   // row and say so, rather than silently switching the gate off.
   const rows = parseBaselines([

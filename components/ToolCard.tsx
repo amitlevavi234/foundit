@@ -23,10 +23,14 @@ import { ToolTile } from './ToolTile';
  * a native <details>, so it needs no JavaScript, is reachable and operable
  * from the keyboard, and announces its own expanded state.
  *
- * The designed fit meter still has its slot (`fit`), and stays empty until
- * Phase 5 calibrates a number worth putting in it: a rescaled similarity shown
- * as a percentage is forbidden by docs/build-phases.md. When the meter
- * arrives, the explanation behind "Why this?" is where the reasons will live.
+ * The designed fit meter still has its slot (`fit`), and it is still empty
+ * after Phase 5. That phase did give the band something to say — where the
+ * reranker ran, `band` is its judgement (Strong, Possible, Loose) rather than a
+ * location — but a PERCENTAGE needs a calibration, a calibration needs pairs
+ * that people have judged, and there are none. `/ranking` says so in two
+ * paragraphs and `eval/calibrate.mjs` is the command that fits the curve the
+ * day they exist. A rescaled similarity shown as a percentage stays forbidden
+ * by docs/build-phases.md.
  *
  * Constraint chips stay on the face of the card, met and unmet alike. That is
  * a Phase 5 non-negotiable and the one part of the match a person must never

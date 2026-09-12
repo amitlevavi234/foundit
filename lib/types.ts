@@ -88,6 +88,16 @@ export interface ToolResultDetail extends ToolResult {
   matchedProblem: string | null;
   /** `ts_rank_cd` of that statement. 0 means "nothing in it matched". */
   matchedStrength: number;
+  /**
+   * Every problem statement this listing carries, in its own order.
+   *
+   * It exists for the reranker (Phase 5), which is shown each candidate's own
+   * name, summary and statements and nothing else — no score, no rank, no
+   * counters. It arrives on the same round trip as the rest of the row rather
+   * than in a second query per candidate, which is the shape lib/sql.ts exists
+   * to make impossible.
+   */
+  statements: string[];
 }
 
 /**

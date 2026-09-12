@@ -49,6 +49,31 @@ export const READER_OUTPUT_PER_MTOK = 0.4;
 export const EMBEDDING_INPUT_PER_MTOK = 0.02;
 
 /**
+ * The reranker's prices.
+ *
+ * The same model as the reader — `gpt-5-nano` — so the same two numbers, named
+ * separately because they are a separate line on the bill and because the day
+ * one of the two models changes, one of these changes and the other does not.
+ */
+export const RERANK_INPUT_PER_MTOK = 0.05;
+export const RERANK_OUTPUT_PER_MTOK = 0.4;
+
+/**
+ * The statement generator's prices, for the record.
+ *
+ * `gpt-5-mini`, and it is NOT a per-search cost: the generation job runs once,
+ * by hand, over the tools that have too few statements. It is priced here so
+ * the report can say what that run cost rather than leaving it as "cents".
+ *
+ *   gpt-5-mini   input  $0.25 per 1M tokens
+ *                output $2.00 per 1M tokens
+ *
+ * Read from the same page on the same date as the two above.
+ */
+export const GENERATOR_INPUT_PER_MTOK = 0.25;
+export const GENERATOR_OUTPUT_PER_MTOK = 2.0;
+
+/**
  * The ceiling from docs/build-phases.md, in US dollars per search.
  *
  * A fifth of a cent. Everything below is measured against it, and the eval
@@ -85,14 +110,29 @@ export const READER_OUTPUT_TOKENS_PER_REQUEST = 60;
 /** A capped search sentence. Measured over the golden set: 866 tokens for 60. */
 export const EMBEDDING_TOKENS_PER_REQUEST = 15;
 
+/**
+ * What one reranker request costs, measured.
+ *
+ * Averaged over the 327 judgements recorded into db/seed/embeddings.fixture.json
+ * at the shipped candidate count of twenty — 684,735 input tokens and 66,028
+ * output — the same way the reader's two numbers are averaged over its recorded
+ * readings. The figure is dominated by the CANDIDATES rather than by the
+ * instructions, so it moves with RERANK_TOP_N and has to be re-measured when
+ * that does: at fifty it was about 2,630 input tokens rather than 2,100.
+ */
+export const RERANK_INPUT_TOKENS_PER_REQUEST = 2_100;
+export const RERANK_OUTPUT_TOKENS_PER_REQUEST = 205;
+
 export interface DailyCaps {
   embeddingCallsPerDay: number;
   readerCallsPerDay: number;
+  rerankCallsPerDay: number;
 }
 
 export interface WorstCase {
   reader: number;
   embedding: number;
+  rerank: number;
   total: number;
 }
 
@@ -109,10 +149,15 @@ export function worstCaseMonthly(caps: DailyCaps): WorstCase {
       READER_OUTPUT_TOKENS_PER_REQUEST * READER_OUTPUT_PER_MTOK) /
     1e6;
   const perEmbeddingRequest = (EMBEDDING_TOKENS_PER_REQUEST * EMBEDDING_INPUT_PER_MTOK) / 1e6;
+  const perRerankRequest =
+    (RERANK_INPUT_TOKENS_PER_REQUEST * RERANK_INPUT_PER_MTOK +
+      RERANK_OUTPUT_TOKENS_PER_REQUEST * RERANK_OUTPUT_PER_MTOK) /
+    1e6;
 
   const reader = caps.readerCallsPerDay * perReaderRequest * 30;
   const embedding = caps.embeddingCallsPerDay * perEmbeddingRequest * 30;
-  return { reader, embedding, total: reader + embedding };
+  const rerank = (caps.rerankCallsPerDay ?? 0) * perRerankRequest * 30;
+  return { reader, embedding, rerank, total: reader + embedding + rerank };
 }
 
 export interface Usage {
@@ -122,6 +167,10 @@ export interface Usage {
   readerOut: number;
   /** Embedding prompt tokens. */
   embeddingIn: number;
+  /** Reranker input tokens. Zero on a search the reranker did not run on. */
+  rerankIn?: number;
+  /** Reranker output tokens, reasoning included. */
+  rerankOut?: number;
   /** How many searches these totals are for. */
   searches: number;
 }
@@ -129,6 +178,7 @@ export interface Usage {
 export interface Cost {
   reader: number;
   embedding: number;
+  rerank: number;
   total: number;
   perSearch: number;
   perThousand: number;
@@ -140,15 +190,25 @@ export function costOf(usage: Usage): Cost {
   const reader =
     (usage.readerIn * READER_INPUT_PER_MTOK + usage.readerOut * READER_OUTPUT_PER_MTOK) / 1e6;
   const embedding = (usage.embeddingIn * EMBEDDING_INPUT_PER_MTOK) / 1e6;
-  const total = reader + embedding;
+  const rerank =
+    ((usage.rerankIn ?? 0) * RERANK_INPUT_PER_MTOK +
+      (usage.rerankOut ?? 0) * RERANK_OUTPUT_PER_MTOK) /
+    1e6;
+  const total = reader + embedding + rerank;
   const searches = usage.searches > 0 ? usage.searches : 1;
   const perSearch = total / searches;
   return {
     reader,
     embedding,
+    rerank,
     total,
     perSearch,
     perThousand: perSearch * 1000,
     withinCeiling: perSearch < MAX_COST_PER_SEARCH,
   };
+}
+
+/** What one generation run cost. Not a per-search figure; see the constants. */
+export function generationCost(tokensIn: number, tokensOut: number): number {
+  return (tokensIn * GENERATOR_INPUT_PER_MTOK + tokensOut * GENERATOR_OUTPUT_PER_MTOK) / 1e6;
 }

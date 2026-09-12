@@ -10,6 +10,12 @@ measurement starts, and the section [Vectors, and the one call that is not to
 Postgres](#vectors-and-the-one-call-that-is-not-to-postgres) says exactly what
 it is and why the measured pass is still read-only and still offline.
 
+Since Phase 5 there is a **second** such call, and it is opt-in and never on by
+default: `--record-reranks` asks the model to judge candidates it has no
+recording for and writes the answers into the fixture. A run without that flag —
+which is every run in CI, every `npm test`, and every `--baseline` — calls
+nothing and is still read-only.
+
 ## The standing rule
 
 **The golden set is never edited to make a score move.**
@@ -566,6 +572,80 @@ With no key and no fixture, the floor does not apply, the negatives leak as
 they did in Phase 3, and the run is compared against the text-only row —
 which records no negatives, so nothing is gated on them.
 
+## The reranker: `--rerank`, `--rerank-n=`, `--record-reranks`
+
+### Why this is in the harness rather than in a script
+
+Every other paid call has a recording job of its own — `scripts/embed.mjs`,
+`scripts/read.mjs` — and this one does not. It needs the sentence planned, the
+restatement's vector resolved and the search run before it knows what its
+candidates even are, and all three of those already live here. A second
+implementation of "plan, search, take the top N" is exactly the divergence the
+Phase 4 review found and the Phase 3 review found before it, in two costumes.
+
+So `--record-reranks` calls the model for any (sentence, candidate set) the
+fixture does not hold and writes the answers into it. It is **the one path in
+this harness that spends money**, it is never on by default, it prints a note
+saying so, and it is the only thing that leaves the session writable.
+
+### What it measures
+
+The reranker is **on by default from Phase 5**, because it is what a visitor
+gets, and `--no-rerank` measures the Phase 4 search. Both numbers are in
+`eval/baselines.md` and the before/after there was taken with exactly that flag.
+
+`--rerank-n=N` sets how many candidates are judged. The cache is keyed on the
+sentence AND on a hash of the candidate slugs, so a run at a different N asks a
+different question and files its answers separately — which is what made
+measuring 20, 30 and 50 three runs rather than three fixtures.
+
+The pass fetches `max(--limit, N)` rows, judges the top N, drops everything
+graded 0, and cuts what is left back to `--limit` before scoring. That is the
+application's own order of operations with the application's own two numbers.
+
+### What it does not do
+
+**It does not rerank the reference pass.** That pass is the ranker in isolation
+— the Phase 2 and 3 instrument — and its job is to say whether the instrument
+moved under the number. Reranking it would make it a second measurement of
+Phase 5 rather than a control, and would double the judgements to record,
+because a different plan produces a different candidate set and therefore a
+different key.
+
+**It decides nothing itself.** Which candidates are judged, what the cache key
+is and what the final order is are `rerankCandidates`, `candidatesHash` and
+`applyRerank` in `lib/rerank.ts`, and `app/results/page.tsx` calls the same
+three. `tests/parity.test.mjs` asserts both callers get the same answer from the
+same rows, and greps both files for a hand-rolled sort or hash.
+
+### The fixture's schema version did not move, and that is a decision
+
+`foundit-embeddings/3` still. The version exists to refuse a fixture that would
+measure a DIFFERENT SEARCH while looking like the right one — which is what a
+pre-`0007` fixture did, because it held no tool-summary vectors and half the
+vector leg came back empty with nothing saying so.
+
+A fixture with no `reranks` does not fail that way. Every run prints how many
+judgements it loaded and how many sentences have none, the reranker section
+says the Phase 4 order was measured for those, and `--baseline` then goes red
+against a row recorded with the reranker running. That is loud in three places,
+so it does not also need to be a refusal — and bumping the version would make
+every fixture anybody has on disk unreadable to `scripts/embed.mjs` for a
+reason that is already visible.
+
+### A sentence with no recorded judgement
+
+Measures the Phase 4 order, and is counted and printed:
+
+```
+  searches with a judgement     320 of 341
+  searches with none recorded   11  (these measure the Phase 4 order)
+```
+
+That second line is the one to read before believing a headline. A run where a
+tenth of the sentences had no judgement is a run measuring nine parts Phase 5
+and one part Phase 4, and the only way to see it is to print it.
+
 ## Regressions
 
 `--baseline` reads the last row of the recorded-baselines table in
@@ -614,6 +694,14 @@ both slices' aggregates, the divergence, the bucket counts, any derived-slice
 violations, and a per-query row with both readings of the sentence. Without the
 flag that field is `null`, so the shape of a default run's JSON is unchanged and
 anything already reading it keeps working.
+
+Since Phase 5 there is a top-level `rerank` object — the model, the candidate
+count, and the counts from the reranker section above — and every returned row
+carries `relevance`, which is what the judgement said about it or `null` where
+the reranker did not run. That per-row field is what `eval/calibrate.mjs` fits
+against the day there are judged pairs to fit. `rerank` is `null` on a
+`--no-rerank` run, so the two kinds of run are told apart in the file rather
+than by arithmetic on the numbers.
 
 ## If you are about to change something here
 

@@ -260,7 +260,17 @@ export const SEARCH_DETAILED_SQL = `
            t.url, t.platforms::text[] as platforms, t.languages, t.flags::text[] as flags,
            t.rating_avg, t.rating_count, t.like_count, t.save_count,
            c.slug as category_slug, c.name as category_name,
-           p.statement as matched_problem, p.strength as matched_strength
+           p.statement as matched_problem, p.strength as matched_strength,
+           -- Every statement this listing carries, for the reranker (Phase 5),
+           -- which is shown each candidate's own text and nothing else. It
+           -- rides on this round trip rather than costing one query per
+           -- candidate, which is the shape this file exists to prevent.
+           coalesce(
+             (select array_agg(tp2.statement order by tp2.sort_order, tp2.id)
+                from public.tool_problems tp2
+               where tp2.tool_id = t.id),
+             '{}'::text[]
+           ) as statements
       from r
       join public.tools t on t.id = r.tool_id
       left join public.tool_categories tc on tc.tool_id = t.id and tc.is_primary
@@ -357,6 +367,75 @@ export const STORE_QUERY_READING_SQL = `
 /** Mark a cached reading as used, for eviction. Fire and forget. */
 export const TOUCH_QUERY_READING_SQL = `
   select public.touch_query_reading(p_query => $1::text)`;
+
+/* ===========================================================================
+ * Phase 5: the reranker's cache.
+ *
+ * The same three statements as the reader's cache, over a table built to the
+ * same pattern, with one difference: the key is a PAIR. A judgement is about a
+ * sentence AND a candidate list, and serving one sentence's answer over a
+ * different list would reorder a page against a judgement of tools that are not
+ * on it. The hash is computed by lib/rerank.ts from the slugs the search
+ * returned, because the caller is the only thing that knows which candidates
+ * survived the constraint filter.
+ * ======================================================================== */
+
+/** The judgement recorded for this sentence over this candidate set, or null. */
+export const QUERY_RERANK_SQL = `
+  select public.query_rerank($1::text, $2::text) as judgement`;
+
+/**
+ * Keep the judgement, so the next person who types this sentence and gets these
+ * candidates costs nothing. Called after the response has gone out and never
+ * awaited.
+ *
+ * The sentence goes in raw and the function normalises it, so no caller can
+ * invent half a key. `public.query_reranks` has no user column, no session
+ * column and no IP column, and this statement has no argument that could carry
+ * one — the same shape, and the same reason, as `log_search_event`,
+ * `store_query_embedding` and `store_query_reading`.
+ */
+export const STORE_QUERY_RERANK_SQL = `
+  select public.store_query_rerank(
+    p_query     => $1::text,
+    p_hash      => $2::text,
+    p_judgement => $3::jsonb,
+    p_model     => $4::text
+  )`;
+
+/** Mark a cached judgement as used, for eviction. Fire and forget. */
+export const TOUCH_QUERY_RERANK_SQL = `
+  select public.touch_query_rerank(p_query => $1::text, p_hash => $2::text)`;
+
+/** Read one cached judgement. Unvalidated — the caller checks it. */
+export async function runQueryRerank(
+  exec: Executor,
+  query: string,
+  hash: string,
+): Promise<unknown> {
+  const { rows } = await exec.query<{ judgement: unknown }>(QUERY_RERANK_SQL, [query.trim(), hash]);
+  return rows[0]?.judgement ?? null;
+}
+
+/** Cache one judgement. Fire and forget, never awaited. */
+export async function runStoreQueryRerank(
+  exec: Executor,
+  query: string,
+  hash: string,
+  judgement: unknown,
+  model: string,
+): Promise<void> {
+  await exec.query(STORE_QUERY_RERANK_SQL, [query, hash, JSON.stringify(judgement), model]);
+}
+
+/** Record that a cached judgement was used. Fire and forget, same as above. */
+export async function runTouchQueryRerank(
+  exec: Executor,
+  query: string,
+  hash: string,
+): Promise<void> {
+  await exec.query(TOUCH_QUERY_RERANK_SQL, [query, hash]);
+}
 
 /**
  * Every published tool's name, and nothing else about it.
@@ -755,6 +834,7 @@ interface DetailRow {
   category_name: string | null;
   matched_problem: string | null;
   matched_strength: number | string | null;
+  statements: string[] | null;
 }
 
 /**
@@ -848,6 +928,7 @@ export async function runSearchDetailed(
       categoryName: row.category_name ?? null,
       matchedProblem: row.matched_problem,
       matchedStrength: num(row.matched_strength),
+      statements: row.statements ?? [],
     }));
 
   return { results, embeddingMissing };

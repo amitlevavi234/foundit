@@ -8,15 +8,18 @@ import {
   runHome,
   runLogSearchEvent,
   runPrefetch,
+  runQueryRerank,
   runSearch,
   runSearchDetailed,
   runStoreQueryEmbedding,
   runStoreQueryReading,
+  runStoreQueryRerank,
   runToolNames,
   runToolPage,
   runTop,
   runTouchQueryEmbedding,
   runTouchQueryReading,
+  runTouchQueryRerank,
   QueryTooLongError,
   type Prefetch,
 } from './sql';
@@ -247,6 +250,51 @@ export function storeQueryReading(query: string, reading: unknown, model: string
 /** Record that a cached reading was used, for eviction. Fire and forget. */
 export function touchQueryReading(query: string): void {
   void runTouchQueryReading(getPool(), query).catch(() => {});
+}
+
+/**
+ * The reranker's judgement for this sentence over this candidate set, or null.
+ *
+ * Null on a miss AND on a failure, which is the same thing to the caller: with
+ * no judgement the page is the Phase 4 page, which is a perfectly good page.
+ * The reason is logged and the sentence is not.
+ */
+export async function getQueryRerank(query: string, hash: string): Promise<unknown> {
+  try {
+    return await runQueryRerank(getPool(), query, hash);
+  } catch (error) {
+    console.error(
+      `the rerank cache could not be read (${
+        (error as { code?: string } | null)?.code ?? 'unknown'
+      }); the search ran as though it had missed`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Keep one judgement. Fire and forget, exactly like the other two caches: call
+ * it after the response has gone out and do not await it.
+ *
+ * `public.query_reranks` has no user column and this call has no argument that
+ * could become one.
+ */
+export function storeQueryRerank(
+  query: string,
+  hash: string,
+  judgement: unknown,
+  model: string,
+): void {
+  void runStoreQueryRerank(getPool(), query, hash, judgement, model).catch(() => {
+    // Silent for the same reason storeQueryReading is: the only thing worth
+    // logging here is the sentence, and the sentence is exactly what must never
+    // appear in a log line beside a timestamp.
+  });
+}
+
+/** Record that a cached judgement was used, for eviction. Fire and forget. */
+export function touchQueryRerank(query: string, hash: string): void {
+  void runTouchQueryRerank(getPool(), query, hash).catch(() => {});
 }
 
 /* ===========================================================================

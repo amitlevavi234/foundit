@@ -24,8 +24,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { readFileSync } from 'node:fs';
+
 import { planSearch } from '../lib/reading.ts';
 import { validateReading } from '../lib/reader-model.ts';
+import { applyRerank, candidatesHash, rerankCandidates } from '../lib/rerank.ts';
 import { readForSearch } from '../eval/reader.mjs';
 import { normalizeQuery } from '../lib/embeddings.ts';
 
@@ -160,6 +163,90 @@ test('the residual is guarded against the same string on both sides', () => {
     harness.refused.map((r) => `${r.field}:${r.reason}`),
     'the two sides must throw away the same fields for the same reasons',
   );
+});
+
+/* ===========================================================================
+ * Phase 5: the same rule, for the reranker.
+ *
+ * The reranker makes three decisions that change what a visitor sees: which
+ * candidates are judged, what the cache is keyed on, and what the final order
+ * is. Each of them is made by ONE function in lib/rerank.ts, and both callers
+ * call it — that is the whole design, and it exists because the last two
+ * reviews each caught the application and the harness deciding the same thing
+ * in two places.
+ *
+ * Two kinds of assertion, because either alone is weak. The behavioural one
+ * says the shared functions give the same answer to the two callers' differently
+ * shaped rows; the source one says neither caller has quietly grown its own
+ * copy of the decision, which is the way this defect arrived both times.
+ * ======================================================================== */
+
+test('both callers get the same candidates, key and order from the same rows', () => {
+  // The application's rows: decorated search results, carrying a dozen fields
+  // a card draws. The harness's rows: the bare seven `search_tools` returns,
+  // with the listings joined on separately.
+  const appRows = [
+    { slug: 'a', name: 'Alpha', summary: 'First.', statements: ['one', 'two'], score: 0.9, rank: 1, likeCount: 12, url: 'https://a.example' },
+    { slug: 'b', name: 'Bravo', summary: 'Second.', statements: [], score: 0.5, rank: 2, likeCount: 0, url: 'https://b.example' },
+    { slug: 'c', name: 'Charlie', summary: 'Third.', statements: ['three'], score: 0.2, rank: 3, likeCount: 3, url: 'https://c.example' },
+  ];
+  const listings = new Map([
+    ['a', { name: 'Alpha', summary: 'First.', statements: ['one', 'two'] }],
+    ['b', { name: 'Bravo', summary: 'Second.', statements: [] }],
+    ['c', { name: 'Charlie', summary: 'Third.', statements: ['three'] }],
+  ]);
+  const harnessRows = [{ slug: 'a', name: 'Alpha' }, { slug: 'b', name: 'Bravo' }, { slug: 'c', name: 'Charlie' }].map(
+    (r) => ({
+      slug: r.slug,
+      name: listings.get(r.slug).name,
+      summary: listings.get(r.slug).summary,
+      statements: listings.get(r.slug).statements,
+    }),
+  );
+
+  const appCandidates = rerankCandidates(appRows, 30);
+  const harnessCandidates = rerankCandidates(harnessRows, 30);
+  assert.deepEqual(harnessCandidates, appCandidates, 'the candidates must be identical');
+  assert.equal(
+    candidatesHash(harnessCandidates.map((c) => c.slug)),
+    candidatesHash(appCandidates.map((c) => c.slug)),
+    'and so must the cache key',
+  );
+
+  const judgement = [
+    { slug: 'a', relevance: 1 },
+    { slug: 'b', relevance: 3 },
+    { slug: 'c', relevance: 0 },
+  ];
+  assert.deepEqual(
+    applyRerank(harnessRows, judgement).map((r) => r.slug),
+    applyRerank(appRows, judgement).map((r) => r.slug),
+    'and the final order',
+  );
+});
+
+test('neither caller decides any of it for itself', () => {
+  const app = readFileSync(new URL('../app/results/page.tsx', import.meta.url), 'utf8');
+  const harness = readFileSync(new URL('../eval/run.mjs', import.meta.url), 'utf8');
+
+  for (const [where, source] of [['app/results/page.tsx', app], ['eval/run.mjs', harness]]) {
+    for (const fn of ['rerankCandidates', 'candidatesHash', 'applyRerank', 'validateJudgement']) {
+      assert.ok(
+        new RegExp(`\\b${fn}\\(`).test(source),
+        `${where} must call ${fn} rather than doing it itself`,
+      );
+    }
+    // The two ways this decision gets re-implemented by accident: sorting the
+    // results by relevance, and hashing the slugs.
+    assert.ok(
+      !/\.sort\([^)]*relevance/.test(source),
+      `${where} sorts by relevance itself; applyRerank is the one place that may`,
+    );
+    assert.ok(
+      !/createHash\(['"]sha256['"]\)/.test(source),
+      `${where} builds a cache key itself; candidatesHash is the one place that may`,
+    );
+  }
 });
 
 /* --- the two helpers, mirroring what each caller does ------------------- */

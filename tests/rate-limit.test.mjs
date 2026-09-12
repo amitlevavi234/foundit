@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_EMBEDDING_CALLS_PER_DAY,
   DEFAULT_READER_CALLS_PER_DAY,
+  DEFAULT_RERANK_CALLS_PER_DAY,
   DEFAULT_SEARCHES_PER_IP_PER_HOUR,
   DailyCap,
   RefusalCircuit,
@@ -166,6 +167,7 @@ test('the limits come from the environment, with the documented defaults', () =>
     MAX_SEARCHES_PER_IP_PER_HOUR: process.env.MAX_SEARCHES_PER_IP_PER_HOUR,
     MAX_EMBEDDING_CALLS_PER_DAY: process.env.MAX_EMBEDDING_CALLS_PER_DAY,
     MAX_READER_CALLS_PER_DAY: process.env.MAX_READER_CALLS_PER_DAY,
+    MAX_RERANK_CALLS_PER_DAY: process.env.MAX_RERANK_CALLS_PER_DAY,
   };
   try {
     for (const name of Object.keys(saved)) delete process.env[name];
@@ -173,10 +175,17 @@ test('the limits come from the environment, with the documented defaults', () =>
       searchesPerIpPerHour: DEFAULT_SEARCHES_PER_IP_PER_HOUR,
       embeddingCallsPerDay: DEFAULT_EMBEDDING_CALLS_PER_DAY,
       readerCallsPerDay: DEFAULT_READER_CALLS_PER_DAY,
+      rerankCallsPerDay: DEFAULT_RERANK_CALLS_PER_DAY,
     });
     assert.equal(DEFAULT_SEARCHES_PER_IP_PER_HOUR, 60, '.env.example says 60');
     assert.equal(DEFAULT_EMBEDDING_CALLS_PER_DAY, 2000, '.env.example says 2000');
-    assert.equal(DEFAULT_READER_CALLS_PER_DAY, 1200, '.env.example says 1200 — two requests per reading, costed to $4.19 a month');
+    // PHASE 5 MOVED THIS, and the reason is in lib/rate-limit.ts: the reranker
+    // is a third paid call and the dearest per request, the $5 ceiling did not
+    // move, so the reader's 1,200 would have put the three together at $9.05 a
+    // month. The three caps are now set together from one number — how many
+    // first-ever searches a day a stranger may make us pay for — which is 320.
+    assert.equal(DEFAULT_READER_CALLS_PER_DAY, 640, '.env.example says 640 — two requests per reading, 320 readings');
+    assert.equal(DEFAULT_RERANK_CALLS_PER_DAY, 320, '.env.example says 320 — one request per judgement');
 
     process.env.MAX_SEARCHES_PER_IP_PER_HOUR = '5';
     assert.equal(limits().searchesPerIpPerHour, 5, 'the environment wins');

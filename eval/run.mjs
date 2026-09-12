@@ -710,8 +710,16 @@ export function parseBaselines(markdown) {
     // row could withdraw ITSELF by describing what happened to an earlier one
     // ("the row above was withdrawn because…"), which would delete a perfectly
     // good baseline and quietly gate against an older number.
-    const WITHDRAWN = /^[*_\s]*withdrawn\b/i;
-    if ([cell('what changed'), cell('commit')].some((c) => WITHDRAWN.test(c))) continue;
+    // REVERTED is the second word, added in Phase 5, and it means something
+    // different from WITHDRAWN. A withdrawn row described a code path nobody
+    // ran. A reverted row is a real measurement of a real change that was then
+    // taken out again because it did not move the number — Phase 5's generated
+    // problem statements, which cost 0.0247 of nDCG and were deleted. Both
+    // belong in the table, because deleting either would hide what happened,
+    // and NEITHER may be the row a later run is gated against: the code that
+    // produced it is not in the tree.
+    const NOT_A_BASELINE = /^[*_\s]*(withdrawn|reverted)\b/i;
+    if ([cell('what changed'), cell('commit')].some((c) => NOT_A_BASELINE.test(c))) continue;
 
     rows.push({
       date: cell('date') || '(no date)',
@@ -958,6 +966,23 @@ function parseArgs(argv) {
     /** Whether `asks_for_software: false` empties the page. */
     refuse: true,
     readQuery: false,
+    /**
+     * Phase 5's reranker.
+     *
+     * ON by default, because from Phase 5 it is part of the shipped path and
+     * the headline number is what a visitor gets. `--no-rerank` measures the
+     * Phase 4 search, which is how the before/after in eval/baselines.md was
+     * taken and how it can be taken again.
+     */
+    rerank: true,
+    /** How many candidates are judged. Measured at 20, 30 and 50. */
+    rerankN: null,
+    /**
+     * Call the model for any (sentence, candidate set) the fixture does not
+     * hold, and write the answers into it. The ONE path in this harness that
+     * spends money, and it is never on by default.
+     */
+    recordReranks: false,
     help: false,
   };
   for (const arg of argv) {
@@ -974,6 +999,9 @@ function parseArgs(argv) {
     else if (arg.startsWith('--embed=')) opts.embed = arg.slice(8);
     else if (arg.startsWith('--accept=')) opts.accept = arg.slice(9);
     else if (arg === '--no-refuse') opts.refuse = false;
+    else if (arg === '--no-rerank') opts.rerank = false;
+    else if (arg === '--record-reranks') opts.recordReranks = true;
+    else if (arg.startsWith('--rerank-n=')) opts.rerankN = Number.parseInt(arg.slice(11), 10);
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg.startsWith('--limit=')) opts.limit = Number.parseInt(arg.slice(8), 10);
     else if (arg.startsWith('--timeout=')) opts.timeout = Number.parseInt(arg.slice(10), 10);
@@ -1010,6 +1038,12 @@ function parseArgs(argv) {
     if (!allowed.includes(value)) {
       return { error: `${flag} must be one of ${allowed.join(', ')}, not "${value}"`, opts };
     }
+  }
+  if (opts.rerankN !== null && (!Number.isInteger(opts.rerankN) || opts.rerankN < 1)) {
+    return { error: '--rerank-n must be a positive integer', opts };
+  }
+  if (opts.recordReranks && !opts.rerank) {
+    return { error: '--record-reranks and --no-rerank ask for opposite things', opts };
   }
   const dimensions = ['pricing', 'platforms', 'languages', 'flags'];
   opts.acceptList =
@@ -1053,6 +1087,14 @@ const USAGE = `Foundit search evaluation harness
                   (default pricing; "none" for none)
   --no-refuse     ignore the model's "this is not a request for software"
   --read-query    accepted and ignored. Both passes always run since Phase 4.
+  --no-rerank     measure the Phase 4 search: no reranker over the candidates.
+                  The reranker is ON by default from Phase 5, because it is
+                  what a visitor gets.
+  --rerank-n=N    how many candidates the reranker judges (default: the shipped
+                  RERANK_TOP_N in lib/rerank.ts). Measured at 20, 30 and 50.
+  --record-reranks  call the model for any (sentence, candidate set) the
+                  fixture does not hold, and write the answers into it. THE ONE
+                  PATH HERE THAT SPENDS MONEY. Needs a key.
 
 Exit: 0 ok, 1 usage, 2 constraint violation, 3 database, 4 regression.`;
 
@@ -1128,6 +1170,46 @@ const QUERY_READINGS_SQL = `
     from unnest($1::text[]) as t`;
 
 /**
+ * Phase 5's half of the same arrangement.
+ *
+ * Every published tool's problem statements, in the order the results screen's
+ * own statement aggregates them, so the harness hands the reranker exactly what
+ * the application hands it. One statement for the whole run rather than one per
+ * candidate per query: the catalogue does not change while a run is measuring
+ * it, and a query per candidate is the shape lib/sql.ts exists to prevent.
+ */
+const STATEMENTS_SQL = `
+  select t.slug::text as slug,
+         t.name::text as name,
+         t.summary,
+         coalesce(
+           array_agg(tp.statement order by tp.sort_order, tp.id)
+             filter (where tp.id is not null),
+           '{}'::text[]
+         ) as statements
+    from public.tools t
+    left join public.tool_problems tp on tp.tool_id = t.id
+   where t.status = 'published'
+   group by t.slug, t.name, t.summary`;
+
+/** Load recorded judgements into the cache, so a keyless run reranks for free. */
+const STORE_QUERY_RERANKS_SQL = `
+  select count(*)
+    from unnest($1::text[], $2::text[], $3::jsonb[]) as x(q, h, j),
+         lateral public.store_query_rerank(x.q, x.h, x.j, $4::text)`;
+
+/**
+ * Read one judgement back OUT of the database rather than out of the fixture.
+ *
+ * The same reasoning as the readings, and it costs one statement per query: the
+ * application reads a judgement through public.query_rerank, which is a
+ * SECURITY DEFINER function over a table foundit_app holds no grant on.
+ * Measuring from the fixture instead would leave the migration, the grants and
+ * the shape CHECK beside the measured path rather than on it.
+ */
+const QUERY_RERANK_SQL = `select public.query_rerank($1::text, $2::text) as judgement`;
+
+/**
  * Fill the query-embedding cache for every sentence this run is about to
  * search with, before the session is put into read-only mode.
  *
@@ -1168,6 +1250,15 @@ const QUERY_READINGS_SQL = `
  */
 /** The fixture format this harness reads. Bumped in 0007 with tool summaries. */
 const FIXTURE_SCHEMA = 'foundit-embeddings/3';
+
+/** The whole fixture, or an empty object. Read fresh: --record-reranks writes it. */
+function rerankFixture() {
+  try {
+    return JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
 
 function fixtureQueryVectors(embeddings) {
   try {
@@ -1431,6 +1522,55 @@ async function warmReadingCache(client, texts, redact) {
 }
 
 /**
+ * The reranker's cache, filled from the fixture before the session is sealed.
+ *
+ * The twin of `warmReadingCache`, and the same argument for it: CI has no key,
+ * and a run with no judgements measures the Phase 4 search while claiming to
+ * measure the Phase 5 one. `db/seed/embeddings.fixture.json` carries the
+ * recorded judgements; this puts them where `public.query_rerank` will find
+ * them.
+ *
+ * The fixture's key is `<normalised sentence>\n<candidates hash>`. A newline,
+ * because `public.normalize_query` collapses every whitespace run to a single
+ * space, so one cannot appear in either half.
+ */
+async function warmRerankCache(client, fixture, redact) {
+  const summary = { recorded: 0, loaded: 0, note: null };
+  const recorded = fixture?.reranks ?? {};
+  const model = fixture?.rerankModel;
+  const entries = Object.entries(recorded);
+  summary.recorded = entries.length;
+  if (entries.length === 0) return summary;
+  if (!model) {
+    summary.note = 'the fixture holds judgements but records no model, so none was loaded';
+    return summary;
+  }
+
+  const BATCH = 200;
+  try {
+    for (let i = 0; i < entries.length; i += BATCH) {
+      const batch = entries.slice(i, i + BATCH);
+      const queries = [];
+      const hashes = [];
+      const judgements = [];
+      for (const [key, judgement] of batch) {
+        const at = key.indexOf('\n');
+        if (at < 0) continue;
+        queries.push(key.slice(0, at));
+        hashes.push(key.slice(at + 1));
+        judgements.push(JSON.stringify(judgement));
+      }
+      if (queries.length === 0) continue;
+      await client.query(STORE_QUERY_RERANKS_SQL, [queries, hashes, judgements, model]);
+      summary.loaded += queries.length;
+    }
+  } catch (err) {
+    summary.note = `the rerank cache could not be written (${redact(err?.message ?? err)})`;
+  }
+  return summary;
+}
+
+/**
  * Thrown to abandon a run from inside a helper. `main` opens the pool in a
  * `try/finally`, so a helper cannot simply `return EXIT.DATABASE` — it has to
  * unwind through that `finally` and hand the exit code back at the top.
@@ -1559,8 +1699,13 @@ export function perturbedQueries(queries) {
  *
  * @throws EvalExit on any database error, after reporting it.
  */
-async function runPass(client, queries, opts, plan, redact) {
+async function runPass(client, queries, opts, plan, redact, reranker = null) {
   const entries = [];
+  // With the reranker on, the search fetches the candidate window rather than
+  // the scoring window: the judgement is made over N candidates and what
+  // survives is cut back to `opts.limit` afterwards. That is what the
+  // application does, in the same order, with the same two numbers.
+  const fetchLimit = reranker ? Math.max(opts.limit, reranker.n) : opts.limit;
 
   for (const q of queries) {
     const planned = plan(q);
@@ -1571,7 +1716,7 @@ async function runPass(client, queries, opts, plan, redact) {
       constraints.platforms ?? null,
       constraints.flags ?? null,
       constraints.languages ?? null,
-      opts.limit,
+      fetchLimit,
       // Null means "look in the cache", which is what the reference pass wants
       // and what a repeated search does. The shipped plan supplies the vector
       // of the text it chose to embed, exactly as the application does when the
@@ -1639,9 +1784,9 @@ async function runPass(client, queries, opts, plan, redact) {
       }
       throw new EvalExit(EXIT.DATABASE);
     }
-    const latencyMs = performance.now() - t0;
+    let latencyMs = performance.now() - t0;
 
-    const results = rows.map((r, i) => ({
+    let results = rows.map((r, i) => ({
       rank: i + 1,
       toolId: r.tool_id === null ? null : String(r.tool_id),
       slug: String(r.slug),
@@ -1651,6 +1796,92 @@ async function runPass(client, queries, opts, plan, redact) {
       matchSource: r.match_source,
     }));
 
+    /* --- the reranker -----------------------------------------------------
+     *
+     * Every decision here is made by lib/rerank.ts and by nothing in this file:
+     * which candidates are judged (`rerankCandidates`), what the cache key is
+     * (`candidatesHash`), and what the final order is (`applyRerank`). The
+     * application calls the same three with the same arguments, and
+     * tests/parity.test.mjs holds the two callers to it — because the last two
+     * reviews each caught the harness and the application deciding the same
+     * thing in two places, and each time it invalidated a phase's number.
+     */
+    let judged = false;
+    let judgement = null;
+    if (reranker && results.length > 0 && String(planned.text ?? '').trim() !== '') {
+      const rr = reranker.lib;
+      const candidates = rr.rerankCandidates(
+        results.map((r) => ({
+          slug: r.slug,
+          name: reranker.listings.get(r.slug)?.name ?? r.name,
+          summary: reranker.listings.get(r.slug)?.summary ?? '',
+          statements: reranker.listings.get(r.slug)?.statements ?? [],
+        })),
+        reranker.n,
+      );
+      const slugs = candidates.map((c) => c.slug);
+      const hash = rr.candidatesHash(slugs);
+      const key = `${normalizedKey(q.query)}\n${hash}`;
+
+      let raw = null;
+      const t1 = performance.now();
+      try {
+        const { rows: cached } = await client.query(QUERY_RERANK_SQL, [q.query, hash]);
+        raw = cached[0]?.judgement ?? null;
+      } catch (err) {
+        reranker.stats.note = `the rerank cache could not be read (${redact(err?.message ?? err)})`;
+      }
+      latencyMs += performance.now() - t1;
+
+      if (raw === null && reranker.record) {
+        // The one path in this harness that calls a paid API. It runs only
+        // under --record-reranks, and what it records goes into the fixture so
+        // that every later run — here or on CI — is free and identical.
+        try {
+          const fresh = await reranker.rerankOrThrow(q.query, candidates);
+          reranker.stats.recorded += 1;
+          reranker.stats.tokensIn += fresh.tokensIn;
+          reranker.stats.tokensOut += fresh.tokensOut;
+          reranker.fixture[key] = fresh.judgement;
+          raw = fresh.judgement;
+          try {
+            await client.query(STORE_QUERY_RERANKS_SQL, [
+              [normalizedKey(q.query)],
+              [hash],
+              [JSON.stringify(fresh.judgement)],
+              reranker.model,
+            ]);
+          } catch {
+            // The cache is a convenience while recording; the fixture is the
+            // record. A failure to write it changes nothing about this run.
+          }
+        } catch (err) {
+          reranker.stats.failed += 1;
+          reranker.stats.note = `the reranker failed on ${q.id} (${redact(err?.message ?? err)})`;
+        }
+      }
+
+      if (raw !== null && raw !== undefined) {
+        const checked = rr.validateJudgement(raw, slugs);
+        if ('judgement' in checked) {
+          judged = true;
+          judgement = checked.judgement;
+          results = rr.applyRerank(results, checked.judgement);
+          reranker.stats.judged += 1;
+        } else {
+          reranker.stats.refused += 1;
+          reranker.stats.note = `a recorded judgement was refused (${checked.error})`;
+        }
+      } else {
+        reranker.stats.missing += 1;
+      }
+    }
+
+    // Back to the scoring window. Above this line the rows are the candidate
+    // set; below it they are what a visitor is shown, renumbered so a rank in
+    // the report is a rank on the page.
+    results = results.slice(0, opts.limit).map((r, i) => ({ ...r, rank: i + 1 }));
+
     entries.push({
       query: q,
       searchText: planned.text,
@@ -1659,6 +1890,8 @@ async function runPass(client, queries, opts, plan, redact) {
       readerKeys: planned.keys ?? null,
       plan: planned,
       refusedAsNotSoftware: false,
+      reranked: judged,
+      judgement,
       results,
       latencyMs,
     });
@@ -1868,6 +2101,8 @@ async function main(argv) {
   /** The held-out negatives, and the golden set's mechanical variants. */
   let heldPerQuery = null;
   let perturbedPerQuery = null;
+  /** Phase 5's reranker, or null when it is off or could not be loaded. */
+  let reranker = null;
   const allViolations = [];
   const writtenViolations = [];
   let client;
@@ -1920,6 +2155,50 @@ async function main(argv) {
         process.stderr.write(`ERROR warming the reading cache.\n  ${redact(err.message)}\n`);
         return EXIT.DATABASE;
       }
+    }
+
+    // --- The reranker, when it is on ---------------------------------------
+    //
+    // Loaded here, with the readings, because everything it needs is in place
+    // by now and because a failure to load it must be a NOTE and a measured
+    // Phase 4 number rather than a crash halfway through a run.
+    if (opts.rerank) {
+      try {
+        const rr = await import('../lib/rerank.ts');
+        const { rows } = await client.query(STATEMENTS_SQL, []);
+        const listings = new Map();
+        for (const row of rows) {
+          listings.set(String(row.slug), {
+            name: String(row.name),
+            summary: row.summary ?? '',
+            statements: row.statements ?? [],
+          });
+        }
+        const warmed = await warmRerankCache(client, rerankFixture(), redact);
+        reranker = {
+          lib: rr,
+          rerankOrThrow: rr.rerankOrThrow,
+          model: rr.RERANK_MODEL,
+          n: opts.rerankN ?? rr.RERANK_TOP_N,
+          listings,
+          record: opts.recordReranks,
+          fixture: {},
+          stats: { judged: 0, missing: 0, refused: 0, recorded: 0, failed: 0, tokensIn: 0, tokensOut: 0, note: null },
+        };
+        process.stdout.write(
+          `  reranker: top ${reranker.n} candidates, ${warmed.loaded} of ${warmed.recorded} ` +
+            `recorded judgements loaded${opts.recordReranks ? ', RECORDING' : ''}.\n`,
+        );
+        if (warmed.note) process.stdout.write(`  NOTE: ${warmed.note}\n`);
+      } catch (err) {
+        process.stdout.write(
+          `  NOTE: the reranker did not load (${redact(err?.message ?? err)}); ` +
+            'this run measures the Phase 4 search.\n',
+        );
+        reranker = null;
+      }
+    } else {
+      process.stdout.write('  reranker: off (--no-rerank) — this measures the Phase 4 search.\n');
     }
 
     // --- The plans ---------------------------------------------------------
@@ -2018,35 +2297,55 @@ async function main(argv) {
     const referencePlan = (q) => withVector(AUTHORED_PLAN(q), shippedVectors);
 
     // Everything from here is measurement, and measurement does not write.
-    await client.query('set session characteristics as transaction read only');
+    //
+    // The ONE exception is --record-reranks, which is a recording session
+    // rather than a measurement: it calls the model and files what comes back
+    // in the same cache the application writes, through the same definer
+    // function, so that every later run is free. It is never on by default, it
+    // says so above, and the row it writes is as unjoinable to a person as
+    // every other row this harness touches.
+    if (!opts.recordReranks) {
+      await client.query('set session characteristics as transaction read only');
+    } else {
+      process.stdout.write(
+        '  NOTE: --record-reranks, so this session is NOT read-only and this run calls a\n' +
+          '        paid API. It is a recording, not a measurement — re-run without it.\n',
+      );
+    }
 
     // --- Run every query, sequentially ------------------------------------
     // perQuery is the HEADLINE pass — what a visitor gets. writtenPerQuery is
     // the reference: the same ranker handed the golden set's own constraints,
     // which is what Phases 2 and 3 recorded. Both are printed; the first is the
     // one the gate reads.
-    perQuery = await runPass(client, queries, opts, headlinePlan, redact);
+    perQuery = await runPass(client, queries, opts, headlinePlan, redact, reranker);
     if (opts.plan !== 'written') {
+      // The REFERENCE pass is deliberately not reranked. It is the ranker in
+      // isolation — the Phase 2 and 3 instrument — and its job is to say
+      // whether the instrument moved under the number. Reranking it would make
+      // it a second measurement of Phase 5 rather than a control, and it would
+      // double the judgements that have to be recorded, because a different
+      // plan produces a different candidate set and therefore a different key.
       writtenPerQuery = await runPass(client, queries, opts, referencePlan, redact);
     }
     // The negatives go through exactly the same search, the same plan and the
     // same fetch limit. Nothing about them is special except what counts as
     // right.
     if (negatives.length > 0) {
-      negPerQuery = await runPass(client, negatives, opts, headlinePlan, redact);
+      negPerQuery = await runPass(client, negatives, opts, headlinePlan, redact, reranker);
       if (opts.plan !== 'written') {
         writtenNegPerQuery = await runPass(client, negatives, opts, referencePlan, redact);
       }
     }
     if (heldOut.length > 0) {
-      heldPerQuery = await runPass(client, heldOut, opts, headlinePlan, redact);
+      heldPerQuery = await runPass(client, heldOut, opts, headlinePlan, redact, reranker);
     }
     // 240 more searches, and the only thing read off them is whether each came
     // back empty. Since Phase 4 they go through the headline plan, so the gate
     // asks of the reader what it already asked of the floor: does a full stop
     // decide whether this question has an answer?
     if (perturbed.length > 0) {
-      perturbedPerQuery = await runPass(client, perturbed, opts, headlinePlan, redact);
+      perturbedPerQuery = await runPass(client, perturbed, opts, headlinePlan, redact, reranker);
     }
 
     // --- One lookup for the ground truth about every returned tool --------
@@ -2176,13 +2475,46 @@ async function main(argv) {
     process.stdout.write(`${buildPerturbationReport(perturbedPerQuery)}\n`);
   }
 
+  // --- The reranker, measured ------------------------------------------------
+  if (reranker) {
+    process.stdout.write(`${buildRerankReport(reranker, [perQuery, negPerQuery, heldPerQuery, perturbedPerQuery])}\n`);
+
+    // Recording is the only thing here that writes the fixture, and it EXTENDS
+    // rather than re-records, for the same reason scripts/read.mjs does: this
+    // model is not deterministic, so re-judging a sentence already in the file
+    // moves the headline for a reason nobody changed.
+    if (opts.recordReranks && Object.keys(reranker.fixture).length > 0) {
+      const fixture = rerankFixture();
+      fixture.reranks ??= {};
+      let added = 0;
+      for (const [key, judgement] of Object.entries(reranker.fixture)) {
+        if (fixture.reranks[key] === undefined) added += 1;
+        fixture.reranks[key] = judgement;
+      }
+      fixture.rerankModel = reranker.model;
+      fixture.rerankTopN = reranker.n;
+      fixture.reranksRecorded = new Date().toISOString().slice(0, 10);
+      const prior = fixture.rerankTokens ?? { in: 0, out: 0, judgements: 0 };
+      fixture.rerankTokens = {
+        in: prior.in + reranker.stats.tokensIn,
+        out: prior.out + reranker.stats.tokensOut,
+        judgements: prior.judgements + reranker.stats.recorded,
+      };
+      await writeFile(FIXTURE_PATH, `${JSON.stringify(fixture)}\n`, 'utf8');
+      process.stdout.write(
+        `  wrote ${added} new judgement(s) into db/seed/embeddings.fixture.json ` +
+          `(${Object.keys(fixture.reranks).length} in the file).\n`,
+      );
+    }
+  }
+
   // --- What it costs ---------------------------------------------------------
   // Dynamic, like every other TypeScript import here, so a run that cannot
   // strip types still produces its numbers and says why this section is absent.
   try {
     const prices = await import('../lib/prices.ts');
     const fixture = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
-    process.stdout.write(`${buildCostReport(fixture, prices)}\n`);
+    process.stdout.write(`${buildCostReport(fixture, prices, reranker)}\n`);
   } catch (err) {
     process.stdout.write(`\nCOST: not priced (${redact(err?.message ?? err)}).\n`);
   }
@@ -2367,6 +2699,16 @@ async function main(argv) {
       slices,
       queryVectorCache: warm,
       vectorsUsed,
+      // Null when the reranker was off or could not be loaded, so a run of
+      // either kind is distinguishable in the file rather than by arithmetic.
+      rerank: reranker
+        ? {
+            model: reranker.model,
+            topN: reranker.n,
+            recording: reranker.record,
+            ...reranker.stats,
+          }
+        : null,
       constraintViolations: allViolations,
       regression,
       heldOut: heldOverall
@@ -2435,12 +2777,19 @@ async function main(argv) {
         recallAt10: e.recall,
         latencyMs: e.latencyMs,
         violations: e.violations.length,
+        reranked: Boolean(e.reranked),
         returned: e.results.map((r) => ({
           rank: r.rank,
           slug: r.slug,
           pricing: r.pricing,
           score: r.score,
           matchSource: r.matchSource,
+          // What the reranker said about this row, or null where it did not
+          // run. It is what eval/calibrate.mjs would fit against, and what a
+          // reader of this file needs to tell a Strong from a Loose.
+          relevance: e.judgement
+            ? (e.judgement.find((v) => v.slug === r.slug)?.relevance ?? null)
+            : null,
           grade: e.query.relevant[r.slug] ?? 0,
         })),
       })),
@@ -2759,6 +3108,10 @@ export function buildNegativesReport({
       String(overall.maxLeaked),
       `${overall.byKind.far?.empty ?? 0}/${overall.byKind.far?.queries ?? 0}`,
       `${overall.byKind.near?.empty ?? 0}/${overall.byKind.near?.queries ?? 0}`,
+      // eval/negatives.jsonl has no non-English kind and eval/negatives.review.jsonl
+      // has five. The column is printed for both so the two tables line up and so
+      // a report can quote far / near / non-English without arithmetic.
+      `${overall.byKind.nonen?.empty ?? 0}/${overall.byKind.nonen?.queries ?? 0}`,
     ],
   ];
   if (derived) {
@@ -2771,13 +3124,14 @@ export function buildNegativesReport({
       String(derived.maxLeaked),
       `${derived.byKind.far?.empty ?? 0}/${derived.byKind.far?.queries ?? 0}`,
       `${derived.byKind.near?.empty ?? 0}/${derived.byKind.near?.queries ?? 0}`,
+      `${derived.byKind.nonen?.empty ?? 0}/${derived.byKind.nonen?.queries ?? 0}`,
     ]);
   }
   out.push(
     renderTable(
-      ['negatives', 'n', 'empty', 'empty %', 'mean leaked', 'max', 'far empty', 'near empty'],
+      ['negatives', 'n', 'empty', 'empty %', 'mean leaked', 'max', 'far empty', 'near empty', 'non-en empty'],
       rows,
-      ['l', 'r', 'r', 'r', 'r', 'r', 'r', 'r'],
+      ['l', 'r', 'r', 'r', 'r', 'r', 'r', 'r', 'r'],
     ),
   );
   if (golden) {
@@ -2830,7 +3184,48 @@ export function buildNegativesReport({
  * @param fixture   the parsed fixture, for its recorded token totals
  * @param embedding tokens this run's own embedding calls used, if any
  */
-export function buildCostReport(fixture, prices) {
+/**
+ * What the reranker did, in counts rather than in adjectives.
+ *
+ * `judged` is the number this run's claim rests on: a run where half the
+ * sentences had no recorded judgement is a run measuring half of Phase 5 and
+ * half of Phase 4, and the only way to see that is to print it.
+ */
+export function buildRerankReport(reranker, passes) {
+  const out = [];
+  const s = reranker.stats;
+  const searched = passes
+    .filter(Boolean)
+    .flat()
+    .filter((e) => !e.refusedAsNotSoftware);
+  const reranked = searched.filter((e) => e.reranked);
+  const emptied = reranked.filter((e) => e.results.length === 0).length;
+  const dropped = reranked.reduce(
+    (a, e) => a + Math.max(0, (e.judgement?.length ?? 0) - e.results.length),
+    0,
+  );
+
+  out.push('');
+  out.push(`=== The reranker ${'='.repeat(58)}`);
+  out.push('Every candidate the search returned, read against the sentence by');
+  out.push(`${reranker.model} and graded 0 to 3. Anything graded 0 is dropped.`);
+  out.push('');
+  out.push(`  candidates judged per search  top ${reranker.n}`);
+  out.push(`  searches with a judgement     ${s.judged} of ${searched.length}`);
+  out.push(`  searches with none recorded   ${s.missing}  (these measure the Phase 4 order)`);
+  out.push(`  recorded judgements refused   ${s.refused}`);
+  if (reranker.record) {
+    out.push(`  judgements recorded this run  ${s.recorded} (${s.failed} failed)`);
+    out.push(`  tokens                        ${s.tokensIn} in, ${s.tokensOut} out`);
+  }
+  out.push(`  results dropped as "not for this"  ${dropped}`);
+  out.push(`  pages emptied by the judgement     ${emptied}`);
+  if (s.note) out.push(`  NOTE: ${s.note}`);
+  out.push('');
+  return out.join('\n');
+}
+
+export function buildCostReport(fixture, prices, reranker = null) {
   const out = [];
   const recorded = fixture?.readingTokens ?? null;
 
@@ -2854,7 +3249,14 @@ export function buildCostReport(fixture, prices) {
     ? fixture.queryTokens.in / fixture.queryTokens.sentences
     : 8;
 
-  const cost = prices.costOf({ readerIn, readerOut, embeddingIn, searches: 1 });
+  // The reranker's half, measured the same way and counted only when it ran.
+  // A search where it did not run does not cost this, and a run with it off
+  // must not report a cost that includes it.
+  const judgements = fixture?.rerankTokens?.judgements ?? 0;
+  const rerankIn = reranker && judgements ? fixture.rerankTokens.in / judgements : 0;
+  const rerankOut = reranker && judgements ? fixture.rerankTokens.out / judgements : 0;
+
+  const cost = prices.costOf({ readerIn, readerOut, embeddingIn, rerankIn, rerankOut, searches: 1 });
 
   out.push(
     renderTable(
@@ -2863,6 +3265,8 @@ export function buildCostReport(fixture, prices) {
         ['reader in', n1(readerIn), prices.READER_INPUT_PER_MTOK.toFixed(3), cost.reader.toFixed(8)],
         ['reader out', n1(readerOut), prices.READER_OUTPUT_PER_MTOK.toFixed(3), ''],
         ['embedding in', n1(embeddingIn), prices.EMBEDDING_INPUT_PER_MTOK.toFixed(3), cost.embedding.toFixed(8)],
+        ['rerank in', n1(rerankIn), prices.RERANK_INPUT_PER_MTOK.toFixed(3), cost.rerank.toFixed(8)],
+        ['rerank out', n1(rerankOut), prices.RERANK_OUTPUT_PER_MTOK.toFixed(3), ''],
       ],
       ['l', 'r', 'r', 'r'],
     ),

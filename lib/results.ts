@@ -26,8 +26,17 @@ export function resultsView(options: {
 /**
  * Where a result matched, in words. Not how well.
  *
- * There is no percentage here and there is not going to be one until Phase 5
- * calibrates against judged examples. `ToolResult.score` is a Reciprocal Rank
+ * **This is the FALLBACK band since Phase 5.** Where the reranker ran, the band
+ * on a card is its judgement — Strong, Possible or Loose, from `relevanceBand`
+ * in lib/rerank.ts — because something has read the sentence against that
+ * listing and formed a view. Where it did not run (no key, a timeout, the daily
+ * cap), the band is what is described below: a LOCATION. The results page says
+ * which of the two it is showing, and the two are worded so a reader can tell
+ * them apart.
+ *
+ * There is no percentage in either of them, and there is not going to be one
+ * until there are pairs a PERSON has judged to calibrate against — see
+ * `/ranking` and `eval/calibrate.mjs`. `ToolResult.score` is a Reciprocal Rank
  * Fusion sum — an ordering number — and rescaling it into "92% fit" would be a
  * lie the interface tells with a straight face (lib/fit.ts says the same
  * thing, which is why it has no `scoreToFit`).

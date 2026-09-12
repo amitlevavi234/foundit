@@ -201,6 +201,7 @@ test('the reader sends the sentence and six settings — nothing else', () => {
     'the reader caps its sentence before it calls',
   );
   for (const [file, expected] of [
+    ['lib/rerank.ts', /const capped = capText\(sentence, MAX_RERANK_INPUT\);/],
     ['lib/generate.ts', /capText\(statement, MAX_STATEMENT\)/],
   ]) {
     assert.match(read(join(ROOT, file)), expected, `${file} must cap what it sends`);
@@ -231,6 +232,40 @@ test('the reader sends the sentence and six settings — nothing else', () => {
       `the request body must not carry the ${forbidden}`,
     );
   }
+});
+
+test('the reranker sees four things about a candidate, and no fifth', () => {
+  // The privacy and fairness boundary of the whole feature. A rank or a score
+  // would let the model agree with the ranking it is there to second-guess; a
+  // like count, a rating or a price would let popularity or money into a
+  // judgement about fit, which is the one thing docs/product-decisions.md §6
+  // says the fit score is not about.
+  const source = read(join(ROOT, 'lib', 'rerank.ts'));
+
+  const shape = /export interface RerankCandidate \{([\s\S]*?)\n\}/.exec(source);
+  assert.ok(shape, 'RerankCandidate must be declared in lib/rerank.ts');
+  const fields = [...shape[1].matchAll(/^\s{2}(\w+)\??:/gm)].map((m) => m[1]);
+  assert.deepEqual(
+    fields.sort(),
+    ['name', 'slug', 'statements', 'summary'],
+    'a candidate is a slug, a name, a summary and its statements — nothing else',
+  );
+
+  // And the builder copies those four across rather than spreading a row, so a
+  // caller whose rows carry a score cannot leak one by passing the row through.
+  assert.doesNotMatch(
+    source,
+    /\.\.\.row/,
+    'rerankCandidates must not spread a caller’s row into what goes out',
+  );
+
+  // A slug the search did not return cannot be named, because the schema's
+  // `slug` is an enum of exactly the candidates.
+  assert.match(
+    source,
+    /slug: \{ type: 'string', enum: \[\.\.\.slugs\] \}/,
+    'the schema must make a slug outside the candidate list impossible',
+  );
 });
 
 test('the reader can name no tool, because no field can hold one', () => {

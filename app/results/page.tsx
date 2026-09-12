@@ -23,25 +23,41 @@ import {
   type ReadConstraint,
 } from '@/lib/constraints';
 import {
+  getQueryRerank,
   getToolNames,
   logSearchEvent,
   prefetchForSearch,
   searchToolsDetailed,
   storeQueryEmbedding,
   storeQueryReading,
+  storeQueryRerank,
   touchQueryEmbedding,
   touchQueryReading,
+  touchQueryRerank,
 } from '@/lib/db';
 import { embedQuery, normalizeQuery } from '@/lib/embeddings';
 import {
   allowSearch,
   mayCallEmbeddings,
   mayCallReader,
+  mayCallRerank,
   recordRefusal,
   refusalsTrusted,
 } from '@/lib/rate-limit';
 import { readSentence, validateReading, READER_MODEL } from '@/lib/reader-model';
 import { planSearch } from '@/lib/reading';
+import {
+  RERANK_MODEL,
+  RERANK_TOP_N,
+  applyRerank,
+  candidatesHash,
+  relevanceBand,
+  relevanceOf,
+  rerank,
+  rerankCandidates,
+  validateJudgement,
+  type RerankJudgement,
+} from '@/lib/rerank';
 import { clarifier, matchBand, matchedProblemOf } from '@/lib/results';
 import { MAX_QUERY_LENGTH, QueryTooLongError } from '@/lib/sql';
 import type { ToolResultDetail } from '@/lib/types';
@@ -332,6 +348,10 @@ async function Answer({
   let fromModel: ReadConstraint[] = [];
   /** The sentence is not a request for software at all. */
   let notSoftware = false;
+  /** True when the reranker ran and returned a judgement this page used. */
+  let judged = false;
+  /** That judgement, for the bands and for `had_good_match`. */
+  let relevance: RerankJudgement | null = null;
   /** Nothing was left to rank on, so there is no "search" to loosen. */
   const browseOnly = searchText === '';
   let merged = {
@@ -471,11 +491,16 @@ async function Answer({
       // Nothing is searched for a sentence that is not a request for software:
       // the page says so, and a search would only produce the nearest
       // neighbours this phase exists to stop showing.
+      //
+      // It asks for RERANK_TOP_N rows rather than the twelve the page draws,
+      // because the reranker judges the top N and what survives is what gets
+      // shown. With no reranker the first RESULT_LIMIT of them are the page,
+      // which is exactly the Phase 4 page.
       if (!notSoftware) {
         const answer = await searchToolsDetailed(
           merged.text,
           merged.filters,
-          RESULT_LIMIT,
+          Math.max(RESULT_LIMIT, RERANK_TOP_N),
           category,
           vector,
         );
@@ -484,6 +509,62 @@ async function Answer({
         usedVector = (vector !== null || !embeddingMissing) && merged.text !== '';
         mark('search');
       }
+
+      // --- 4. the reranker ----------------------------------------------
+      //
+      // A THIRD blocking round trip, and it has to be: the cache is keyed on
+      // the sentence AND the candidate list, and the candidate list does not
+      // exist until the search has run. It could not have ridden on the
+      // prefetch, and pretending otherwise would mean caching a judgement
+      // under a key that does not describe it.
+      //
+      // Everything here fails to the Phase 4 order. A miss with no key, a
+      // timeout, a non-2xx, an answer the validator refuses, a cached row that
+      // no longer validates, the daily cap already spent: each leaves `results`
+      // exactly as the search returned them and `judged` false, and the page
+      // below then makes no claim it cannot support.
+      if (!notSoftware && results.length > 0 && merged.text !== '') {
+        const candidates = rerankCandidates(results, RERANK_TOP_N);
+        const hash = candidatesHash(candidates.map((c) => c.slug));
+        const slugs = candidates.map((c) => c.slug);
+
+        const cached = await getQueryRerank(query, hash);
+        mark('rerank-cache');
+
+        // A cached judgement is validated again rather than trusted — the same
+        // rule as a cached reading. It is not more trustworthy than the model
+        // answer it came from; it is the same answer later, and the candidate
+        // list it is being applied to is the one in hand now.
+        let judgement: RerankJudgement | null = null;
+        if (cached !== null && cached !== undefined) {
+          const checked = validateJudgement(cached, slugs);
+          if ('judgement' in checked) {
+            judgement = checked.judgement;
+            after(() => touchQueryRerank(query, hash));
+          } else {
+            console.error(
+              `a cached judgement was refused (${checked.error}); the search order stands`,
+            );
+          }
+        } else if (mayCallRerank()) {
+          const fresh = await rerank(query, candidates);
+          mark('rerank-done');
+          if (fresh) {
+            judgement = fresh.judgement;
+            after(() => storeQueryRerank(query, hash, fresh.judgement, RERANK_MODEL));
+          }
+        }
+
+        if (judgement) {
+          judged = true;
+          relevance = judgement;
+          results = applyRerank(results, judgement);
+        }
+      }
+
+      // The page draws twelve. Above this line `results` is the candidate set;
+      // below it, it is the page.
+      results = results.slice(0, RESULT_LIMIT);
 
       // --- after the response has gone out ------------------------------
       // The vector is stored under the key of the text that was SEARCHED, not
@@ -527,25 +608,20 @@ async function Answer({
     // and `public.search_events` has no user column.
     after(() => {
       logSearchEvent({
-        // `had_good_match` is deliberately not passed.
+        // `had_good_match` is deliberately not passed — still, and for one more
+        // commit. The reranker above now produces the judgement the definition
+        // will be written from, but the definition is not written yet, and a
+        // column filled from something nobody has defined is the thing this
+        // comment has been protecting since Phase 2.
         //
         // db/migrations/0002_search.sql calls it a quality metric and says a
         // caller that omits it under-reports success, "which is the safe
         // direction for a quality metric to fail in". Passing
         // `results.length > 0` redefined it as "the page was not empty", which
-        // is `result_count > 0` under a name that promises more: the flagship
-        // query above returns a PDF splitter first and would have been logged
-        // as a good match. That would empty the one panel on the operator
-        // dashboard that is worth having (docs/product-decisions.md §10:
-        // searches that returned nothing good) by filling it with successes
-        // nobody measured.
-        //
-        // Nothing available here measures "good": `score` is an RRF ordering
-        // number, and `match_source` is a location — retrieval is any-of with
-        // no relevance floor, so 'both' is what a single shared word earns.
-        // The column's `false` default therefore stands, and every search
-        // reads as "not known to be good" until Phase 5 defines the word and
-        // fills this in from something judged.
+        // is `result_count > 0` under a name that promises more, and that would
+        // empty the one panel on the operator dashboard that is worth having
+        // (docs/product-decisions.md §10) by filling it with successes nobody
+        // measured.
         query,
         resultCount: results.length,
         topScore: top ? top.score : null,
@@ -606,6 +682,7 @@ async function Answer({
         dropped={dropped}
         category={category}
         loosenWouldHelp={loosenWouldHelp}
+        judged={judged}
       />
     );
   }
@@ -735,23 +812,40 @@ async function Answer({
                   // tools and "free" matches a great many more than twelve.
                   `The first ${results.length} that meet this.`
                 : `${results.length} ${results.length === 1 ? 'tool meets' : 'tools meet'} this.`
-              : floored
-                ? // Since the relevance floor a searched page is exactly as
-                  // long as the evidence, so the heading counts what cleared
-                  // it rather than implying a page of twelve. "Come close" is
-                  // the claim the floor supports — close in meaning, carrying
-                  // every word, or named what was typed — not a claim of fit.
+              : judged
+                ? // The reranker read every candidate against this sentence and
+                  // what is left is what it did not rule out. That is a stronger
+                  // claim than the floor's "close in meaning", and a weaker one
+                  // than "these fit": a Loose result is on the page and is
+                  // labelled Loose. So the heading says what happened — each one
+                  // was read — rather than asserting a grade for all of them.
                   results.length >= RESULT_LIMIT
-                  ? `The first ${results.length} that come close.`
-                  : `${results.length} ${results.length === 1 ? 'tool comes' : 'tools come'} close.`
-                : results.length >= RESULT_LIMIT
-                  ? `The first ${results.length} matches.`
-                  : `${results.length} ${results.length === 1 ? 'match' : 'matches'}.`}
+                  ? `The first ${results.length}, read against what you asked.`
+                  : `${results.length} ${results.length === 1 ? 'tool' : 'tools'}, read against what you asked.`
+                : floored
+                  ? // Since the relevance floor a searched page is exactly as
+                    // long as the evidence, so the heading counts what cleared
+                    // it rather than implying a page of twelve. "Come close" is
+                    // the claim the floor supports — close in meaning, carrying
+                    // every word, or named what was typed — not a claim of fit.
+                    results.length >= RESULT_LIMIT
+                    ? `The first ${results.length} that come close.`
+                    : `${results.length} ${results.length === 1 ? 'tool comes' : 'tools come'} close.`
+                  : results.length >= RESULT_LIMIT
+                    ? `The first ${results.length} matches.`
+                    : `${results.length} ${results.length === 1 ? 'match' : 'matches'}.`}
           </span>{' '}
           {category ? (
             <span className="muted" style={{ fontSize: 'var(--t-body-lg)' }}>
               Narrowed to {results[0]?.categoryName ?? category}.{' '}
               <Link href={href({ q: query, drop: dropped, skip: true })}>Show everything</Link>
+            </span>
+          ) : judged && results.length < RESULT_LIMIT ? (
+            // A short page is now two things working, and it says the second
+            // one: the floor dropped what was not close, and the reranker
+            // dropped what was close and still not for this.
+            <span className="muted" style={{ fontSize: 'var(--t-body-lg)' }}>
+              Everything else the search turned up was read and did not fit.
             </span>
           ) : floored && results.length < RESULT_LIMIT ? (
             // A short page is the floor working, and it says so, so that
@@ -778,6 +872,21 @@ async function Answer({
               <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
                 best rated first
               </strong>
+            </>
+          ) : judged ? (
+            /* The one line on the page that says how the order was arrived at,
+               and since Phase 5 it can say something the earlier phases could
+               not: your sentence was read against each listing. That is a claim
+               about FIT, which is what §6 asks the score to be about — so this
+               is the first time this line may use the word. What it still must
+               not say is a number: bands until there are judged pairs to
+               calibrate against, and /ranking says what that would take. */
+            <>
+              Ordered by{' '}
+              <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
+                how well each one fits
+              </strong>{' '}
+              — your sentence read against each listing, not how popular anything is
             </>
           ) : usedVector ? (
             /* "Sorted by best match" is the same claim in smaller type. The
@@ -810,7 +919,20 @@ async function Answer({
 
       <div className="results-grid">
         {results.map((result, i) => {
-          const band = matchBand(result.matchSource);
+          // Where the band comes from, and it is two different claims.
+          //
+          // Where the reranker ran, it is the judgement: Strong, Possible or
+          // Loose, from a relevance of 3, 2 or 1 — a model that was shown this
+          // sentence and this listing and nothing else. Where it did not run,
+          // it is what it has always been: a LOCATION, which of the tool's texts
+          // the words turned up in. The two say different things and the card
+          // must not pass one off as the other, so they have different words.
+          // docs/product-decisions.md §6, amended 12 September 2026.
+          const rel = relevanceOf(relevance, result.slug);
+          const band =
+            rel === 1 || rel === 2 || rel === 3
+              ? relevanceBand(rel)
+              : matchBand(result.matchSource);
           // The card's default lead-in is "Why it matches", and this is not
           // that. What comes back here is whichever of the tool's own problem
           // statements the sentence's lexemes ranked highest against — where
@@ -1008,12 +1130,15 @@ function Nothing({
   dropped,
   category = null,
   loosenWouldHelp = false,
+  judged = false,
 }: {
   query: string;
   constraints: ReadConstraint[];
   dropped: string[];
   category?: string | null;
   loosenWouldHelp?: boolean;
+  /** True when the reranker read the candidates and none of them fitted. */
+  judged?: boolean;
 }) {
   const stated = constraints.map((c) => c.label.toLowerCase());
 
@@ -1042,6 +1167,50 @@ function Nothing({
         <p style={{ margin: 0 }}>
           You narrowed this search to one part of the catalogue and nothing there matches. The
           rest of the catalogue has not been ruled out — show everything to see what does.
+        </p>
+      </EmptyState>
+    );
+  }
+
+  // The reranker read every candidate the search found and judged none of them
+  // to be for this. That is a different fact from "nothing came close", and the
+  // page says which one it is: something was found and read, and it does not
+  // answer the question. It is the state Phase 5 exists to reach — the relevance
+  // floor could only ever say "not close in meaning", which is why "a recording
+  // studio that rents by the hour" survived it (eval/baselines.md).
+  //
+  // It still does not apologise, because nothing went wrong, and it still
+  // promises nothing about the tool being added, because nobody has decided to
+  // add it. The two ways forward are the two that exist.
+  if (judged) {
+    return (
+      <EmptyState
+        title="Nothing here does what you asked."
+        loosen={(loosenWouldHelp ? constraints : []).map((c) => ({
+          label: `Drop ${c.label.toLowerCase()}`,
+          href: href({ q: query, drop: [...dropped, c.key] }),
+        }))}
+        loosenTitle="Or search again without one of your constraints"
+        actions={
+          <>
+            <Link href="/browse" className="btn btn-coral" style={{ textDecoration: 'none' }}>
+              Browse problems people solved here
+            </Link>
+            <Link href="/" className="btn btn-sm" style={{ textDecoration: 'none' }}>
+              Start a new search
+            </Link>
+          </>
+        }
+      >
+        <p style={{ margin: 0 }}>
+          The catalogue has tools in the same area as your sentence, and your sentence was read
+          against each of them. None of them does the thing you described, so this page is empty
+          rather than a list of near misses under a confident heading.
+        </p>
+        <p style={{ margin: '12px 0 0' }}>
+          Two ways forward: browse the problems people have already solved here, or describe it
+          differently in the box below — the situation rather than the tool: what you are trying to
+          get done, and what would make an answer no use to you.
         </p>
       </EmptyState>
     );
