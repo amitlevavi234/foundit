@@ -48,7 +48,18 @@ cd "$(dirname "$0")/.."
 #                                 the mistake not to make.
 #   %s, ${VAR}, %VAR%             a value the shell or printf substitutes at
 #                                 run time, which is the safe pattern.
-ALLOWED_SECRET_LITERALS='local_development_only|local_development_only_app|local_development_only_embed|local_development_only_auth|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|your[-_a-z]*|xxx+|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
+#   ..._xxxxxxxx                  a placeholder written as a run of six or more
+#                                 x's with a prefix, e.g. the
+#                                 `sb_secret_xxxxxxxx` in
+#                                 research/05-devops-and-environments.md. Six
+#                                 x's in a row is not a shape a real key has.
+#   k, secret-key-value           the two throwaway values tests/email.test.mjs
+#                                 hands the email client. They are arguments to
+#                                 a stubbed fetch that never leaves the
+#                                 process; the test asserts, among other
+#                                 things, that neither ever appears in a log
+#                                 line or an error.
+ALLOWED_SECRET_LITERALS='local_development_only|local_development_only_app|local_development_only_embed|local_development_only_auth|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|secret-key-value|k|your[-_a-z]*|xxx+|[A-Za-z_]*x{6,}|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
 
 # Files whose content is not text we can usefully scan.
 SKIP_PATH_RE='\.(pdf|png|jpg|jpeg|gif|webp|ico|woff2?|ttf|zip|gz)$'
@@ -101,6 +112,13 @@ scan "openai api key"        'sk-(proj-)?[A-Za-z0-9]{32,}'
 scan "aws access key id"     '(AKIA|ASIA)[0-9A-Z]{16}'
 scan "github token"          'gh[pousr]_[A-Za-z0-9]{36,}'
 scan "google api key"        'AIza[0-9A-Za-z_-]{35}'
+# Phase 6 added Resend and a Google OAuth client, and the Phase 6 review found
+# the scanner blind to both of their shapes: a real key pasted as a bare value,
+# with no recognised name beside it, went through. A Resend key is `re_` and 32
+# more characters; a Google client secret is `GOCSPX-` and about 28. Neither is
+# a string anybody types by accident.
+scan "resend api key"        're_[A-Za-z0-9]{20,}'
+scan "google client secret"  'GOCSPX-[A-Za-z0-9_-]{20,}'
 scan "slack token"           'xox[abposr]-[A-Za-z0-9]{8,}-[A-Za-z0-9-]{8,}'
 scan "stripe live key"       '[sr]k_live_[A-Za-z0-9]{16,}'
 scan "json web token"        'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
@@ -120,11 +138,26 @@ done < <(
 )
 
 # --- 4. A named secret assigned a value ------------------------------------
-SECRET_NAMES='BETTER_AUTH_SECRET|OPENAI_API_KEY|EMBEDDINGS_API_KEY|ANTHROPIC_API_KEY|GOOGLE_CLIENT_SECRET|POSTGRES_PASSWORD|PGPASSWORD|DB_PASSWORD|API_KEY|SECRET_KEY|PRIVATE_KEY|ACCESS_TOKEN'
+# RESEND_API_KEY is named in full, and so is every other name this project
+# actually uses, because the generic suffixes below cannot be relied on to
+# reach inside a longer name — see the anchoring note.
+SECRET_NAMES='BETTER_AUTH_SECRET|OPENAI_API_KEY|EMBEDDINGS_API_KEY|ANTHROPIC_API_KEY|GOOGLE_CLIENT_SECRET|RESEND_API_KEY|POSTGRES_PASSWORD|PGPASSWORD|DB_PASSWORD|API_KEY|SECRET_KEY|PRIVATE_KEY|ACCESS_TOKEN'
+#
+# THERE IS NO WORD-BOUNDARY ESCAPE IN FRONT OF THIS GROUP, AND THAT IS THE FIX
+# RATHER THAN AN OVERSIGHT. There used to be one, which looks like it anchors
+# the name and in practice removed the generic entries from the rule: there is
+# no word boundary between the `_` and the `A` of `RESEND_API_KEY`, because
+# both are word characters, so `\bAPI_KEY` never matched inside it. The Phase 6
+# review found a Resend key assigned to that name going through untouched.
+# Unanchored, any
+# name ENDING in one of these is flagged — `X_API_KEY`, `MY_SECRET_KEY`,
+# `ADMIN_ACCESS_TOKEN` — which is the behaviour the list was always read as
+# having. A false positive is one line in ALLOWED_SECRET_LITERALS; a missed
+# credential is a rotation and an incident.
 while IFS= read -r hit; do
   report "secret assigned a value" "$hit"
 done < <(
-  grep -nHE "\b($SECRET_NAMES)[[:space:]]*[:=][[:space:]]*[\"']?[^\"'[:space:]#\$]+" "${FILES[@]}" 2>/dev/null \
+  grep -nHE "($SECRET_NAMES)[[:space:]]*[:=][[:space:]]*[\"']?[^\"'[:space:]#\$]+" "${FILES[@]}" 2>/dev/null \
   | grep -Ev "[:=][[:space:]]*[\"']?($ALLOWED_SECRET_LITERALS)([^A-Za-z0-9_-]|$)" \
   | cut -c1-200
 )
