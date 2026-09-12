@@ -119,6 +119,52 @@ export const READER_OUTPUT_TOKENS_PER_REQUEST = 65;
 /** A capped search sentence. Measured the same way: 2,352 tokens for 164. */
 export const EMBEDDING_TOKENS_PER_REQUEST = 15;
 
+/* ===========================================================================
+ * The worker, which is the OTHER embedding caller and cost 213 times as much
+ *
+ * THE PHASE 7 REVIEW'S F4. `EMBEDDING_TOKENS_PER_REQUEST` is fifteen, it is
+ * measured, and it is right — about one capped search sentence, which is what
+ * the web process sends. Phase 7 added `scripts/embed-worker.mjs`, which sends
+ * a BATCH OF DOCUMENTS in one request, and the cost model went on pricing a
+ * request at fifteen tokens. The daily cost test passed because it modelled
+ * the wrong caller, and its own comment said so out loud: "publishing costs
+ * one embedding call per statement, which MAX_EMBEDDING_CALLS_PER_DAY already
+ * bounds — so neither appears in the worst-case arithmetic below."
+ *
+ * These are CEILINGS rather than averages, and taken from the columns rather
+ * than from a recording, because that is what a cap has to bound:
+ *
+ *   a summary    `tools_summary_check` (0001) caps it at 400 characters,
+ *                which is 100 tokens at the four-characters-a-token rule of
+ *                thumb this provider's tokeniser follows for English prose.
+ *   a statement  `tool_problems.statement` (0001) caps it at 200, so 50.
+ *
+ * A batch is priced at the SUMMARY figure throughout, because a queue drained
+ * after a burst of publishes can be all summaries and the worst case is the
+ * one that matters. `tests/rate-limit.test.mjs` computes the worker's line of
+ * the monthly worst case from these and fails if the total crosses
+ * MAX_MONTHLY_SPEND.
+ * ======================================================================== */
+
+/** A 400-character summary, at four characters to the token. */
+export const EMBEDDING_DOCUMENT_TOKENS = 100;
+/** A 200-character problem statement, the same way. */
+export const EMBEDDING_STATEMENT_TOKENS = 50;
+
+/**
+ * How many documents the worker sends in one request.
+ *
+ * Written here rather than imported from the worker for the reason this file
+ * has no imports at all: it is a leaf, and `scripts/embed-worker.mjs` is a
+ * script with a database pool in it. `tests/rate-limit.test.mjs` asserts the
+ * two copies agree, which is the arrangement the two `max_output_tokens`
+ * ceilings already use.
+ */
+export const EMBEDDINGS_WORKER_BATCH = 32;
+
+/** What one worker request costs at its ceiling: 3,200 tokens, not fifteen. */
+export const WORKER_TOKENS_PER_REQUEST = EMBEDDINGS_WORKER_BATCH * EMBEDDING_DOCUMENT_TOKENS;
+
 /**
  * What one reranker request costs, measured.
  *
@@ -169,13 +215,25 @@ export const RERANK_MAX_OUTPUT_TOKENS = 750;
 
 export interface DailyCaps {
   embeddingCallsPerDay: number;
+  /**
+   * The embedder's SECOND ceiling, in tokens — what the bill is made of.
+   *
+   * Optional so that a caller with an older shape still computes something
+   * rather than NaN; absent, the worker's line is priced from the REQUEST cap
+   * at the worker's per-request ceiling, which is the pessimistic reading and
+   * the right default for a worst case.
+   */
+  embeddingTokensPerDay?: number;
   readerCallsPerDay: number;
   rerankCallsPerDay: number;
 }
 
 export interface WorstCase {
   reader: number;
+  /** The web process: one capped sentence per request. */
   embedding: number;
+  /** scripts/embed-worker.mjs: a batch of documents per request. */
+  worker: number;
   rerank: number;
   total: number;
 }
@@ -201,6 +259,8 @@ export interface PerRequestTokens {
   rerankIn: number;
   rerankOut: number;
   embeddingIn: number;
+  /** The worker's per-request ceiling. Its whole batch, at the summary cap. */
+  workerIn?: number;
 }
 
 export const DEFAULT_PER_REQUEST: PerRequestTokens = {
@@ -209,8 +269,25 @@ export const DEFAULT_PER_REQUEST: PerRequestTokens = {
   rerankIn: RERANK_INPUT_TOKENS_PER_REQUEST,
   rerankOut: RERANK_OUTPUT_TOKENS_PER_REQUEST,
   embeddingIn: EMBEDDING_TOKENS_PER_REQUEST,
+  workerIn: WORKER_TOKENS_PER_REQUEST,
 };
 
+/**
+ * What spending every day's cap, every day, for thirty days would cost.
+ *
+ * FOUR LINES SINCE THE PHASE 7 REVIEW, and the fourth is the worker. It is
+ * priced from `embeddingTokensPerDay` — the token ceiling, which is what the
+ * worker is actually bounded by — and, where a caller does not carry one, from
+ * the request cap at the worker's per-request ceiling, which is every request
+ * of the day being a full batch of 400-character summaries. That is the
+ * pessimistic reading and it is the point: the defect was a cost model that
+ * priced this caller's request at one search sentence.
+ *
+ * The web embedder's own line is kept and is not deducted from the worker's,
+ * so the two overlap. A worst case that double-counts is conservative, and a
+ * worst case that has to apportion a shared ceiling between two callers is a
+ * worst case nobody can check.
+ */
 export function worstCaseMonthly(
   caps: DailyCaps,
   tokens: PerRequestTokens = DEFAULT_PER_REQUEST,
@@ -221,10 +298,15 @@ export function worstCaseMonthly(
   const perRerankRequest =
     (tokens.rerankIn * RERANK_INPUT_PER_MTOK + tokens.rerankOut * RERANK_OUTPUT_PER_MTOK) / 1e6;
 
+  const workerIn = tokens.workerIn ?? WORKER_TOKENS_PER_REQUEST;
+  const workerTokensPerDay =
+    caps.embeddingTokensPerDay ?? caps.embeddingCallsPerDay * workerIn;
+
   const reader = caps.readerCallsPerDay * perReaderRequest * 30;
   const embedding = caps.embeddingCallsPerDay * perEmbeddingRequest * 30;
+  const worker = workerTokensPerDay * (EMBEDDING_INPUT_PER_MTOK / 1e6) * 30;
   const rerank = (caps.rerankCallsPerDay ?? 0) * perRerankRequest * 30;
-  return { reader, embedding, rerank, total: reader + embedding + rerank };
+  return { reader, embedding, worker, rerank, total: reader + embedding + worker + rerank };
 }
 
 export interface Usage {

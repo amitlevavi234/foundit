@@ -21,7 +21,7 @@
 //                    trigger put there because something changed, embeds them,
 //                    and keeps going. Run it beside the application.
 //
-// SIX THINGS ABOUT IT ARE DELIBERATE, and the first three are 0005's.
+// SEVEN THINGS ABOUT IT ARE DELIBERATE, and the first three are 0005's.
 //
 //   1. IT CONNECTS AS foundit_embed AND REFUSES ANY OTHER ROLE BY NAME. The
 //      power to write a vector and the power to ask which vector is nearest a
@@ -40,28 +40,49 @@
 //      bundle's dependency graph. So the connection lives here, in the process
 //      that is the only thing that should have it.
 //
-//   4. A BAD ROW DOES NOT STOP THE RUN. Three kinds, and each is handled
-//      rather than thrown: a job whose row has been deleted or whose tool has
-//      been unpublished comes back with a null body and is retired; a job the
-//      provider refuses is recorded with its reason and retried twice before
-//      being parked; and a batch that fails as a whole is recorded against
-//      every job in it, so one absurd statement cannot hold the other
-//      thirty-one behind it forever.
+//   4. A BAD ROW DOES NOT STOP THE RUN, AND A BAD REQUEST DOES NOT PARK THE
+//      BATCH. Three kinds, and each is handled rather than thrown: a job whose
+//      row has been deleted or whose tool is not published comes back with a
+//      null body and is retired; a job the provider refuses BY ITSELF is
+//      recorded with its reason and retried twice before being parked; and a
+//      request that fails as a whole is retried once and then BISECTED, so the
+//      attempt is charged to the input that fails alone rather than to the
+//      thirty-one that happened to be queued beside it. A failure that
+//      survives bisection is the provider's and is charged to nobody: the jobs
+//      stay queued and the next tick tries again.
 //
-//   5. IT SPENDS AGAINST THE SAME DAILY CAP. lib/rate-limit.ts's
-//      mayCallEmbeddings is what MAX_EMBEDDING_CALLS_PER_DAY means, and this
-//      asks it before every request. The counter is per PROCESS, so this
-//      worker and the web process each hold their own — written down in
-//      docs/loop-progress.md as a known weakness rather than glossed. The
-//      vendor-side cap is the ceiling that is actually shared.
+//      The Phase 7 review is why this is not the loop it used to be. It
+//      pointed an invalid key at a batch of four and watched all four get an
+//      attempt each; three such batches and every one of them is parked, and a
+//      parked job only un-parks when its text changes again. The file's own
+//      comment claimed the opposite.
 //
-//   6. NOTHING IT PRINTS IS SENSITIVE. Job ids, counts, tokens and elapsed
+//   5. IT SPENDS AGAINST THE SAME DAILY CAPS — BOTH OF THEM. lib/rate-limit.ts
+//      holds MAX_EMBEDDING_CALLS_PER_DAY, which counts requests, and
+//      MAX_EMBEDDING_TOKENS_PER_DAY, which counts what the request carries.
+//      This asks `mayEmbedTokens` with the batch's estimated size before every
+//      request, because a request from this process holds up to
+//      EMBEDDINGS_WORKER_BATCH documents and the old `mayCallEmbeddings(1)`
+//      charged it the same as one search sentence — which the cost model then
+//      priced at fifteen tokens against a real ceiling of 3,200.
+//
+//      The counters are per PROCESS, which is why only one of these runs; see
+//      the advisory lock below.
+//
+//   6. EXACTLY ONE OF THESE RUNS, AND IT PROVES IT. A per-process counter
+//      shared between two processes is two allowances, and the review found
+//      two workers live on this machine at once, each holding its own. So the
+//      worker takes a session-level advisory lock at start-up and REFUSES TO
+//      START if another holds it. The lock dies with the connection, so a
+//      worker that is killed leaves nothing to clean up.
+//
+//   7. NOTHING IT PRINTS IS SENSITIVE. Job ids, counts, tokens and elapsed
 //      milliseconds. Never the key, never a connection string, and never the
 //      text of a statement — a maker's unpublished problem statement is not
 //      log material.
 //
 // Exit codes: 0 done or asked to stop, 1 configuration, 2 the embedding
-// provider refused everything, 3 the database.
+// provider refused everything, 3 the database, 4 another worker is running.
 // ===========================================================================
 import pg from 'pg';
 
@@ -72,9 +93,24 @@ import {
   embedTexts,
   embeddingsConfigured,
 } from '../lib/embeddings.ts';
-import { mayCallEmbeddings } from '../lib/rate-limit.ts';
+import { EMBEDDINGS_WORKER_BATCH, EMBEDDING_DOCUMENT_TOKENS } from '../lib/prices.ts';
+import { mayEmbedTokens } from '../lib/rate-limit.ts';
+import { embedBatch } from './embed-batch.mjs';
 
-const EXIT = { OK: 0, CONFIG: 1, PROVIDER: 2, DATABASE: 3 };
+const EXIT = { OK: 0, CONFIG: 1, PROVIDER: 2, DATABASE: 3, LOCKED: 4 };
+
+/**
+ * The advisory lock one worker holds for its whole life.
+ *
+ * A session-level lock rather than a transaction one, and a bare number rather
+ * than a name, because `pg_try_advisory_lock` takes a bigint and the number
+ * only has to be ours. It is released when the connection closes, including
+ * when the process is killed, so there is no stale lock to clear by hand and
+ * no lease to renew. `pg_try_advisory_lock` and not `pg_advisory_lock`: the
+ * second WAITS, and a second worker that quietly waits forever looks exactly
+ * like a second worker that is running.
+ */
+const WORKER_LOCK_KEY = 7_017_180_042;
 
 /** The role this worker runs as, and the only one it will accept. */
 const ROLE = 'foundit_embed';
@@ -90,8 +126,36 @@ const URL_VARIABLE = 'DATABASE_URL_' + 'EMBED';
  */
 const DEFAULT_INTERVAL_SECONDS = 5;
 
-/** How many jobs to take per tick. One API request holds a hundred. */
-const BATCH = Math.min(32, EMBEDDINGS_BATCH_SIZE);
+/**
+ * How many jobs to take per tick. One API request holds a hundred.
+ *
+ * The number lives in lib/prices.ts, because it is what decides what one
+ * request costs and the cost model has to be able to see it. That is the same
+ * arrangement the two `max_output_tokens` ceilings use, and it exists for the
+ * same reason: the Phase 7 review found a cost model that had no idea how big
+ * this caller's requests were.
+ */
+const BATCH = Math.min(EMBEDDINGS_WORKER_BATCH, EMBEDDINGS_BATCH_SIZE);
+
+/**
+ * What a batch is going to cost, before it is sent.
+ *
+ * Characters divided by four, which is the rule of thumb this provider's
+ * tokeniser follows for English prose, floored at the document ceiling so the
+ * estimate is never under the bill. A summary is capped at 400 characters and
+ * a statement at 200, so a full batch is at most
+ * BATCH * EMBEDDING_DOCUMENT_TOKENS.
+ */
+function estimateTokens(bodies) {
+  let total = 0;
+  for (const body of bodies) {
+    total += Math.min(
+      EMBEDDING_DOCUMENT_TOKENS,
+      Math.ceil(String(body ?? '').length / 4) + 1,
+    );
+  }
+  return Math.max(1, total);
+}
 
 const KNOWN = new Set(['--once']);
 const args = process.argv.slice(2);
@@ -177,7 +241,9 @@ const STORE_TOOL_SQL = `
 
 const pool = new pg.Pool({
   connectionString: databaseUrl,
-  max: 2,
+  // Three rather than two: one of them is checked out for the life of the
+  // process to hold the advisory lock below and is never handed back.
+  max: 3,
   min: 0,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,
@@ -211,6 +277,24 @@ function reasonOf(error) {
 }
 
 /**
+ * The three verdicts, and which of them a failure earns.
+ *
+ * The policy itself is in scripts/embed-batch.mjs, which owns no connection
+ * and no key and is handed both the provider and the spending cap — so
+ * tests/embed-worker.test.mjs can drive every branch of it with a stub that
+ * spends nothing. This is the binding.
+ */
+function embedLive(rows, model) {
+  return embedBatch(rows, {
+    model,
+    reasonOf,
+    truncationReason: 'longer than ' + MAX_DOCUMENT_INPUT + ' characters; not stored',
+    mayEmbed: (bodies) => mayEmbedTokens(estimateTokens(bodies)),
+    embed: (bodies) => embedTexts(bodies, { cap: MAX_DOCUMENT_INPUT }),
+  });
+}
+
+/**
  * One tick: take up to BATCH jobs, embed the ones with a body, store, retire.
  *
  * Returns how many jobs it retired, so the caller knows whether to poll again
@@ -235,70 +319,52 @@ async function tick(model) {
   const live = rows.filter((row) => !vanished.includes(row));
   if (live.length === 0) return { done: retired, failed, tokens: 0 };
 
-  if (!mayCallEmbeddings(1)) {
-    // The daily cap. Nothing is marked failed — the work is still work, and
+  const result = await embedLive(live, model);
+
+  if (result.capped && result.vectors.size === 0 && result.blamed.length === 0) {
+    // A daily cap. Nothing is marked failed — the work is still work, and
     // tomorrow it will be done. Said once per tick and no more.
     process.stdout.write(
-      'the daily embedding cap is spent; ' + live.length + ' job(s) left in the queue\n',
+      'the daily embedding budget is spent; ' + live.length + ' job(s) left in the queue\n',
     );
-    return { done: retired, failed, tokens: 0, capped: true };
+    return { done: retired, failed, tokens: result.tokens, capped: true };
   }
 
-  let batch;
-  try {
-    batch = await embedTexts(
-      live.map((row) => String(row.body)),
-      { cap: MAX_DOCUMENT_INPUT },
+  if (result.outage) {
+    // NOBODY IS CHARGED. The request failed as a request — the provider is not
+    // answering, or is answering with the wrong model — and the jobs are still
+    // work. The next tick tries them again.
+    process.stderr.write(
+      'the provider refused a request of ' + live.length + '; no job was charged an attempt ('
+        + (result.reason ?? 'no reason given') + ')\n',
     );
-  } catch (error) {
-    // The whole request failed. Every job in it gets the reason, which is what
-    // moves them towards being parked instead of retried forever.
-    const reason = reasonOf(error);
-    for (const row of live) {
-      await pool.query(FAILED_SQL, [row.job_id, reason]);
-      failed += 1;
-    }
-    process.stdout.write(
-      'a batch of ' + live.length + ' failed and was recorded against each job\n',
-    );
-    return { done: retired, failed, tokens: 0 };
+    return { done: retired, failed, tokens: result.tokens, outage: true };
   }
 
-  if (batch.model !== model) {
-    // Loud, and nothing is stored: the setters would refuse it anyway (0005,
-    // 0007), and a table holding vectors from two spaces is a search quietly
-    // getting worse.
-    const reason = 'provider returned model ' + batch.model + ', not ' + model;
-    for (const row of live) {
-      await pool.query(FAILED_SQL, [row.job_id, reason]);
-      failed += 1;
-    }
-    process.stderr.write(reason + '\n');
-    return { done: retired, failed, tokens: batch.tokens };
-  }
-
-  // Truncated inputs are recorded as failures rather than stored. A vector of
-  // a prefix filed under the whole statement is a search that is subtly wrong
-  // forever, which is worse than a statement with no vector at all.
-  const cut = new Set(batch.truncated);
-  for (const index of cut) {
-    await pool.query(FAILED_SQL, [
-      live[index].job_id,
-      'longer than ' + MAX_DOCUMENT_INPUT + ' characters; not stored',
-    ]);
+  // The rows that failed ON THEIR OWN, and only those.
+  for (const { row, reason } of result.blamed) {
+    await pool.query(FAILED_SQL, [row.job_id, reason]);
     failed += 1;
+  }
+  if (result.blamed.length > 0 && live.length > 1) {
+    process.stdout.write(
+      'bisected a batch of ' + live.length + ': ' + result.blamed.length
+        + ' input(s) failed alone, ' + result.vectors.size + ' embedded\n',
+    );
   }
 
   for (const kind of ['problem', 'tool']) {
     const ids = [];
     const vectors = [];
     const jobs = [];
-    live.forEach((row, index) => {
-      if (row.kind !== kind || cut.has(index)) return;
+    for (const row of live) {
+      if (row.kind !== kind) continue;
+      const vector = result.vectors.get(row.job_id);
+      if (vector === undefined) continue;
       ids.push(row.ref_id);
-      vectors.push(batch.vectors[index]);
+      vectors.push(vector);
       jobs.push(row.job_id);
-    });
+    }
     if (ids.length === 0) continue;
 
     const sql = kind === 'problem' ? STORE_PROBLEM_SQL : STORE_TOOL_SQL;
@@ -318,7 +384,51 @@ async function tick(model) {
     }
   }
 
-  return { done: retired, failed, tokens: batch.tokens };
+  return { done: retired, failed, tokens: result.tokens };
+}
+
+/* ---------------------------------------------------------------------------
+ * EXACTLY ONE WORKER.
+ *
+ * The daily caps in lib/rate-limit.ts are per process, so a second worker is a
+ * second full allowance and the bill is whatever number of workers happen to
+ * be running times the ceiling. The Phase 7 review found two live on this
+ * machine at once and costed the pair at $9.25 a month against a $5 ceiling.
+ *
+ * A session-level advisory lock is the cheapest honest answer: it needs no
+ * table, so foundit_embed keeps its "no table privilege of any kind"; it is
+ * held by a CONNECTION, so it goes away when the process does, however it
+ * does; and `pg_try_advisory_lock` answers rather than waiting, so a second
+ * worker says what is wrong and exits instead of sitting silently in a queue
+ * that looks like work.
+ *
+ * The client is checked out of the pool and never returned. That is the point:
+ * a session lock lives on a session, and handing the connection back would
+ * hand the lock back with it.
+ * ------------------------------------------------------------------------ */
+let lockHolder;
+try {
+  lockHolder = await pool.connect();
+  const { rows } = await lockHolder.query('select pg_try_advisory_lock($1::bigint) as held', [
+    WORKER_LOCK_KEY,
+  ]);
+  if (rows[0]?.held !== true) {
+    process.stderr.write(
+      'another embed-worker already holds the advisory lock on this database.\n'
+        + 'EXACTLY ONE runs at a time, because the daily embedding budget in\n'
+        + 'lib/rate-limit.ts is per process and a second worker is a second full\n'
+        + 'allowance. Stop the other one, or wait for it to finish; see\n'
+        + 'docs/development.md for how it runs on the server.\n',
+    );
+    lockHolder.release();
+    await pool.end();
+    process.exit(EXIT.LOCKED);
+  }
+} catch (error) {
+  process.stderr.write('the database would not answer: ' + reasonOf(error) + '\n');
+  if (lockHolder) lockHolder.release();
+  await pool.end();
+  process.exit(EXIT.DATABASE);
 }
 
 let model;
@@ -381,10 +491,12 @@ for (;;) {
   if (once || stopping) break;
 
   // An empty tick waits; a full one goes straight round again, so a burst of
-  // twenty listings does not take twenty intervals to clear.
+  // twenty listings does not take twenty intervals to clear. A provider that
+  // is refusing everything waits too, rather than spinning through the same
+  // batch as fast as the socket allows.
   if (result.done === 0 && result.failed === 0) {
     await sleep(intervalSeconds * 1000);
-  } else if (result.capped) {
+  } else if (result.capped || result.outage) {
     await sleep(intervalSeconds * 1000);
   }
 }
@@ -394,5 +506,8 @@ process.stdout.write(
     + ', ' + totalTokens + ' tokens, ' + Math.round((Date.now() - started) / 1000) + 's\n',
 );
 
+// The lock goes when the connection does, and the connection has to be handed
+// back before the pool will close.
+lockHolder.release();
 await pool.end();
 process.exit(totalDone === 0 && totalFailed > 0 ? EXIT.PROVIDER : EXIT.OK);

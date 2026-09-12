@@ -118,6 +118,55 @@ export const DEFAULT_READER_CALLS_PER_DAY = 240;
 export const DEFAULT_RERANK_CALLS_PER_DAY = 120;
 
 /**
+ * The embedder's SECOND cap, and the one that is about the money.
+ *
+ * **THE PHASE 7 REVIEW'S F4, AND IT IS AN ARITHMETIC DEFECT RATHER THAN A
+ * POLICY ONE.** `MAX_EMBEDDING_CALLS_PER_DAY` counts HTTP requests and
+ * `lib/prices.ts` priced a request at fifteen tokens — which is one capped
+ * search sentence, measured, and correct for the caller it was measured on.
+ * Phase 7 added a second caller. `scripts/embed-worker.mjs` sends up to
+ * `EMBEDDINGS_WORKER_BATCH` **documents** per request: a summary is capped at
+ * 400 characters by `0001` and a statement at 200, so a full batch is up to
+ * 3,200 tokens — 213 times the modelled figure — and the cost test passed
+ * because it modelled the wrong caller and said so in its own comment.
+ *
+ * A request cap cannot bound that, because the thing that varies is not the
+ * number of requests. So the embedder has two ceilings and they measure
+ * different things:
+ *
+ *   MAX_EMBEDDING_CALLS_PER_DAY   requests. Unchanged, still 2,000, still what
+ *                                 stops a retry storm.
+ *   MAX_EMBEDDING_TOKENS_PER_DAY  tokens. What the bill is actually made of,
+ *                                 charged by every caller at what it sends.
+ *
+ * 1,500,000 tokens a day is $0.90 a month at the list price in lib/prices.ts,
+ * which is what is left under `MAX_MONTHLY_SPEND` once the reader and the
+ * reranker have had their worst case. It is also about 15,000 documents a day
+ * against a catalogue of 224 listings and 504 statements, so the worker is
+ * bounded by money rather than by work. `tests/rate-limit.test.mjs` recomputes
+ * all of it and fails if the total crosses $5.
+ */
+export const DEFAULT_EMBEDDING_TOKENS_PER_DAY = 1_500_000;
+
+/**
+ * How many edits one account may make in an hour.
+ *
+ * **ALSO F4.** `allowPublish` was called only in `publishDraft`; `saveListing`
+ * and `setProblems` had no limiter at all, so one account could rewrite one
+ * listing's statements without limit and fill `public.embedding_jobs` with a
+ * row per edit. The review did it fifty times in a loop.
+ *
+ * Thirty an hour is generous for a person correcting a listing — it is one
+ * every two minutes, for an hour, on a form with eight fields — and it is
+ * nothing at all for a script. The refusal is a sentence on the page the
+ * person is already on, and the edit is not lost: they press save again after
+ * the wait. Like every bucket in this file it is per process and forgotten on
+ * a restart; the ceiling that survives one is `public.embedding_jobs_ceiling`,
+ * which is in the database.
+ */
+export const DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR = 30;
+
+/**
  * The two limits on asking for a 6-digit sign-in code, from research/09 §6.
  *
  * They defend different things and both are needed.
@@ -171,9 +220,23 @@ export const DEFAULT_CODES_PER_IP_PER_HOUR = 20;
  *
  * BOTH ARE PER PROCESS, which is the honest weakness of every bucket in this
  * file: two web processes behind a load balancer allow twice this, and a
- * restart forgives everything. `url`'s unique constraint is what stops the
- * duplicate listings that would actually be damaging, and it is in the
- * database where a restart cannot reach it.
+ * restart forgives everything. The unique index on `public.tools.url_key` is
+ * what stops the duplicate listings that would actually be damaging, and it is
+ * in the database where a restart cannot reach it.
+ *
+ * THAT SENTENCE USED TO NAME `url` AND USED TO BE FALSE. The Phase 7 review
+ * found the constraint was on the raw string, case-sensitive and unnormalised,
+ * so the same page could be listed under eight different spellings and the
+ * only ceiling that survived a restart caught none of them. `0018` put the
+ * unique on a normalised generated column; the claim is now true, and it is
+ * true because it was tested rather than because it was written down.
+ *
+ * THE PER-ADDRESS HALF IS FORGEABLE OFF-TUNNEL. `lib/visitor.ts` says so for
+ * search and docs/product-decisions.md §19 now says it for publishing: reached
+ * directly rather than through Cloudflare, one attacker mints a fresh
+ * per-address bucket per request by choosing a valid-looking IP, and what is
+ * left is the three-per-account ceiling with free accounts behind it. The
+ * arrangement that makes it unreachable is the tunnel.
  */
 export const DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY = 3;
 export const DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR = 10;
@@ -182,12 +245,26 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
 /**
- * The salt, generated once per process and never written down.
+ * The salt, generated once per PROCESS — not once per module load.
  *
  * `randomBytes` rather than a timestamp or a pid: both of those are guessable,
  * and a guessable salt is no salt.
+ *
+ * IT LIVES ON `globalThis` BESIDE THE BUCKETS, and that is the Phase 7
+ * review's F13. It was a module-level const, and in development Next replaces
+ * the module on every edit: the bucket MAP survived a recompile, because it is
+ * parked on globalThis, and the salt did not — so every key changed and every
+ * allowance was fresh anyway. `docs/loop-progress.md` said the limiter "forgets
+ * on a restart, and in development on a recompile", which was true about the
+ * conclusion and wrong about the mechanism, and the review watched a publish
+ * allowance that should have been spent come back until the pages stopped
+ * recompiling. A limiter whose reset reason is written down incorrectly is a
+ * limiter nobody can reason about.
  */
-const SALT = randomBytes(32);
+function salt(): Buffer {
+  globalThis.__founditLimiterSalt ??= randomBytes(32);
+  return globalThis.__founditLimiterSalt;
+}
 
 /** A clock, so the tests can run a week in a millisecond. */
 export interface Clock {
@@ -204,12 +281,14 @@ function positiveInt(value: string | undefined, fallback: number): number {
 export interface Limits {
   searchesPerIpPerHour: number;
   embeddingCallsPerDay: number;
+  embeddingTokensPerDay: number;
   readerCallsPerDay: number;
   rerankCallsPerDay: number;
   codesPerAddressPerHour: number;
   codesPerIpPerHour: number;
   toolsPerAccountPerDay: number;
   toolsPerAddressPerHour: number;
+  editsPerAccountPerHour: number;
 }
 
 /** The configured ceilings. Read at call time so a test can set them. */
@@ -231,6 +310,10 @@ export function limits(): Limits {
       process.env.MAX_EMBEDDING_CALLS_PER_DAY,
       DEFAULT_EMBEDDING_CALLS_PER_DAY,
     ),
+    embeddingTokensPerDay: positiveInt(
+      process.env.MAX_EMBEDDING_TOKENS_PER_DAY,
+      DEFAULT_EMBEDDING_TOKENS_PER_DAY,
+    ),
     readerCallsPerDay: positiveInt(
       process.env.MAX_READER_CALLS_PER_DAY,
       DEFAULT_READER_CALLS_PER_DAY,
@@ -246,6 +329,10 @@ export function limits(): Limits {
     toolsPerAddressPerHour: positiveInt(
       process.env.MAX_TOOLS_PER_ADDRESS_PER_HOUR,
       DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
+    ),
+    editsPerAccountPerHour: positiveInt(
+      process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR,
+      DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
     ),
   };
 }
@@ -344,6 +431,34 @@ export class TokenBuckets {
     };
   }
 
+  /**
+   * Would a token be there, WITHOUT taking one?
+   *
+   * For the one caller that has to show a refusal page before it knows whether
+   * the thing it is about to do will succeed: publishing. It refills the
+   * bucket exactly as `take` does — a bucket nobody has looked at in an hour
+   * is full whether or not anybody asks — and spends nothing.
+   *
+   * Two requests can both pass a peek and then both spend, which is the same
+   * race `allowSignInCode` accepts for its two buckets in the other direction,
+   * and it is bounded by one: the second spend finds an empty bucket. A
+   * ceiling of three that occasionally allows a fourth is a better failure
+   * than a ceiling of three that charges for publishes that never happened.
+   */
+  peek(key: string, perHour: number): { allowed: boolean; retryAfterSeconds: number } {
+    const now = this.clock.now();
+    const ratePerMs = perHour / this.windowMs;
+    const bucket = this.buckets.get(key);
+    if (!bucket) return { allowed: true, retryAfterSeconds: 0 };
+
+    const tokens = Math.min(perHour, bucket.tokens + (now - bucket.at) * ratePerMs);
+    if (tokens >= 1) return { allowed: true, retryAfterSeconds: 0 };
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((1 - tokens) / ratePerMs / 1000)),
+    };
+  }
+
   /** Drop every bucket that has refilled to full — it carries no information. */
   private sweep(now: number, ratePerMs: number, perHour: number): void {
     for (const [key, bucket] of this.buckets) {
@@ -402,6 +517,23 @@ export class DailyCap {
     return true;
   }
 
+  /**
+   * Would `requests` more fit, WITHOUT counting them?
+   *
+   * For a caller that has to ask two caps before spending either — the
+   * embedder, which is bounded by requests and by tokens. Rolls the window
+   * exactly as `take` does, so the first call of a new day is not answered
+   * from yesterday's total.
+   */
+  fits(cap: number, requests = 1): boolean {
+    const now = this.clock.now();
+    if (now - this.windowStart >= DAY_MS) {
+      this.windowStart = now;
+      this.used = 0;
+    }
+    return this.used + requests <= cap;
+  }
+
   /** How many have been counted in the current window. Tests and the report. */
   get count(): number {
     return this.used;
@@ -413,10 +545,14 @@ export class DailyCap {
  * ======================================================================== */
 
 declare global {
+  /** The limiter's salt. Beside the buckets, for the reason `salt()` gives. */
+  var __founditLimiterSalt: Buffer | undefined;
   var __founditLimiter:
     | {
         buckets: TokenBuckets;
         embeddings: DailyCap;
+        /** Tokens, not requests. What the embedding bill is actually made of. */
+        embeddingTokens: DailyCap;
         reader: DailyCap;
         rerank: DailyCap;
         circuit: RefusalCircuit;
@@ -426,6 +562,12 @@ declare global {
          * one counts per day where `buckets` counts per hour.
          */
         published: TokenBuckets;
+        /**
+         * Editing a listing. The same hourly window as `buckets`, and a
+         * separate instance only so that a sweep of one cannot discard the
+         * other — the same reasoning `published` is a second instance for.
+         */
+        edited: TokenBuckets;
         /** Whether the "the rerank budget is spent" line has been said today. */
         rerankCapAnnounced: boolean;
       }
@@ -439,10 +581,12 @@ function state() {
   globalThis.__founditLimiter ??= {
     buckets: new TokenBuckets(),
     embeddings: new DailyCap(),
+    embeddingTokens: new DailyCap(),
     reader: new DailyCap(),
     rerank: new DailyCap(),
     circuit: new RefusalCircuit(),
     published: new TokenBuckets(undefined, 50_000, DAY_MS),
+    edited: new TokenBuckets(),
     rerankCapAnnounced: false,
   };
   return globalThis.__founditLimiter;
@@ -457,7 +601,7 @@ function state() {
  * nobody does, including us after a restart.
  */
 export function visitorKey(address: string): string {
-  return createHash('sha256').update(SALT).update(address, 'utf8').digest('hex');
+  return createHash('sha256').update(salt()).update(address, 'utf8').digest('hex');
 }
 
 export interface SearchAllowance {
@@ -559,14 +703,26 @@ export interface PublishAllowance {
  * per-process salt and drops the input, so these buckets cannot become a record
  * of who published what and when.
  */
-export function allowPublish(accountId: string, address: string): PublishAllowance {
+export function allowPublish(
+  accountId: string,
+  address: string,
+  options: { peek?: boolean } = {},
+): PublishAllowance {
   const config = limits();
   const perDay = state().published;
+  const accountKey = visitorKey(`publish-account:${accountId.trim()}`);
+  const addressKey = visitorKey(`publish-address:${address.trim()}`);
 
-  const perAccount = perDay.take(
-    visitorKey(`publish-account:${accountId.trim()}`),
-    config.toolsPerAccountPerDay,
-  );
+  // A PEEK ANSWERS AND SPENDS NOTHING. `publishDraft` asks twice: once before
+  // `public.publish_tool`, so a refusal is a page rather than a failed write,
+  // and once after it has succeeded, which is when there is a listing in the
+  // catalogue to charge for. The Phase 7 review found the single call charging
+  // for publishes the database then refused — an already-published listing
+  // replayed from the Preview form cost two of three daily publishes and
+  // produced nothing.
+  const perAccount = options.peek
+    ? perDay.peek(accountKey, config.toolsPerAccountPerDay)
+    : perDay.take(accountKey, config.toolsPerAccountPerDay);
   if (!perAccount.allowed) {
     return {
       allowed: false,
@@ -575,10 +731,9 @@ export function allowPublish(accountId: string, address: string): PublishAllowan
     };
   }
 
-  const perAddress = state().buckets.take(
-    visitorKey(`publish-address:${address.trim()}`),
-    config.toolsPerAddressPerHour,
-  );
+  const perAddress = options.peek
+    ? state().buckets.peek(addressKey, config.toolsPerAddressPerHour)
+    : state().buckets.take(addressKey, config.toolsPerAddressPerHour);
   if (!perAddress.allowed) {
     return {
       allowed: false,
@@ -604,6 +759,67 @@ export function allowPublish(accountId: string, address: string): PublishAllowan
  */
 export function mayCallEmbeddings(requests = 1): boolean {
   return state().embeddings.take(limits().embeddingCallsPerDay, requests);
+}
+
+/**
+ * Is there room in today's embedding budget for a request of this SIZE?
+ *
+ * Both ceilings, requests first, and both are taken — a caller asking this is
+ * making one request that carries `tokens` tokens. All or nothing: a request
+ * that does not fit is not half made, so nothing is counted when the answer is
+ * no and a caller that is refused has spent nothing.
+ *
+ * `tokens` is an ESTIMATE, and an upper one on purpose. The provider reports
+ * what it actually billed after the fact, which is too late to decide with;
+ * `lib/prices.ts` models a document at the character ceiling its column
+ * carries, so the estimate is never under the bill.
+ *
+ * This is the function the worker calls, and F4 is why it exists:
+ * `mayCallEmbeddings(1)` once per tick charged one token of allowance for a
+ * request carrying up to thirty-two documents, and the cost model priced that
+ * request at fifteen tokens.
+ */
+export function mayEmbedTokens(tokens: number, requests = 1): boolean {
+  const wanted = Math.max(1, Math.ceil(Number.isFinite(tokens) ? tokens : 0));
+  const config = limits();
+  const s = state();
+
+  // Asked in this order: the token ceiling is the one that will refuse, so
+  // peeking it first means the request counter is not spent on a request that
+  // is then refused anyway. `fits` rolls the day the way `take` does.
+  if (!s.embeddingTokens.fits(config.embeddingTokensPerDay, wanted)) return false;
+  if (!s.embeddings.take(config.embeddingCallsPerDay, requests)) return false;
+  return s.embeddingTokens.take(config.embeddingTokensPerDay, wanted);
+}
+
+/** Today's embedding token count, for the worker's own log line and the eval. */
+export function embeddingTokensToday(): number {
+  return state().embeddingTokens.count;
+}
+
+export interface EditAllowance {
+  allowed: boolean;
+  retryAfterSeconds: number;
+}
+
+/**
+ * May this account save an edit right now?
+ *
+ * One ceiling, per account, per hour. It is not about money and it is not
+ * about the catalogue: it is about `public.embedding_jobs`, which every
+ * statement edit writes a row to, and which nothing anywhere bounded before
+ * the Phase 7 review counted fifty rows from fifty edits of one sentence.
+ *
+ * The account id is hashed with the per-process salt on the way in and the
+ * string is dropped, exactly like every other bucket here, so this cannot
+ * become a record of who edited what and when.
+ */
+export function allowEdit(accountId: string): EditAllowance {
+  const taken = state().edited.take(
+    visitorKey(`edit-account:${accountId.trim()}`),
+    limits().editsPerAccountPerHour,
+  );
+  return { allowed: taken.allowed, retryAfterSeconds: taken.retryAfterSeconds };
 }
 
 /**
@@ -751,7 +967,17 @@ export function refusalsTrusted(): boolean {
 }
 
 /** Today's paid-call counts. For the eval and for the admin panel in Phase 8. */
-export function paidCallsToday(): { embeddings: number; reader: number; rerank: number } {
+export function paidCallsToday(): {
+  embeddings: number;
+  embeddingTokens: number;
+  reader: number;
+  rerank: number;
+} {
   const s = state();
-  return { embeddings: s.embeddings.count, reader: s.reader.count, rerank: s.rerank.count };
+  return {
+    embeddings: s.embeddings.count,
+    embeddingTokens: s.embeddingTokens.count,
+    reader: s.reader.count,
+    rerank: s.rerank.count,
+  };
 }

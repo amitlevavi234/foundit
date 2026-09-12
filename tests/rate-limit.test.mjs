@@ -20,7 +20,9 @@ import { readFileSync } from 'node:fs';
 import {
   DEFAULT_CODES_PER_ADDRESS_PER_HOUR,
   DEFAULT_CODES_PER_IP_PER_HOUR,
+  DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
   DEFAULT_EMBEDDING_CALLS_PER_DAY,
+  DEFAULT_EMBEDDING_TOKENS_PER_DAY,
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_RERANK_CALLS_PER_DAY,
   DEFAULT_SEARCHES_PER_IP_PER_HOUR,
@@ -29,9 +31,12 @@ import {
   DailyCap,
   RefusalCircuit,
   TokenBuckets,
+  allowEdit,
   allowPublish,
   allowSignInCode,
   limits,
+  mayEmbedTokens,
+  paidCallsToday,
   visitorKey,
 } from '../lib/rate-limit.ts';
 import {
@@ -44,7 +49,10 @@ import {
 } from '../lib/rerank.ts';
 import {
   costOf,
+  EMBEDDING_DOCUMENT_TOKENS,
+  EMBEDDING_STATEMENT_TOKENS,
   EMBEDDING_TOKENS_PER_REQUEST,
+  EMBEDDINGS_WORKER_BATCH,
   MAX_MONTHLY_SPEND,
   READER_INPUT_TOKENS_PER_REQUEST,
   READER_MAX_OUTPUT_TOKENS,
@@ -52,6 +60,7 @@ import {
   RERANK_INPUT_TOKENS_PER_REQUEST,
   RERANK_MAX_OUTPUT_TOKENS,
   RERANK_OUTPUT_TOKENS_PER_REQUEST,
+  WORKER_TOKENS_PER_REQUEST,
   worstCaseMonthly,
 } from '../lib/prices.ts';
 
@@ -191,12 +200,14 @@ test('the limits come from the environment, with the documented defaults', () =>
   const saved = {
     MAX_SEARCHES_PER_IP_PER_HOUR: process.env.MAX_SEARCHES_PER_IP_PER_HOUR,
     MAX_EMBEDDING_CALLS_PER_DAY: process.env.MAX_EMBEDDING_CALLS_PER_DAY,
+    MAX_EMBEDDING_TOKENS_PER_DAY: process.env.MAX_EMBEDDING_TOKENS_PER_DAY,
     MAX_READER_CALLS_PER_DAY: process.env.MAX_READER_CALLS_PER_DAY,
     MAX_RERANK_CALLS_PER_DAY: process.env.MAX_RERANK_CALLS_PER_DAY,
     MAX_CODES_PER_ADDRESS_PER_HOUR: process.env.MAX_CODES_PER_ADDRESS_PER_HOUR,
     MAX_CODES_PER_IP_PER_HOUR: process.env.MAX_CODES_PER_IP_PER_HOUR,
     MAX_TOOLS_PER_ACCOUNT_PER_DAY: process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY,
     MAX_TOOLS_PER_ADDRESS_PER_HOUR: process.env.MAX_TOOLS_PER_ADDRESS_PER_HOUR,
+    MAX_EDITS_PER_ACCOUNT_PER_HOUR: process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR,
   };
   try {
     for (const name of Object.keys(saved)) delete process.env[name];
@@ -206,19 +217,32 @@ test('the limits come from the environment, with the documented defaults', () =>
     assert.deepEqual(limits(), {
       searchesPerIpPerHour: DEFAULT_SEARCHES_PER_IP_PER_HOUR,
       embeddingCallsPerDay: DEFAULT_EMBEDDING_CALLS_PER_DAY,
+      embeddingTokensPerDay: DEFAULT_EMBEDDING_TOKENS_PER_DAY,
       readerCallsPerDay: DEFAULT_READER_CALLS_PER_DAY,
       rerankCallsPerDay: DEFAULT_RERANK_CALLS_PER_DAY,
       codesPerAddressPerHour: DEFAULT_CODES_PER_ADDRESS_PER_HOUR,
       codesPerIpPerHour: DEFAULT_CODES_PER_IP_PER_HOUR,
       toolsPerAccountPerDay: DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY,
       toolsPerAddressPerHour: DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
+      editsPerAccountPerHour: DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
     });
-    // Phase 7. docs/product-decisions.md §19: neither of these is about money
-    // — publishing costs one embedding call per statement, which
-    // MAX_EMBEDDING_CALLS_PER_DAY already bounds — so neither appears in the
-    // worst-case arithmetic below. They bound what a script can do to the
-    // CATALOGUE, which is a different kind of damage and is not undone by a
-    // refund.
+    // Phase 7's review. The embedder has two ceilings now, and the second is
+    // the one that is about the money: MAX_EMBEDDING_CALLS_PER_DAY counts
+    // requests, and a request from scripts/embed-worker.mjs carries up to
+    // EMBEDDINGS_WORKER_BATCH documents.
+    assert.equal(DEFAULT_EMBEDDING_TOKENS_PER_DAY, 1_500_000, '.env.example says 1,500,000');
+    assert.equal(DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR, 30, '.env.example says 30');
+    // Phase 7. docs/product-decisions.md §19: neither of these is about money.
+    // They bound what a script can do to the CATALOGUE, which is a different
+    // kind of damage and is not undone by a refund.
+    //
+    // THIS COMMENT USED TO SAY "so neither appears in the worst-case
+    // arithmetic below", and the Phase 7 review quoted it back as the reason
+    // the cost test passed while the worker spent the embedding cap at 213
+    // times the modelled rate. What was missing was not these two limits — it
+    // was the WORKER, which is now its own line of `worstCaseMonthly` and is
+    // bounded by MAX_EMBEDDING_TOKENS_PER_DAY. A test whose comment explains
+    // why it does not check something is a test to be suspicious of.
     assert.equal(DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY, 3, '.env.example says 3');
     assert.equal(DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR, 10, '.env.example says 10');
     // Phase 6. research/09 §6: five an hour for one address protects a
@@ -307,6 +331,172 @@ test('the worst case at the default caps is under the monthly ceiling', () => {
   // worst case is not a ceiling, it is a decoration.
   assert.ok(worst.total > MAX_MONTHLY_SPEND / 100, 'the caps should be meaningful, not theatre');
   assert.ok(costOf({ readerIn: 1, readerOut: 1, embeddingIn: 1, searches: 1 }).total > 0);
+
+  // FOUR LINES, AND THE FOURTH IS THE WORKER. That is the Phase 7 review's F4:
+  // the arithmetic modelled one embedding caller at fifteen tokens a request
+  // and Phase 7 added a second that sends up to 3,200.
+  assert.ok(worst.worker > 0, 'the worker has to be IN the arithmetic, not beside it');
+  assert.equal(
+    Number((worst.reader + worst.embedding + worst.worker + worst.rerank).toFixed(10)),
+    Number(worst.total.toFixed(10)),
+    'the total is the sum of the four lines',
+  );
+});
+
+test('the worker is priced at what one of ITS requests costs', () => {
+  // THE DEFECT, PINNED. `mayCallEmbeddings(1)` once per tick charged one token
+  // of a 2,000-request-a-day allowance for a request carrying up to 32
+  // documents, and the cost model priced that request at EMBEDDING_TOKENS_PER-
+  // REQUEST — fifteen, measured, and correct for a search sentence. The review
+  // costed one worker at $3.84 a month and two at $9.25, against $5.
+  assert.equal(EMBEDDING_DOCUMENT_TOKENS, 100, 'a 400-character summary, at four chars a token');
+  assert.equal(EMBEDDING_STATEMENT_TOKENS, 50, 'a 200-character statement, the same way');
+  assert.equal(WORKER_TOKENS_PER_REQUEST, EMBEDDINGS_WORKER_BATCH * EMBEDDING_DOCUMENT_TOKENS);
+  assert.ok(
+    WORKER_TOKENS_PER_REQUEST > EMBEDDING_TOKENS_PER_REQUEST * 100,
+    'the whole point: one worker request is two orders of magnitude more than one sentence',
+  );
+
+  // lib/prices.ts keeps its own copy of the batch size, because it is a leaf
+  // with no imports. This is the one place the two copies meet — the same
+  // arrangement the two max_output_tokens ceilings use.
+  const worker = readFileSync(
+    new URL('../scripts/embed-worker.mjs', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    worker,
+    /const BATCH = Math\.min\(EMBEDDINGS_WORKER_BATCH, EMBEDDINGS_BATCH_SIZE\);/,
+    'the worker takes its batch size from lib/prices.ts, so the cost model can see it',
+  );
+
+  // THE OLD MODEL WOULD NOW FAIL, which is the assertion that says the fix is
+  // load-bearing rather than decorative: the worker priced against the REQUEST
+  // cap at its real per-request ceiling — which is what one worker with no
+  // token cap can spend — is over the ceiling on its own.
+  const unbounded = worstCaseMonthly({
+    embeddingCallsPerDay: limits().embeddingCallsPerDay,
+    readerCallsPerDay: limits().readerCallsPerDay,
+    rerankCallsPerDay: limits().rerankCallsPerDay,
+  });
+  assert.ok(
+    unbounded.total > MAX_MONTHLY_SPEND,
+    'with no token ceiling, one worker spending the request cap at its own per-request ' +
+      `ceiling costs $${unbounded.total.toFixed(2)} — that is what MAX_EMBEDDING_TOKENS_PER_DAY ` +
+      'exists to bound, and if this is under $5 the bound is no longer doing anything',
+  );
+});
+
+test('an embedding request is charged by its SIZE, and both ceilings hold', () => {
+  const saved = {
+    tokens: process.env.MAX_EMBEDDING_TOKENS_PER_DAY,
+    calls: process.env.MAX_EMBEDDING_CALLS_PER_DAY,
+  };
+  // The module-level counters are on globalThis and shared with whatever else
+  // ran first, so this asserts about the DELTA rather than about the total.
+  const before = paidCallsToday();
+  try {
+    process.env.MAX_EMBEDDING_TOKENS_PER_DAY = String(before.embeddingTokens + 1000);
+    process.env.MAX_EMBEDDING_CALLS_PER_DAY = String(before.embeddings + 100);
+
+    assert.equal(mayEmbedTokens(600), true, 'six hundred tokens fit in a thousand');
+    assert.equal(paidCallsToday().embeddingTokens, before.embeddingTokens + 600);
+    assert.equal(paidCallsToday().embeddings, before.embeddings + 1, 'and it is one request');
+
+    // 600 spent of 1,000: a batch of 500 does not fit, and being refused costs
+    // nothing — neither a token nor a request.
+    assert.equal(mayEmbedTokens(500), false, 'a batch that does not fit is not half sent');
+    assert.equal(paidCallsToday().embeddingTokens, before.embeddingTokens + 600);
+    assert.equal(
+      paidCallsToday().embeddings,
+      before.embeddings + 1,
+      'a refused request must not spend the REQUEST allowance either',
+    );
+
+    assert.equal(mayEmbedTokens(400), true, 'exactly the room left still fits');
+    assert.equal(mayEmbedTokens(1), false, 'and then nothing does');
+  } finally {
+    if (saved.tokens === undefined) delete process.env.MAX_EMBEDDING_TOKENS_PER_DAY;
+    else process.env.MAX_EMBEDDING_TOKENS_PER_DAY = saved.tokens;
+    if (saved.calls === undefined) delete process.env.MAX_EMBEDDING_CALLS_PER_DAY;
+    else process.env.MAX_EMBEDDING_CALLS_PER_DAY = saved.calls;
+  }
+});
+
+test('a daily cap can be asked whether something fits without counting it', () => {
+  const clock = fakeClock();
+  const cap = new DailyCap(clock);
+  assert.equal(cap.fits(10, 4), true);
+  assert.equal(cap.count, 0, 'a peek counts nothing');
+  assert.equal(cap.take(10, 8), true);
+  assert.equal(cap.fits(10, 4), false, 'four does not fit in the two that are left');
+  assert.equal(cap.fits(10, 2), true);
+
+  // And it rolls the day, so the first question of a new day is not answered
+  // from yesterday's total.
+  clock.advance(25 * HOUR);
+  assert.equal(cap.fits(10, 10), true, 'a new day, a new budget');
+  assert.equal(cap.count, 0, 'and asking rolled it rather than pretending');
+});
+
+test('an account may not save a listing without limit', () => {
+  // F4: `allowPublish` was called in publishDraft and nowhere else, so
+  // `saveListing` and `setProblems` had no ceiling at all and every statement
+  // edit writes a row to public.embedding_jobs. The review edited one sentence
+  // fifty times.
+  const saved = process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR;
+  try {
+    process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR = '3';
+    const who = `edit-test-${Math.random()}`;
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(allowEdit(who).allowed, true, `save ${i + 1} of 3`);
+    }
+    const refused = allowEdit(who);
+    assert.equal(refused.allowed, false, 'the fourth save in an hour is refused');
+    assert.ok(refused.retryAfterSeconds > 0, 'and it says how long to wait');
+    assert.ok(refused.retryAfterSeconds <= 60 * 60, 'which is inside the hour');
+
+    // A different account is a different bucket.
+    assert.equal(allowEdit(`${who}-other`).allowed, true, 'one person cannot lock out another');
+  } finally {
+    if (saved === undefined) delete process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR;
+    else process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR = saved;
+  }
+});
+
+test('a peeked publish allowance answers and spends nothing', () => {
+  // F7: the token was spent BEFORE public.publish_tool, so anything the
+  // database then refused — an already-published listing replayed from the
+  // Preview form, most of all — cost one of the three publishes a person gets
+  // for the day. Five replays spent two of three on no-ops and were refused on
+  // the third with an eight-hour wait.
+  const saved = process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY;
+  try {
+    process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY = '2';
+    const who = `publish-test-${Math.random()}`;
+    const where = '198.51.100.7';
+
+    // Five peeks, which is what five refused publishes now cost.
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal(
+        allowPublish(who, where, { peek: true }).allowed,
+        true,
+        `peek ${i + 1} is allowed and spends nothing`,
+      );
+    }
+    // ...and the two real publishes are still there.
+    assert.equal(allowPublish(who, where).allowed, true, 'the first publish');
+    assert.equal(allowPublish(who, where).allowed, true, 'the second publish');
+    assert.equal(allowPublish(who, where).allowed, false, 'and the third is refused');
+    assert.equal(
+      allowPublish(who, where, { peek: true }).allowed,
+      false,
+      'a peek tells the truth once the allowance is gone',
+    );
+  } finally {
+    if (saved === undefined) delete process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY;
+    else process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY = saved;
+  }
 });
 
 test('the cap arithmetic is computed from the fixture, not from a comment', () => {

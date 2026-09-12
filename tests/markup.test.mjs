@@ -528,10 +528,28 @@ test('nothing about a visitor is persisted or logged by the rate limiter', () =>
 
   // The address is hashed with a salt generated in this process and never
   // stored raw. `sha256(ip)` alone is four billion hashes to reverse.
-  assert.match(source, /const SALT = randomBytes\(32\);/, 'the salt is random and per process');
+  //
+  // THE SALT LIVES ON globalThis SINCE THE PHASE 7 REVIEW (F13). It was a
+  // module-level const, and in development Next replaces the module on every
+  // edit: the bucket map survived a recompile because it is parked on
+  // globalThis, and the salt did not — so every key changed and every
+  // allowance was fresh anyway. The review watched a publish allowance that
+  // should have been spent come back, and `docs/loop-progress.md` blamed the
+  // buckets. Both halves are asserted here, because "per process" is the
+  // property and the parking is how it is true.
   assert.match(
     source,
-    /createHash\('sha256'\)\.update\(SALT\)\.update\(address, 'utf8'\)/,
+    /globalThis\.__founditLimiterSalt \?\?= randomBytes\(32\);/,
+    'the salt is random, per process, and parked beside the buckets',
+  );
+  assert.doesNotMatch(
+    source,
+    /^const SALT = /m,
+    'a module-level salt is re-randomised on every recompile in development',
+  );
+  assert.match(
+    source,
+    /createHash\('sha256'\)\.update\(salt\(\)\)\.update\(address, 'utf8'\)/,
     'the key is a salted hash of the address',
   );
 

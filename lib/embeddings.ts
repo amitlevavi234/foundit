@@ -159,9 +159,26 @@ export interface EmbedOptions {
 
 /** Raised by `embedTexts`. Carries a short reason and never the inputs. */
 export class EmbeddingError extends Error {
-  constructor(reason: string) {
+  /**
+   * The provider's HTTP status, where there was one, and null otherwise.
+   *
+   * Carried so a caller can tell "this input is wrong" from "the provider is
+   * not answering" without matching on the message text. The Phase 7 review's
+   * F8 needs exactly that distinction: a 400 may be one input's fault and is
+   * worth bisecting a batch to find; a 401, a 429, a 5xx or a timeout is the
+   * request's fault and charging every job in the batch an attempt for it
+   * parks thirty-one good statements beside one bad one.
+   *
+   * The status and NOT the body: an error body from a model provider routinely
+   * echoes the input back, and a maker's unpublished statement is not log
+   * material.
+   */
+  readonly status: number | null;
+
+  constructor(reason: string, status: number | null = null) {
     super(reason);
     this.name = 'EmbeddingError';
+    this.status = status;
   }
 }
 
@@ -244,7 +261,7 @@ export async function embedTexts(
     if (!response.ok) {
       // The status, and not the body: an error body from a model provider
       // routinely echoes the input back.
-      throw new EmbeddingError(`HTTP ${response.status}`);
+      throw new EmbeddingError(`HTTP ${response.status}`, response.status);
     }
 
     try {
