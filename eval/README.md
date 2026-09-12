@@ -644,14 +644,41 @@ Measures the Phase 4 order, and is counted and printed:
 
 That second line is the one to read before believing a headline. A run where a
 tenth of the sentences had no judgement is a run measuring nine parts Phase 5
-and one part Phase 4, and the only way to see it is to print it.
+and one part Phase 4, and the only way to see it is to print it. Printing it is
+no longer the whole of it: the `Rerank coverage` column in `eval/baselines.md`
+gates it — see **Regressions** below.
+
+### The recordings are committed
+
+`--record=<name>` writes `eval/recordings/<name>.json`: the whole summary of one
+recording — the plan, the candidate count, every slice, both negatives files,
+the held-out files, the perturbations, the coverage, the violations, and the
+per-query rows. It is the one directory under `eval/` that is NOT git-ignored.
+
+The reason is a review finding. "The middle of five live recordings" is the
+procedure this project uses for anything a model decides, and it was being
+reported from notes — five numbers in a sentence, with nothing anybody could
+open. Five recordings nobody can open are not five recordings. Every number
+quoted in `eval/baselines.md` for a model-dependent run now names the file it
+came from, and the files are small (about 13 KB each) and hold no sentence
+text that is not already in the repository.
+
+```
+node --env-file=.env.local eval/run.mjs --record-reranks --record=n20-1
+```
+
+A recording is a measurement, not a fixture: nothing reads these files back.
+The fixture is still `db/seed/embeddings.fixture.json`, and the recording that
+was frozen into it is named in the baselines row.
 
 ## Regressions
 
 `--baseline` reads the last row of the recorded-baselines table in
 `eval/baselines.md` that has numbers in it and compares nDCG@10 against it.
 
-**Two more gates read the same row**, both added with the relevance floor:
+**Three more gates read the same row.** The first two came with the relevance
+floor; the third came with the Phase 5 review, which pointed out that a run can
+lose its judgements and still report a confident number:
 
 - **Zero-result.** The run may not have more golden queries come back empty
   than the row's `Zero-result` column records. A floor that empties a golden
@@ -663,9 +690,20 @@ and one part Phase 4, and the only way to see it is to print it.
   column. A rate, so adding negatives later does not trip it by arithmetic.
   If the row records negatives and none were run, that FAILS — a gate that
   switches itself off when its input file goes missing is not a gate.
+- **Rerank coverage.** The share of searches that had a judgement may not fall
+  more than **five percentage points** below the row's `Rerank coverage`
+  column. A sentence with no judgement measures the Phase 4 order, so a build
+  that has lost half its recorded judgements reports a number somewhere between
+  the two phases with a green gate over it — which is exactly what the two
+  gates above would have let through. Five points rather than zero because a
+  sentence added to an eval file legitimately has none until somebody records
+  one; losing a twentieth of them is a different thing and it fails. A run at
+  `--rerank-n=` something other than the recorded row's N has no matching
+  judgements at all and fails here, which is the intended way to notice that
+  the fixture and the flag disagree.
 
-Both are skipped for a row that leaves the column blank, which is every row
-recorded before the floor.
+All three are skipped for a row that leaves the column blank, which is every row
+recorded before each was added.
 
 **Tolerance: 0.005 absolute** — half a point of nDCG, inclusive at the boundary
 (a drop *of* 0.005 passes; a drop *past* it does not). The harness is

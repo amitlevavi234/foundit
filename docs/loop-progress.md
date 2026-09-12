@@ -882,6 +882,12 @@ Reproduced with **no API key at all** on a database whose three caches were
 emptied first: 393 query vectors and 329 judgements loaded from
 `db/seed/embeddings.fixture.json`, 0 requests made, 0.8605 to four decimals.
 
+**Re-recorded after the review below, and the headline moved**: the fixture now
+holds a different recording of the same code, and the row it is gated against is
+0.8707 with 20 of 30 negatives and 19 of 25 held-out. The numbers in this table
+are what that day's recording measured; the numbers in "Phase 5, re-measured"
+are what three recordings measure, with the files.
+
 ### A: the statements were generated, measured, and deleted
 
 204 published tools carried fewer than four problem statements. `gpt-5-mini`
@@ -1041,12 +1047,247 @@ records "nobody looked".
   so the three caps are now set together from one number: 320 first-ever
   searches a day. That is a small product's traffic, and the thing to revisit
   when there is real traffic is `MAX_MONTHLY_SPEND`, on purpose.
+  **Corrected by the review below: 240 and 120, which is 120 first-ever
+  searches a day.** The arithmetic behind 320 used AVERAGE output tokens, and a
+  cap bounds the bill rather than the average.
 - **The generated statements are kept but unloaded**, so
   `db/seed/generated_statements.sql` and 363 fixture entries are dead weight
   until somebody decides otherwise. Keeping them is what makes the −0.0247
   reproducible; it is still 363 rows of SQL nobody runs.
+  **Corrected by the review below: the 363 fixture entries are pruned.** They
+  were inflating the fixture and the cost arithmetic that reads it, for rows no
+  search can reach. Reproducing the −0.0247 now needs a key for
+  `scripts/embed.mjs`, and the seed file's header says so.
 - **Every number here is from this laptop**, against Docker through WSL2. The
   server is the gate, at deploy.
+
+## Phase 5, re-measured: what the adversarial review found
+
+The verdict was that **the reranker ships and the number does not**, plus two
+write paths that had to close before Phase 6 hands listings to their owners.
+Fourteen findings. What held is worth saying first, because it is the part that
+took the design work: a constraint cannot be bypassed, a tool cannot be
+invented, no model-authored text reaches the page or the embedder, the
+validator refused all sixteen malformed shapes, the timeout covers the body,
+one judgement is one request, the cache cannot be joined to a person, the
+keyless baseline reproduces, deliverable A's reversion is complete, and on
+fifteen blind answerable sentences in five languages the expected tool was
+rank 1 fifteen times out of fifteen.
+
+### The two write paths, closed
+
+**A statement could be written with a forged provenance.** `0010` gave
+`tool_problems.source`, `generated_model` and `verified_model` their meaning in
+a CHECK and then left `foundit_app` the table-wide INSERT and UPDATE it has held
+since `0001`. Nothing in the application writes them today, so the guarantee was
+real as an observation about the code and worthless as a guarantee: Phase 6 is
+where a person gets a form. `0011` revokes the table-wide grants and grants back
+an explicit column list — PostgreSQL cannot revoke one column from a table-wide
+grant, so the whole grant goes and a narrower one replaces it.
+
+**And the same audit found a second one that nobody had noticed**:
+`tool_problems.embedding`. `0005` made `store_statement_embedding` the only door
+to it and granted that door to `foundit_embed` alone, which is the oracle half
+of the argument — and left `foundit_app` able to UPDATE the column directly.
+A vector nobody can read back is not a vector nobody can poison: writing a
+chosen one moves a tool up every search that resembles it. It is in the same
+column list, and `db/test/rerank_test.sql` §12 now proves all four refusals
+behaviourally — the role tries the write and is refused — rather than by reading
+`information_schema`.
+
+`0010` also described the provenance guarantee as "a property of the TABLE".
+It was not, and the comment is corrected in `0011` rather than in `0010`, which
+has been applied.
+
+### The CHECK that did not check
+
+`query_reranks_shape` was written to say "an array of `{slug, relevance}`, and
+nothing else". It accepted `[{}]`, it accepted extra keys, and — after `0011`
+fixed both — it accepted `relevance: "high"`. The third one is the interesting
+one. A jsonpath comparison between a string and a number is neither true nor
+false but **unknown**, so `@.relevance > 3` does not refuse `"high"`; only an
+explicit `@.type() != "number"` does. `0012` adds it. Three migrations for one
+constraint, because an applied migration is not edited.
+
+Beside it: a cached judgement that no longer validates now triggers a fresh call
+and overwrites the row, where before it fell back to the Phase 4 order **every
+time that sentence was searched, forever**. One bad row was permanent.
+
+### The prompt injection that was already live
+
+`rerankInput` built the model's input by interpolating each candidate's name,
+summary and statements into a line-per-field text block. A statement containing
+a newline **forged a second candidate** — and the consequence was not a
+promoted tool, because the schema's slug enum will not emit a slug that is not
+a candidate. It was worse in a quieter way: the forged entry made the answer's
+length wrong, `validateJudgement` refused the whole judgement, and **every
+search that returned that tool fell silently back to the Phase 4 order**. A
+denial of service on the ranking, written by anyone who can get a statement
+into the catalogue, which from Phase 6 is every listing owner.
+
+Candidates now go out as `JSON.stringify` of the candidate array, and every
+field is stripped of control characters — C0, C1, `U+2028` and `U+2029` — before
+it is capped. `tests/rerank.test.mjs` plants the newline and asserts the
+judgement still validates and still orders.
+
+### The claims that were wrong, and are now right
+
+- **The cost model was computed from average output tokens.** A cap does not
+  bound an average; it bounds the bill, and the bill's worst case is a model
+  that reasons to its `max_output_tokens` on every call. At the ceilings the
+  caps that read "$4.05 a month" cost **$17.52**. `RERANK_MAX_OUTPUT_TOKENS`
+  came down from 2,000 to 700 — three and a half times the measured mean — and
+  the caps came down with it, to 240 reader requests and 120 rerank requests a
+  day: **120 first-ever searches, $4.68 a month**. `tests/rate-limit.test.mjs`
+  now recomputes every line of that from the fixture's measured per-request
+  tokens and the two output ceilings, so a stale constant in `lib/prices.ts`
+  fails a test instead of a sentence.
+- **"204 tools", "thirty listings", "fifty candidates", "Fifty verdicts",
+  "$9.05", "Two ways forward" while rendering three.** Each corrected where it
+  was written. The empty page's "Two ways forward" is now three when there is a
+  constraint worth dropping and two when there is not.
+- **363 dead statement vectors** for the reverted generated statements were
+  still in the fixture, inflating it and the cost-per-search arithmetic that
+  reads it. Pruned. Re-running `db/seed/generated_statements.sql` now needs a
+  key for `scripts/embed.mjs`, and the file's header says so.
+
+### The reviewer's blind sentences
+
+Twenty-five more negatives and fifteen more answerable sentences, written
+without reading ours, are now `eval/negatives.review2.jsonl` and
+`eval/positives.review.jsonl`. They are **held out** — never edited, never
+tuned against — and every run reports them. The positives are a rank-one check:
+the sentence names a situation, and the tool that answers it must come back
+first.
+
+### The empty page does not empty enough, and one attempt to fix it failed
+
+On the reviewer's blind negatives the reranker empties most but not all of the
+near misses, and some of what survives carries a *Strong* band and sets
+`had_good_match`. The revision tried was a prompt paragraph naming the mistake
+outright — when the sentence asks for **a person, a service, an object or an
+errand**, every tool in the list is 0 — with five worked examples. Three
+recordings of each prompt, everything else identical:
+
+| | shipped prompt | revised prompt |
+| --- | --- | --- |
+| nDCG@10 | 0.8728 / 0.8520 / 0.8693 | 0.8807 / 0.8696 / 0.8771 |
+| recall@10 | 0.7753 / 0.7453 / 0.7817 | 0.7572 / 0.7911 / 0.7786 |
+| golden queries empty | 0 / 1 / 0 | 0 / 1 / 0 |
+| `negatives.jsonl` empty | 24 / 23 / 22 | 21 / 21 / 21 |
+| its near misses | 11 / 10 / 9 of 15 | 8 / 8 / 8 of 15 |
+| `negatives.review.jsonl` | 20 / 18 / 22 of 25 | 17 / 17 / 19 of 25 |
+| `negatives.review2.jsonl` | 19 / 21 / 23 of 25 | 21 / 21 / 21 of 25 |
+| its near misses | 13 / 14 / 15 of 17 | 13 / 13 / 13 of 17 |
+| positives rank 1 | 15 / 15 / 15 | 15 / 15 / 14 |
+
+**It was not shipped.** It buys about a hundredth of nDCG and it costs two of
+our own negatives, two of the held-out file, and two near misses on the very set
+it was written for — the one place it was supposed to help, `negatives.review2`'s
+near misses, it does not (14.0 → 13.0 on the mean of three). The recordings are
+in `eval/recordings/n20-json-oldprompt*.json` and `n20-json-newprompt-*.json`, so
+the next person can disagree with the reading rather than with a sentence.
+
+What the revision did do is make the reranker **less willing to empty a page**
+while making it order the non-empty pages slightly better, which is the trade
+this project has already decided twice it does not want.
+
+### Twenty candidates, decided on three recordings instead of one
+
+The first version of this decision compared one recording each at 20, 30 and 50.
+One recording each cannot tell a knob from the model's own wobble. Three each:
+
+| | N=20 | N=30 |
+| --- | --- | --- |
+| nDCG@10 | 0.8811 / 0.8707 / 0.8711 → **0.8743** | 0.8392 / 0.8585 / 0.8654 → 0.8544 |
+| recall@10 | 0.7697 / 0.7842 / 0.7694 → **0.7744** | 0.7333 / 0.7631 / 0.7769 → 0.7578 |
+| searches judged (of 353) | 348 / 347 / 349 | 342 / 339 / 347 |
+| cost per search | **$0.000427** | $0.000434-0.000441 |
+
+Twenty stays, and the two sets of three do not overlap: the lowest N=20 is above
+the highest N=30. More candidates make a longer prompt against the same
+four-second budget, so more searches time out and measure the Phase 4 order.
+
+Two things worth knowing beside it. **The negatives files cannot be affected by
+N at all** — a sentence the catalogue cannot answer returns about four rows, and
+0 of the 25 held-out negatives return more than twenty — so the differences in
+those columns between the two are the model wobbling and nothing else. And
+twenty has a price: over the 60 golden queries the search returns 195
+graded-relevant tools in its top 50 and **12 of them sit at ranks 21-50**, 6.2%,
+spread over 11 queries. The reranker never sees those twelve.
+
+### The reranker is unstable, and the obvious fix cannot be afforded
+
+The review measured 27 of 194 (slug, sentence) judgements changing across three
+live calls — 14% — with 26 of those crossing the line between shown and not
+shown. Re-measured here on ten sentences × three calls: **37 of 147 pairs
+changed (25.2%), 26 crossed (17.7%)**. A page that changes under somebody who
+reloads it.
+
+`reasoning: low` was the lever, and it was measured rather than assumed:
+
+```
+minimal  30 calls, 0 failed    37 of 147 pairs changed (25.2%), 26 crossed
+low      12 calls, 18 FAILED    0 of  38 pairs changed, on the 12 that returned
+```
+
+**Eighteen of thirty calls did not finish inside the four seconds a visitor is
+waiting.** The setting that looks perfectly stable is stable on the third of its
+calls that came back; the rest are a page with no judgement on it at all. It is
+also dearer per judgement ($0.000238 against $0.000183), because reasoning
+tokens are output tokens. So `minimal` stays, and the instability is written
+down here and in `eval/baselines.md` instead of being fixed. The honest ways to
+spend money on it are a longer timeout or two samples that vote, the way the
+reader's do; both change what a search costs.
+
+### The gate that a lost fixture walked through
+
+A sentence with no recorded judgement measures the Phase 4 order. The run
+printed that and nothing else, so a build that had lost half its judgements
+would have reported a number somewhere between the two phases with three green
+gates over it. `--baseline` now reads a **Rerank coverage** column off the
+recorded row and fails when the share judged falls more than five percentage
+points below it — and a run at a different `--rerank-n=` has no matching
+judgements at all, which is the intended way to notice that the flag and the
+fixture disagree.
+
+### Four smaller ones
+
+- **The refusal circuit tripped twice during a legitimate run.** Ten
+  unanswerable sentences in a row are a thing that happens; the circuit read
+  them as a broken model and stopped calling it. It now needs at least 20
+  samples and **80%** of the last 20, and both cases are tested: a model that
+  refuses everything is still cut off, and a legitimate run of unanswerable
+  sentences is not.
+- **The rerank cap now says so when it is spent**, once per process, with no
+  sentence in the line.
+- **The "drop a constraint" chips on a judged empty page were computed from an
+  unreranked probe** — they offered a way forward that led to another empty
+  page. The probe is now reranked too (one extra call, only on the empty path),
+  and the copy says which of the two happened.
+- **The verifier's false-accept rate is a recorded number now.** Twenty planted
+  pairs, ten right and ten wrong: **0 of 10 wrong pairs accepted**, before and
+  after tightening the prompt to "only what the summary itself states". What the
+  tightening changed is the other column — right pairs rejected went **3 of 10
+  to 6 of 10**. It is kept, because a generator that stores less is the safer
+  failure and deliverable A is reverted either way, but it bought nothing
+  measurable on this sample and the sample is twenty pairs.
+
+### Known weaknesses added by this review
+
+- **The reranker sees the first four problem statements of a candidate and no
+  more** (`MAX_CANDIDATE_STATEMENTS`). Today that binds on nothing: four is also
+  the most any listing has. From Phase 7, when makers write their own, a tool
+  with six statements is judged on four of them, chosen by the listing's own
+  `sort_order` rather than by anything to do with the sentence — so the
+  statement that would have answered this person can be the fifth and never
+  leave the database. Raising it costs roughly linearly; choosing *which* four
+  is the other answer. Neither should happen without somebody deciding it.
+- **14% to 25% of judgements are not stable across calls**, above.
+- **120 first-ever searches a day**, down from 320, and the reason is that the
+  old number was computed from a worst case that understated the bill four
+  times over. Saying 120 honestly is better than saying 320 from a model that
+  was wrong.
 
 ## Tried and rejected
 

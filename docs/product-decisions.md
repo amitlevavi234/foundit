@@ -159,6 +159,16 @@ hour" really is about recording, so no cosine threshold separates it from the
 recording software without emptying real questions too. A reading does. The copy
 on that page says which of the two happened.
 
+*What the reranker does not see, added 12 September 2026 after the Phase 5
+adversarial review.* It is shown **the first four problem statements** a listing
+carries, in the order the listing keeps them, and no more — `MAX_CANDIDATE_STATEMENTS`
+in `lib/rerank.ts`. Today that binds on nothing, because four is also the most
+any listing has. From Phase 7, when a maker writes their own, a tool with six
+statements is judged on four of them and the two it does not see may be the two
+that answer the sentence. When that starts to matter the choice is to raise the
+number — the cost is roughly linear in it — or to choose *which* four rather
+than the first four, and neither should happen without somebody deciding it.
+
 *What did not change is the percentage: there still is not one.* The designed
 fit bar stays out. A calibrated number means something specific — of the results
 shown at 80%, about eighty in a hundred are what the person wanted — and it can

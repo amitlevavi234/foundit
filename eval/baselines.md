@@ -81,6 +81,18 @@ size of the set noted.
 | 2026-09-12 | 48ee798 | 5 | yes | 60 | 0.7800 | 0.7508 | 126.4 | 183.8 | 0 of 60 | 13 of 30 | 11 of 25 | 0 of 240 | **REVERTED — see "Phase 5, deliverable A" below.** Not a baseline: the rows it measures were deleted and the code that wrote them writes nothing today. **363 generated problem statements**, written by `gpt-5-mini` for the 204 published tools carrying fewer than four, each checked against that tool's own name and summary by `gpt-5-nano` before storage. 791 candidates, 48 refused by the mechanical gate, 124 by the verifier, 0 as near-duplicates. nDCG@10 falls 0.7755 → 0.7508 while recall@10 rises 0.7636 → 0.7800: more statements give more tools a way into a result set, so more judged tools turn up somewhere in the top twenty and more unjudged ones turn up above them. Reverting restored 0.7755 to four decimals. The rows are kept in `db/seed/generated_statements.sql` and their vectors in the fixture, so the number reproduces; the tooling is kept and is not what failed. |
 | 2026-09-12 | 67006e5 | 5 | yes | 60 | 0.7800 | 0.8605 | 62.3 | 105.7 | 0 of 60 | 22 of 30 | 20 of 25 | 0 of 240 | **The reranker.** Over the top TWENTY candidates the Phase 4 search returns, `gpt-5-nano` is shown the sentence and each candidate's own slug, name, summary and problem statements — and no score, rank, rating, like count or price — and grades each 0 to 3; 0 is dropped, the rest order by grade and then by the search's own order. **+0.0850 of nDCG**, and the near misses are the headline: held-out near misses 1 of 10 → 6 of 10 and ours 2 of 15 → 8 of 15, which is what the relevance floor could never do because "a recording studio that rents by the hour" really is about recording. Non-English 0.8207 → 0.8877. Twenty was measured against 30 and 50 and wins on the number, the money and the clock. **This is the MIDDLE of five live recordings** — 0.8515, 0.8585, **0.8605**, 0.8620, 0.8713, mean 0.86076 — not the best, and unlike Phase 4 the worst of the five would still have cleared the gate. Recall ran 0.7300–0.7800 across them, so the +0.0164 here is the most favourable reading of the five. $0.000434 a search against a $0.002 ceiling; the three daily caps are re-costed together to $4.05 a month. See "Phase 5, deliverable B" below. |
 
+### Recorded baselines, continued
+
+One column was added — **Rerank coverage**, the share of a run's searches that
+had a reranker judgement — and adding it to the table above would have meant
+editing rows that are already recorded, which is the one thing this file does
+not do. So the table continues here, with the same columns and one more, and
+this is the one a run is gated against.
+
+| Date | Commit | Phase | Vectors | Queries | recall@10 | nDCG@10 | Mean ms | p95 ms | Zero-result | Negatives empty | Held-out empty | Perturbed empty | Rerank coverage | What changed |
+| ---- | ------ | ----- | ------- | ------- | --------- | ------- | ------- | ------ | ----------- | --------------- | -------------- | --------------- | --------------- | ------------ |
+| 2026-09-12 | 15ff3a8 | 5 | yes | 60 | 0.7842 | 0.8707 | 78.6 | 108.1 | 0 of 60 | 20 of 30 | 19 of 25 | 0 of 240 | 347 of 353 | **The Phase 5 review's fixes, and the reranker's number re-recorded from artefacts anybody can open.** The search is unchanged; what changed is what may be claimed about it. Three fresh recordings at N=20 — `eval/recordings/n20-1.json`, `n20-2.json`, `n20-3.json` — read 0.8811, **0.8707** and 0.8711. The frozen one is `n20-2`, the LOWEST of the three, because it is the only one of the three that clears every gate: `n20-1` empties two of the 240 perturbations and `n20-3` empties one of them and a golden query outright. So the number is the worst of three rather than the middle of five, and the reason is written down. Against the previously recorded Phase 5 row the negatives share falls 22 of 30 → 20 of 30 and the held-out 20 of 25 → 19 of 25: the same code, a different recording, and that spread IS the finding. New: the reviewer's 25 blind negatives (20 of 25 empty, near misses 14 of 17) and 15 blind answerable sentences (rank 1 in **15 of 15**), both held out. Prompt injection through a candidate's own statement closed; two write paths closed (`0011`); `query_reranks_shape` made to mean what it says (`0011`, `0012`); the caps re-costed from output CEILINGS and cut to 120 first-ever searches a day. $0.000427 a search. See "Phase 5, re-measured" below. |
+
 ### Phase 2, by slice
 
 | Slice | n | recall@10 | nDCG@10 | Mean ms | p95 ms |
@@ -284,6 +296,216 @@ tenth".
 for this" across 341 searches. Neither number is a quality claim on its own; put
 beside 0 golden empties and 0 perturbed empties, they are what a floor that
 finally works looks like.
+
+## Phase 5, re-measured: what the second adversarial review found
+
+The reranker ships. The NUMBER did not ship as written, and neither did several
+sentences around it. This section is what replaced them.
+
+### Five recordings nobody could open
+
+The rule this project uses for anything a model decides is "record five times
+and freeze the middle, never the best". Phase 5 followed it and then reported it
+from notes — five numbers in a sentence, with no artefact behind any of them.
+The review's objection is short and correct: five recordings nobody can open are
+not five recordings.
+
+`eval/recordings/` is now committed. `--record=<name>` writes the whole summary
+of one run there — every slice, both negatives files, the held-out files, the
+perturbations, the coverage, the violations and the per-query rows, about 13 KB
+of JSON. Every model-dependent number quoted below names the file it came from.
+
+### The three recordings at N=20, and why the frozen one is the worst of them
+
+| | `n20-1` | `n20-2` **frozen** | `n20-3` |
+| --- | --- | --- | --- |
+| nDCG@10 | **0.8811** | 0.8707 | 0.8711 |
+| recall@10 | 0.7697 | **0.7842** | 0.7694 |
+| golden queries empty | 0 | 0 | **1** |
+| perturbed empty (of 240) | **2** | 0 | **1** |
+| `negatives.jsonl` empty | 24 of 30 | 20 of 30 | 24 of 30 |
+| `negatives.review.jsonl` | 18 of 25 | 19 of 25 | 18 of 25 |
+| `negatives.review2.jsonl` | 21 of 25 | 20 of 25 | 20 of 25 |
+| `positives.review.jsonl` rank 1 | 15 of 15 | 15 of 15 | 14 of 15 |
+| rerank coverage | 348 of 353 | 347 of 353 | 349 of 353 |
+
+Mean nDCG 0.8743, range 0.0104. **The middle is `n20-3`, and `n20-3` cannot be
+frozen**: it empties a golden query and one of the 240 perturbations, and the
+perturbation gate is zero, not "no worse than recorded" — a floor that depends
+on a transposed letter is not a floor. `n20-1` empties two perturbations.
+`n20-2` is the only one of the three that clears every gate, and it is also the
+lowest of the three on nDCG, so the frozen number is not a flattering choice.
+
+**That two of three live recordings would have failed a gate is the finding**,
+not a footnote. The reranker can empty a page for a golden query typed slightly
+differently, and the fixture is one recording in which it did not. The gate
+holds on this fixture; it is not a property of the reranker.
+
+Against the previously recorded Phase 5 row the negatives share falls 22 of 30 →
+20 of 30 and the held-out 20 of 25 → 19 of 25, on identical code. Both rows are
+real and neither is edited.
+
+### Twenty candidates, restated honestly
+
+The first version of this decision compared ONE recording each at 20, 30 and 50
+and called 20 the winner. One recording each cannot distinguish a knob from the
+model's own wobble, which the section above measures at 0.0104 of nDCG across
+three runs of identical code. Three recordings each at 20 and 30:
+
+| | N=20 | N=30 |
+| --- | --- | --- |
+| recordings | `n20-{1,2,3}.json` | `n30-{1,2,3}.json` |
+| nDCG@10 | 0.8811 / 0.8707 / 0.8711 | 0.8392 / 0.8585 / 0.8654 |
+| mean | **0.8743** | 0.8544 |
+| recall@10 | 0.7697 / 0.7842 / 0.7694 | 0.7333 / 0.7631 / 0.7769 |
+| mean | **0.7744** | 0.7578 |
+| `negatives.jsonl` empty | 24 / 20 / 24 → 22.7 | 23 / 22 / 23 → 22.7 |
+| `negatives.review.jsonl` | 18 / 19 / 18 → 18.3 | 19 / 22 / 20 → 20.3 |
+| `negatives.review2.jsonl` | 21 / 20 / 20 → 20.3 | 20 / 20 / 20 → 20.0 |
+| searches judged (of 353) | 348 / 347 / 349 → 348.0 | 342 / 339 / 347 → 342.7 |
+| cost per search | **$0.000427** | $0.000434-0.000441 |
+
+**Twenty stays, and this time the evidence separates.** The lowest N=20
+recording (0.8707) is above the highest N=30 one (0.8654), so the two sets of
+three do not overlap at all — it is not "indistinguishable and 20 is cheaper".
+Recall points the same way, so the "consider 30 if its recall is reproducibly
+higher" case does not arise.
+
+**The negatives columns are the instrument checking itself.** They come out
+identical at both N, and they have to: a sentence the catalogue cannot answer
+returns about four rows, and **0 of the 25 held-out negatives return more than
+twenty rows at all**, so N cannot reach them. The 18.3 against 20.3 on the
+held-out file is the model wobbling, and reading it as a win for N=30 would be
+reading noise. Where N *does* bind is the golden set: 60% of those searches
+return more than twenty rows and 42% more than thirty.
+
+Why more candidates are worse is legible in the runs. A longer candidate list is
+a longer prompt against the same four-second budget, and **coverage falls from
+348 of 353 searches judged to 342.7** — every unjudged search measures the Phase
+4 order. Money is almost not the argument: the floor keeps most result sets
+under twenty rows, so N=30 costs about 2% more per search, not 50%.
+
+**What twenty gives up, counted.** Over the 60 golden queries the search returns
+195 graded-relevant tools inside its top 50, and **12 of them sit at ranks 21-50
+— 6.2%, spread over 11 queries**. Those twelve are never shown to the reranker at
+N=20. That is the price of the choice, stated rather than implied, and it is
+paid to get the other 183 judged by a model that has not been handed a longer
+prompt it answers worse.
+
+### The reviewer's blind sentences
+
+Twenty-five negatives and fifteen answerable sentences, written without reading
+ours, are `eval/negatives.review2.jsonl` and `eval/positives.review.jsonl`. They
+are held out: never edited, never tuned against, reported by every run.
+
+On the frozen recording: **20 of 25** negatives answered with an empty page — far
+6 of 8, and the near misses the file was built around **14 of 17**. And **15 of
+15** of the answerable sentences returned the expected tool at rank 1, in five
+languages, which is the part of Phase 4 and Phase 5 that is working.
+
+### One prompt revision, measured and not shipped
+
+The near misses that survive have a shape: the sentence asks for a person, a
+service, an object or an errand, and the catalogue answers with software from
+the same subject. The revision named that outright, with five worked examples.
+Three recordings of each prompt, everything else identical:
+
+| | shipped prompt | revised prompt |
+| --- | --- | --- |
+| recordings | `n20-json-oldprompt{,-2,-3}.json` | `n20-json-newprompt-{1,2,3}.json` |
+| nDCG@10 | 0.8728 / 0.8520 / 0.8693 | 0.8807 / 0.8696 / 0.8771 |
+| mean | 0.8647 | **0.8758** |
+| `negatives.jsonl` empty | 24 / 23 / 22 → **23.0** | 21 / 21 / 21 → 21.0 |
+| its near misses (of 15) | 11 / 10 / 9 → **10.0** | 8 / 8 / 8 → 8.0 |
+| `negatives.review.jsonl` (of 25) | 20 / 18 / 22 → **20.0** | 17 / 17 / 19 → 17.7 |
+| `negatives.review2.jsonl` (of 25) | 19 / 21 / 23 → 21.0 | 21 / 21 / 21 → 21.0 |
+| its near misses (of 17) | 13 / 14 / 15 → **14.0** | 13 / 13 / 13 → 13.0 |
+| positives rank 1 (of 15) | 15 / 15 / 15 | 15 / 15 / 14 |
+| golden queries empty | 0 / 1 / 0 | 0 / 1 / 0 |
+
+**Not shipped.** It buys about a hundredth of nDCG and pays two of our own
+negatives, 2.3 of the held-out file and two of our own near misses for it — and
+on the one set it was written for, `negatives.review2`'s near misses, it is
+*worse* (14.0 → 13.0). It makes the reranker order the non-empty pages slightly
+better by making it less willing to empty one, which is the trade this project
+has already refused twice. Recorded here either way, with the six files, so the
+next person can disagree with the reading rather than with a sentence.
+
+### The reranker is unstable, and the obvious lever cannot be afforded
+
+The review found 27 of 194 (slug, sentence) judgements changing across three
+live calls — 14% — with 26 of them crossing the line between shown and not
+shown. Re-measured here, ten sentences × three calls at each setting:
+
+```
+minimal  30 calls,  0 failed   37 of 147 pairs changed (25.2%), 26 crossed (17.7%)
+low      12 calls, 18 FAILED    0 of  38 pairs changed, on the 12 that returned
+tokens/judgement   minimal 2176 in 186 out $0.000183   low 1789 in 372 out $0.000238
+slowest call       minimal 2975 ms                     low 4020 ms
+```
+
+**`reasoning: low` misses the four-second budget on eighteen of thirty calls.**
+Its perfect stability is measured on the third of its calls that came back; the
+other two thirds are a page with no judgement on it. It is also dearer, because
+reasoning tokens are output tokens. `minimal` stays and the instability is
+recorded rather than fixed: it is the reason the spread above is 0.0104 of nDCG
+on identical code, and the reason two of three recordings failed a gate.
+
+### The cost, re-measured from ceilings rather than averages
+
+```
+per search    tokens   $ / 1M      $ each
+reader in     3930.6    0.050   0.00024794
+reader out     128.5    0.400
+embedding in    14.3    0.020   0.00000029
+rerank in     1987.6    0.050   0.00017919
+rerank out     199.5    0.400
+
+cost per search              $0.000427
+ceiling (docs/build-phases)  $0.002000 per search — within it, by 4.7x
+```
+
+That is the average, and an average is the right thing for "what a search
+costs". **It is the wrong thing for a cap**, which is what the review caught.
+`MAX_*_CALLS_PER_DAY` bounds the bill, and the bill's worst case is every call
+reasoning to its `max_output_tokens`:
+
+| | requests/day | worst case/month |
+| --- | --- | --- |
+| reader (900 output ceiling) | 240 | $3.30 |
+| reranker (700, was 2,000) | 120 | $1.37 |
+| embeddings | 2,000 | $0.02 |
+| | | **$4.68** against $5 |
+
+At the old ceilings and the old caps the same three lines came to **$17.52**.
+`tests/rate-limit.test.mjs` now recomputes every figure in that table from
+`db/seed/embeddings.fixture.json` and the two output ceilings, so a stale
+constant in `lib/prices.ts` fails a test.
+
+### The verifier's false-accept rate
+
+Deliverable A is reverted, so this is a recorded number and not a gate. Twenty
+planted pairs — ten tools with one of their own seed statements, ten with a
+statement from a tool in another category:
+
+| | false accepts (of 10 wrong) | false rejects (of 10 right) |
+| --- | --- | --- |
+| the prompt as Phase 5 shipped it | 0 | 3 |
+| tightened to "only what the summary itself states" | 0 | **6** |
+
+The tightening is kept — a generator that stores less is the safer failure — but
+it bought nothing measurable here and doubled what it refuses wrongly, and the
+sample is twenty pairs.
+
+### The gate a lost fixture walked through
+
+A sentence with no recorded judgement measures the Phase 4 order. That was
+printed and nothing else, so a build that had lost half its judgements would
+have reported a number between the two phases under three green gates.
+`--baseline` now reads the **Rerank coverage** column and fails when the share
+judged falls more than five percentage points below the recorded row. A run at a
+different `--rerank-n=` has no matching judgements at all and fails loudly,
+which is the intended way to notice that a flag and a fixture disagree.
 
 ## Targets each later phase has to clear
 

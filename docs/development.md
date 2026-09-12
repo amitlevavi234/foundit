@@ -224,7 +224,15 @@ node eval/run.mjs --record-reranks           # call the model for anything the
 node eval/run.mjs                            # measure, using the recorded ones
 node eval/run.mjs --no-rerank                # measure the Phase 4 search
 node eval/run.mjs --rerank-n=50              # judge fifty candidates instead
+node eval/run.mjs --record-reranks --record=n20-4   # …and keep the whole summary
+                                             # of that recording in eval/recordings/
 ```
+
+`--record=<name>` writes `eval/recordings/<name>.json`, and that directory is
+committed. "The middle of five recordings" was being reported from notes until
+the Phase 5 review pointed out that five recordings nobody can open are not five
+recordings; every model-dependent number in `eval/baselines.md` now names the
+file behind it.
 
 The reranker is the third paid call and the only one whose recording lives in
 the harness rather than in a script of its own. That is deliberate: it needs the
@@ -242,7 +250,15 @@ headline for a reason nobody changed.
 The cache is keyed on the sentence **and** on a hash of the candidate slugs, so
 a run at a different `--rerank-n` is a different question and gets its own
 entries. That is what made measuring 20, 30 and 50 a matter of running it three
-times rather than of clearing anything.
+times rather than of clearing anything. It is also why `--baseline` fails on a
+run at the wrong N: no candidate set matches, so nothing is judged, and the
+**Rerank coverage** gate says so rather than quietly measuring Phase 4.
+
+To take a genuinely FRESH recording of a sentence the fixture already holds —
+which is what "record three times and freeze one" needs — the entries have to be
+cleared first, from the fixture and from `public.query_reranks` both. There is no
+flag for that on purpose: it costs money and it is not something to do by
+accident.
 
 ## Writing problem statements (Phase 5, and reverted)
 
