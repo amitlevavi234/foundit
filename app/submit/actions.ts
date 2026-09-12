@@ -10,6 +10,7 @@ import {
   createDraft,
   myDraft,
   publishListing,
+  setCategory,
   setStatements,
   updateListing,
 } from '@/lib/maker';
@@ -195,6 +196,13 @@ export async function createListing(formData: FormData): Promise<void> {
         + `&name=${encodeURIComponent(name)}&summary=${encodeURIComponent(summary)}`,
     );
   }
+
+  // The category is a second statement on a second table with its own policy,
+  // and it is not optional: /browse and /top are organised by category, so a
+  // listing without one publishes fine and appears on neither. The first
+  // version of this flow left the artboard's select out and that is exactly
+  // what happened.
+  await setCategory(created.value.id, cleanText(formData.get('category')));
 
   redirect(`/submit/problems?draft=${created.value.id}`);
 }
@@ -405,6 +413,9 @@ export async function saveListing(formData: FormData): Promise<void> {
   if (!statements.ok) {
     redirect(`/maker/${slug}/edit?problem=${encodeURIComponent(statements.message)}`);
   }
+
+  const category = cleanText(formData.get('category'));
+  if (category !== '') await setCategory(toolId, category);
 
   revalidateTag('catalogue');
   revalidatePath('/');

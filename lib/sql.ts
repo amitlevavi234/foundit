@@ -675,7 +675,19 @@ export const TOOL_SQL = `
                                     x.like_count desc, x.id), '[]'::jsonb)
             from alts x) as alternatives,
          (select to_jsonb(x) from keeper x) as keeper,
-         (select owner_id is not null or submitted_by is not null from t) as has_keeper
+         -- owner_id ALONE. The "or submitted_by is not null" this used to carry
+         -- was wrong in a way nothing could see until Phase 7: every one of the
+         -- 224 seeded listings has submitted_by set to the admin that ran
+         -- db/seed/dev_seed.sql, so "has a keeper" was true for the whole
+         -- catalogue and the tool page's Unclaimed pill, its "Nobody yet" fact
+         -- and its whole claim panel were unreachable on every row. What the
+         -- page is asking is whether a person looks after this, and the column
+         -- that answers that is owner_id.
+         --
+         -- (No backticks in this comment, deliberately: it lives inside a
+         -- JavaScript template literal, and the first draft of it ended the
+         -- string.)
+         (select owner_id is not null from t) as has_keeper
    where exists (select 1 from t)`;
 
 /**

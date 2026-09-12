@@ -5,8 +5,10 @@ import { cache } from 'react';
 import { currentUserId } from './accounts';
 import { withIdentity } from './db';
 import {
+  CATEGORIES_SQL,
   CLAIMABLE_SQL,
   CLAIM_SQL,
+  SET_CATEGORY_SQL,
   CREATE_DRAFT_SQL,
   EXISTING_BY_URL_SQL,
   PUBLISH_SQL,
@@ -70,6 +72,28 @@ export const makerDashboard = cache(async (slug: string): Promise<MakerDashboard
   const me = await currentUserId();
   if (!me) return null;
   return asViewer(async (tx) => runMakerDashboard(tx, slug, me));
+});
+
+export interface CategoryOption {
+  slug: string;
+  name: string;
+}
+
+/**
+ * The editorial categories, for the Details step's select.
+ *
+ * Cached for the render pass like everything else here. Read with no identity
+ * required: `categories_read` is `using (true)` (0001) and the list is on
+ * /browse already.
+ */
+export const categoryOptions = cache(async (): Promise<CategoryOption[]> => {
+  return asViewer(async (tx) => {
+    const { rows } = await tx.query(CATEGORIES_SQL, []);
+    return (rows as Array<Record<string, unknown>>).map((row) => ({
+      slug: String(row.slug),
+      name: String(row.name),
+    }));
+  });
 });
 
 /** The listing a step of the submit flow is editing, or null. */
@@ -276,6 +300,32 @@ export async function setStatements(
           kept: Number(row?.kept ?? 0),
         },
       };
+    } catch (error) {
+      return refusalOf(error);
+    }
+  });
+}
+
+/**
+ * Put the listing in one category, which is what /browse and /top read.
+ *
+ * Not folded into `updateListing`: it is a different table with its own policy,
+ * and a failure here must not undo the eight columns that did save. A listing
+ * with no category is a listing that publishes fine and never appears on
+ * /browse, which is how the first version of this flow shipped.
+ */
+export async function setCategory(
+  toolId: string,
+  categorySlug: string,
+): Promise<WriteOutcome<true>> {
+  if (categorySlug.trim() === '') return { ok: true, value: true };
+  return asViewer(async (tx) => {
+    try {
+      const { rows } = await tx.query(SET_CATEGORY_SQL, [toolId, categorySlug]);
+      if (rows.length === 0) {
+        return { ok: false, reason: 'refused', message: 'That category could not be set.' };
+      }
+      return { ok: true, value: true };
     } catch (error) {
       return refusalOf(error);
     }

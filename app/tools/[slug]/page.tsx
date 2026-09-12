@@ -191,7 +191,7 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
                   <h1 className="disp" style={{ fontSize: 'var(--t-tool)', margin: 0 }}>
                     {tool.name}
                   </h1>
-                  {tool.claimable ? (
+                  {!tool.hasKeeper ? (
                     <span
                       className="pillstat pillstat-quiet"
                       title="We added this one at launch. Nobody from the tool looks after it yet."
@@ -629,7 +629,7 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
             </section>
           ) : null}
 
-          {tool.claimable ? (
+          {tool.claimable && !tool.hasKeeper ? (
             <div
               className="panel panel-tint"
               style={{
@@ -646,9 +646,17 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
                 </div>
                 <div className="muted" style={{ fontSize: 14.5, marginTop: 2 }}>
                   This is one of the tools we added at launch, so it is free to claim — one click,
-                  nothing to verify. Claiming opens when sign-in does.
+                  nothing to verify. It then says your name where anyone can see it.
                 </div>
               </div>
+              <Link
+                className="btn btn-sm btn-violet"
+                href={`/claim?tool=${tool.slug}`}
+                style={{ marginLeft: 'auto' }}
+              >
+                <Icon name="shield" size={16} />
+                Claim this listing
+              </Link>
             </div>
           ) : null}
 
@@ -667,9 +675,9 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
             <span>
               Added by{' '}
               <strong style={{ color: 'var(--c-ink)', fontWeight: 600 }}>
-                {tool.claimable ? 'Foundit' : (tool.keeperName ?? 'a maker')}
+                {!tool.hasKeeper ? 'Foundit' : (tool.keeperName ?? 'a maker')}
               </strong>
-              {tool.claimable ? ' when we launched' : ''}
+              {!tool.hasKeeper ? ' when we launched' : ''}
             </span>
             <span>{formatDate(tool.publishedAt ?? tool.createdAt)}</span>
             {/* The listing footer from docs/product-spec.md §"Tool detail":
@@ -727,7 +735,18 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
           <div className="panel" style={{ padding: 20 }}>
             <dl className="facts">
               <dt>Looked after by</dt>
-              <dd>{tool.claimable ? 'Nobody yet' : (tool.keeperHandle ? `@${tool.keeperHandle}` : 'Its maker')}</dd>
+              <dd>
+                {/* `hasKeeper` and NOT `claimable`. Claiming sets owner_id and
+                    leaves claimable true, because that column records where the
+                    listing came from rather than whether anybody has taken it —
+                    so this line said "Nobody yet" about a listing with a
+                    maintainer for as long as claiming was not built. */}
+                {!tool.hasKeeper
+                  ? 'Nobody yet'
+                  : tool.keeperHandle
+                    ? `@${tool.keeperHandle}`
+                    : 'Its maker'}
+              </dd>
               <dt>Added</dt>
               <dd>{formatDate(tool.publishedAt ?? tool.createdAt)}</dd>
               <dt>Last updated</dt>

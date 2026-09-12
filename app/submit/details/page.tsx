@@ -5,6 +5,7 @@ import { Icon } from '@/components/Icon';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { SubmitEyebrow, SubmitSteps } from '@/components/SubmitSteps';
+import { categoryOptions } from '@/lib/maker';
 import { displayDomain } from '@/lib/outbound';
 import { NAME_MAX, SUMMARY_MAX, SUMMARY_MIN } from '@/lib/submit';
 
@@ -55,6 +56,7 @@ export default async function SubmitDetails({ searchParams }: Props) {
   const name = first(params.name) ?? '';
   const summary = first(params.summary) ?? '';
   const domain = first(params.from);
+  const categories = await categoryOptions();
 
   return (
     <div className="page">
@@ -117,6 +119,34 @@ export default async function SubmitDetails({ searchParams }: Props) {
             <p id="summary-help" className="muted" style={{ marginTop: 8, fontSize: 'var(--t-micro)' }}>
               Say what it does, not why it’s great. “Splits shared expenses across a group” beats
               “the #1 expense app”. Between {SUMMARY_MIN} and {SUMMARY_MAX} characters.
+            </p>
+          </div>
+
+          <div style={{ marginBottom: 26, marginTop: 22 }}>
+            <label className="setrow-label" htmlFor="category">
+              Category
+            </label>
+            <select
+              id="category"
+              name="category"
+              required
+              defaultValue=""
+              className="field"
+              style={{ marginTop: 8, maxWidth: 360 }}
+              aria-describedby="category-help"
+            >
+              <option value="" disabled>
+                Pick one
+              </option>
+              {categories.map((category) => (
+                <option key={category.slug} value={category.slug}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+            <p id="category-help" className="muted" style={{ marginTop: 8, fontSize: 'var(--t-micro)' }}>
+              This is what puts it on <strong>Browse problems</strong> and on the top lists. A
+              listing with no category is one nobody stumbles across.
             </p>
           </div>
 

@@ -94,7 +94,12 @@ export const MY_DRAFT_SQL = `
            (select array_agg(tp.statement order by tp.sort_order, tp.id)
               from public.tool_problems tp where tp.tool_id = t.id),
            '{}'
-         ) as statements
+         ) as statements,
+         (select c.slug::text from public.tool_categories tc
+            join public.categories c on c.id = tc.category_id
+           where tc.tool_id = t.id
+           order by tc.is_primary desc, c.sort_order
+           limit 1) as category
     from public.tools t
    where t.id = $1::bigint
      and public.tool_is_mine(t.id)`;
@@ -117,6 +122,42 @@ export const UPDATE_LISTING_SQL = `
          flags      = $7::tool_flag[]
    where id = $1::bigint
   returning id`;
+
+/**
+ * The editorial categories, for the Details step's select.
+ *
+ * A closed list a human edits (0001 chose a table over an enum for exactly
+ * that reason), and the reason a submitted listing has to pick one: /browse and
+ * /top are organised by category, so a listing with no row in
+ * public.tool_categories is a listing that appears on neither. That was a real
+ * gap in the first version of this flow — the artboard draws the select and the
+ * first build left it out, and the listing published fine and never showed up
+ * on /browse.
+ */
+export const CATEGORIES_SQL = `
+  select id, slug::text as slug, name from public.categories order by sort_order, name`;
+
+/**
+ * One primary category for one listing, in one statement.
+ *
+ * The DELETE and the INSERT together, because a listing has at most one
+ * primary category — `tool_categories_one_primary` is a partial unique index
+ * (0001) — and doing this as two statements leaves a window where it has none
+ * or two. `tool_categories_write` is `using (tool_is_mine(tool_id))`, so this
+ * touches nothing at all on somebody else's listing.
+ */
+export const SET_CATEGORY_SQL = `
+  with gone as (
+    delete from public.tool_categories
+     where tool_id = $1::bigint
+       and category_id <> (select c.id from public.categories c where c.slug = $2::citext)
+    returning 1
+  ),
+  wanted as (select c.id from public.categories c where c.slug = $2::citext)
+  insert into public.tool_categories (tool_id, category_id, is_primary)
+  select $1::bigint, w.id, true from wanted w
+  on conflict (tool_id, category_id) do update set is_primary = true
+  returning tool_id`;
 
 /** The one door for a person-typed statement. 0017 §3. */
 export const SET_STATEMENTS_SQL = `
@@ -174,7 +215,17 @@ export const MY_LISTINGS_SQL = `
  */
 export const MAKER_DASHBOARD_SQL = `
   with mine as (
-    select t.* from public.tools t
+    -- EVERY COLUMN NAMED, and never \`t.*\`. The first version of this
+    -- statement used the star and failed with "permission denied for table
+    -- tools" the first time the page was opened: 0007 replaced foundit_app's
+    -- table-wide SELECT with a column list so that \`tools.embedding\` could be
+    -- excluded, and a star asks for every column including that one. The
+    -- boundary worked exactly as designed and the query was wrong.
+    select t.id, t.slug, t.name, t.summary, t.url, t.status,
+           t.published_at, t.updated_at, t.submitted_by,
+           t.like_count, t.save_count, t.open_count, t.review_count,
+           t.rating_avg, t.rating_count
+      from public.tools t
      where t.slug = $1::citext and public.tool_is_mine(t.id) and t.owner_id = $2::text
   )
   select
@@ -291,6 +342,8 @@ export interface DraftListing {
   status: string;
   publishedAt: Date | null;
   statements: string[];
+  /** The primary category's slug, or null while the flow has not asked yet. */
+  category: string | null;
 }
 
 function num(value: unknown): number {
@@ -427,6 +480,7 @@ interface DraftRow {
   status: string;
   published_at: unknown;
   statements: string[] | null;
+  category: string | null;
 }
 
 export function toDraftListing(row: DraftRow): DraftListing {
@@ -443,6 +497,7 @@ export function toDraftListing(row: DraftRow): DraftListing {
     status: row.status,
     publishedAt: date(row.published_at),
     statements: row.statements ?? [],
+    category: row.category ?? null,
   };
 }
 

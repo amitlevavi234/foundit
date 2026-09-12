@@ -7,7 +7,7 @@ import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { ToolTile } from '@/components/ToolTile';
 import { flagLabel, platformLabel, pricingLabel } from '@/lib/constraints';
-import { makerDashboard, myDraft } from '@/lib/maker';
+import { categoryOptions, makerDashboard, myDraft } from '@/lib/maker';
 import {
   LANGUAGES,
   NAME_MAX,
@@ -118,6 +118,7 @@ export default async function EditListing({ params, searchParams }: Props) {
   // `tool_is_mine` all over again rather than a second rule.
   const listing = await myDraft(data.listing.id);
   if (!listing) notFound();
+  const categories = await categoryOptions();
 
   return (
     <div className="page">
@@ -226,6 +227,32 @@ export default async function EditListing({ params, searchParams }: Props) {
               );
             })}
           </fieldset>
+
+          <div style={{ marginBottom: 26 }}>
+            <label className="setrow-label" htmlFor="category">
+              Category
+            </label>
+            <select
+              id="category"
+              name="category"
+              required
+              defaultValue={listing.category ?? ''}
+              className="field"
+              style={{ marginTop: 8, maxWidth: 360 }}
+            >
+              <option value="" disabled>
+                Pick one
+              </option>
+              {categories.map((category) => (
+                <option key={category.slug} value={category.slug}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+            <p className="muted" style={{ marginTop: 8, fontSize: 'var(--t-micro)' }}>
+              What puts it on Browse problems and the top lists.
+            </p>
+          </div>
 
           <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
             <legend className="setrow-label">Price</legend>
