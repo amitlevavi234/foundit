@@ -9,18 +9,19 @@ import {
   CLAIMABLE_SQL,
   CLAIM_SQL,
   SET_CATEGORY_SQL,
-  CREATE_DRAFT_SQL,
-  EXISTING_BY_URL_SQL,
   PUBLISH_SQL,
   SET_STATEMENTS_SQL,
   SQLSTATE_DUPLICATE,
   UPDATE_LISTING_SQL,
+  runCreateDraft,
   runMakerDashboard,
   runMyDraft,
+  runMyListing,
   runMyListings,
   type DraftListing,
   type MakerDashboard,
   type MakerListing,
+  type MyListing,
 } from './tool-sql';
 import type { Submission } from './submit';
 import { slugCandidates } from './submit';
@@ -96,11 +97,38 @@ export const categoryOptions = cache(async (): Promise<CategoryOption[]> => {
   });
 });
 
-/** The listing a step of the submit flow is editing, or null. */
+/**
+ * The DRAFT a step of the submit flow is editing, or null.
+ *
+ * Null for a listing that is already published, which is F7: the Preview step
+ * kept drawing an enabled "Publish it" button for a live listing, and every
+ * replay of that form spent one of three daily publishes on a no-op. Use
+ * `myListing` to tell "already published" from "not yours" and "not there".
+ */
 export async function myDraft(toolId: string): Promise<DraftListing | null> {
   if (!/^[0-9]{1,19}$/.test(toolId)) return null;
   if (!(await currentUserId())) return null;
-  return asViewer(async (tx) => runMyDraft(tx, toolId));
+  return asViewer(async (tx) => runMyDraft(tx, toolId, true));
+}
+
+/** The same listing whatever its status — what the EDIT screen reads. */
+export async function myListingToEdit(toolId: string): Promise<DraftListing | null> {
+  if (!/^[0-9]{1,19}$/.test(toolId)) return null;
+  if (!(await currentUserId())) return null;
+  return asViewer(async (tx) => runMyDraft(tx, toolId, false));
+}
+
+/**
+ * The slug and status of one of my listings, or null.
+ *
+ * The slug comes from HERE and never from a form (F12), and the status is how
+ * the submit flow says "that listing is already published" without spending a
+ * publish token to find out (F7).
+ */
+export async function myListing(toolId: string): Promise<MyListing | null> {
+  if (!/^[0-9]{1,19}$/.test(toolId)) return null;
+  if (!(await currentUserId())) return null;
+  return asViewer(async (tx) => runMyListing(tx, toolId));
 }
 
 export interface ClaimableListing {
@@ -144,15 +172,66 @@ export async function claimableListing(slug: string): Promise<ClaimableListing |
 /** Why a write did not happen, in a shape a page can turn into a sentence. */
 export type WriteOutcome<T> =
   | { ok: true; value: T }
-  | { ok: false; reason: 'refused' | 'duplicate' | 'invalid'; message: string; detail?: string };
+  | {
+      ok: false;
+      reason: 'refused' | 'duplicate' | 'invalid';
+      message: string;
+      detail?: string;
+      /** Which control to point at, where the refusal names one. */
+      field?: string;
+    };
 
 /** A refusal, narrowed so the caller can read `reason` without a guard. */
 type Refusal = Extract<WriteOutcome<never>, { ok: false }>;
+
+/**
+ * A CHECK constraint, in English, with the field it is about.
+ *
+ * THE PHASE 7 REVIEW'S F2, SECOND HALF. A CHECK violation arrives as SQLSTATE
+ * 23514 carrying PostgreSQL's own message — "new row for relation "tools"
+ * violates check constraint "tools_url_check"" — and the first version of this
+ * file showed it to the person. lib/submit.ts's header says a refusal is a
+ * field and a sentence and never a stack trace; a constraint name is a stack
+ * trace with better spelling.
+ *
+ * The distinction that makes this safe: a CHECK violation carries a
+ * `constraint` property and a `raise ... using errcode` from one of 0017's
+ * functions does not. So a sentence a function wrote — "a problem statement is
+ * at most 200 characters; this one is 214" — is still shown as written, and
+ * only the database's own wording is replaced.
+ */
+const CONSTRAINT_SENTENCES: Record<string, { field: string; message: string }> = {
+  tools_url_check: {
+    field: 'url',
+    message: 'Only https addresses are stored, and the https:// has to be lower case.',
+  },
+  tools_name_is_clean: {
+    field: 'name',
+    message: 'That name has invisible characters in it. Retype it rather than pasting it.',
+  },
+  tools_summary_is_clean: {
+    field: 'summary',
+    message: 'That summary has invisible characters in it. Retype it rather than pasting it.',
+  },
+  tool_problems_statement_is_clean: {
+    field: 'statements',
+    message: 'One of those sentences has invisible characters in it. Retype it rather than pasting it.',
+  },
+  tools_summary_check: {
+    field: 'summary',
+    message: `A summary is between ${20} and ${400} characters.`,
+  },
+  tools_made_by_owner_is_not_claimable: {
+    field: 'url',
+    message: 'A listing somebody added themselves is not one anybody can claim.',
+  },
+};
 
 /** The SQLSTATEs 0017's functions raise, and what each means to a person. */
 function refusalOf(error: unknown): Refusal {
   const code = (error as { code?: string } | null)?.code ?? '';
   const message = (error as { message?: string } | null)?.message ?? '';
+  const constraint = (error as { constraint?: string } | null)?.constraint ?? '';
 
   if (code === SQLSTATE_DUPLICATE) {
     return {
@@ -168,6 +247,19 @@ function refusalOf(error: unknown): Refusal {
   // never echo the submitted text.
   if (code === '42501') {
     return { ok: false, reason: 'refused', message: 'That listing is not yours to change.' };
+  }
+  if (constraint) {
+    // A CHECK, whatever its SQLSTATE. Our sentence, never PostgreSQL's.
+    const known = CONSTRAINT_SENTENCES[constraint];
+    if (known) {
+      return { ok: false, reason: 'invalid', message: known.message, field: known.field };
+    }
+    console.error(`a maker's write hit an unmapped constraint (${constraint})`);
+    return {
+      ok: false,
+      reason: 'invalid',
+      message: 'One of those values is not one we can store. Check the form and try again.',
+    };
   }
   if (code === '22023' || code === '22001' || code === '23514' || code === '23503') {
     return { ok: false, reason: 'invalid', message: message || 'The database refused that.' };
@@ -192,8 +284,12 @@ function refusalOf(error: unknown): Refusal {
  * columns a person does not get to decide are stamped by the trigger. So this
  * function passes what a form can legitimately carry and nothing else.
  *
- * A duplicate `url` comes back as `{ reason: 'duplicate' }` carrying the
- * existing listing's PUBLIC NAME and nothing else about it.
+ * A duplicate address comes back as `{ reason: 'duplicate' }` carrying the
+ * existing listing's PUBLIC NAME and nothing else about it — a SENTENCE, which
+ * is what the gate asks for and what the Phase 7 review found was an HTTP 500.
+ * `runCreateDraft` holds the two guards that make it one; the address is
+ * compared as `public.url_key`, so "already listed" is about the page rather
+ * than about the exact bytes somebody typed.
  */
 export async function createDraft(
   submission: Submission,
@@ -203,54 +299,51 @@ export async function createDraft(
 
   return asViewer(async (tx) => {
     try {
-      const { rows } = await tx.query(CREATE_DRAFT_SQL, [
-        slugCandidates(submission.name),
-        submission.name,
+      const created = await runCreateDraft(
+        tx,
+        [
+          slugCandidates(submission.name),
+          submission.name,
+          submission.url,
+          submission.summary,
+          submission.pricing,
+          submission.platforms,
+          submission.languages,
+          submission.flags,
+          me,
+        ],
         submission.url,
-        submission.summary,
-        submission.pricing,
-        submission.platforms,
-        submission.languages,
-        submission.flags,
-        me,
-      ]);
-      const row = rows[0] as { id: string | number; slug: string } | undefined;
-      if (!row) {
-        // No row and no error means the policy filtered the insert, or every
-        // candidate slug was taken. Both are "we could not", and neither is
-        // worth telling apart to the person.
+      );
+
+      if (created.ok) return { ok: true, value: { id: created.id, slug: created.slug } };
+      if (created.reason === 'refused') {
         return {
           ok: false,
           reason: 'refused',
           message: 'We could not create the listing. Try a slightly different name.',
         };
       }
-      return { ok: true, value: { id: String(row.id), slug: row.slug } };
-    } catch (error) {
-      const outcome = refusalOf(error);
-      if (outcome.reason !== 'duplicate') return outcome;
-
       // The message names the existing listing, by its public name only. A
       // collision with an unpublished row comes back with no name at all.
-      const { rows } = await tx.query(EXISTING_BY_URL_SQL, [submission.url]);
-      const existing = rows[0] as { name: string; slug: string } | undefined;
-      return existing
+      return created.name
         ? {
             ok: false,
             reason: 'duplicate',
-            message: `We already list ${existing.name}.`,
-            detail: existing.slug,
+            message: `We already list ${created.name}.`,
+            detail: created.slug ?? undefined,
           }
         : {
             ok: false,
             reason: 'duplicate',
             message: 'That address is already listed.',
           };
+    } catch (error) {
+      return refusalOf(error);
     }
   });
 }
 
-/** Edit the eight fields 0017 grants UPDATE on. */
+/** Edit the six fields 0017 and 0018 grant UPDATE on. */
 export async function updateListing(
   toolId: string,
   submission: Submission,

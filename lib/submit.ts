@@ -30,23 +30,43 @@ import type { Platform, PricingModel, ToolFlag } from './types';
 /* ===========================================================================
  * Control characters
  *
- * The same set `public.control_character_class()` names in 0017: C0, DEL, C1,
- * U+2028 and U+2029. If these two ever disagree, the database wins and a
- * person sees a constraint violation instead of a helpful message, which is
- * the safe direction and is still a bug.
+ * The same set `public.control_character_class()` names: C0, DEL, C1, U+2028
+ * and U+2029 (0017), plus U+200B–U+200D, U+202A–U+202E and U+2066–U+2069
+ * (0018). If these two ever disagree, the database wins and a person sees a
+ * constraint violation instead of a helpful message, which is the safe
+ * direction and is still a bug.
  *
- * Written with String.fromCharCode for the two separators rather than an
- * escape, for the reason scripts/scan-control-bytes.mjs exists: on this
- * machine a shell heredoc turns a written escape into the byte itself, and a
- * character class that silently lost a range is a guard that passes and
- * protects nothing.
+ * THE SECOND GROUP IS THE PHASE 7 REVIEW'S (F10). A zero-width joiner and a
+ * right-to-left override are neither control characters nor harmless: U+202E
+ * visually reverses everything after it, and a problem statement is rendered
+ * as text on the tool page, in results and on a maker's dashboard, where
+ * strangers read it. U+FEFF is deliberately not in the set — it is a
+ * zero-width no-break space in the middle of a string and a byte-order mark at
+ * the front, it can neither join nor reverse, and refusing a pasted BOM would
+ * refuse a sentence somebody copied out of a text file for a reason they
+ * cannot see.
+ *
+ * Written with String.fromCharCode rather than escapes, for the reason
+ * scripts/scan-control-bytes.mjs exists: on this machine a shell heredoc turns
+ * a written escape into the byte itself, and a character class that silently
+ * lost a range is a guard that passes and protects nothing.
  * ======================================================================== */
 
+const ZERO_WIDTH_FIRST = String.fromCharCode(0x200b);
+const ZERO_WIDTH_LAST = String.fromCharCode(0x200d);
 const LINE_SEPARATOR = String.fromCharCode(0x2028);
 const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
+const BIDI_MARK_FIRST = String.fromCharCode(0x202a);
+const BIDI_MARK_LAST = String.fromCharCode(0x202e);
+const BIDI_ISOLATE_FIRST = String.fromCharCode(0x2066);
+const BIDI_ISOLATE_LAST = String.fromCharCode(0x2069);
 
 const CONTROL_CHARACTERS = new RegExp(
-  `[\\x00-\\x1F\\x7F-\\x9F${LINE_SEPARATOR}${PARAGRAPH_SEPARATOR}]`,
+  '[\\x00-\\x1F\\x7F-\\x9F'
+    + `${ZERO_WIDTH_FIRST}-${ZERO_WIDTH_LAST}`
+    + `${LINE_SEPARATOR}${PARAGRAPH_SEPARATOR}`
+    + `${BIDI_MARK_FIRST}-${BIDI_MARK_LAST}`
+    + `${BIDI_ISOLATE_FIRST}-${BIDI_ISOLATE_LAST}]`,
   'gu',
 );
 
@@ -188,10 +208,73 @@ export function checkUrl(raw: unknown): FieldProblem | null {
         'Only https addresses are stored, because the link is rendered for people to click.',
     };
   }
+  // `new URL('HTTPS://x.example').protocol` is 'https:' — the parser lower-cases
+  // the scheme and the string we store does not. `tools_url_check` is
+  // `url ~ '^https://'` and case-sensitive, so before this check a person who
+  // typed the scheme in capitals passed here and was shown the CHECK's own
+  // message, complete with a constraint name, at the next step. That is
+  // precisely what this file's header says must never happen. The Phase 7
+  // review found it; the sentence is the fix.
+  if (!value.startsWith('https://')) {
+    return {
+      field: 'url',
+      message: 'Type the https:// in lower case — that is the only way we store an address.',
+    };
+  }
   if (parsed.hostname === '' || !parsed.hostname.includes('.')) {
     return { field: 'url', message: 'That address has no domain in it.' };
   }
   return null;
+}
+
+/**
+ * The address, reduced to what decides whether two listings are the same page.
+ *
+ * THE SAME RULE AS `public.url_key`, and the database is the one that counts:
+ * `tools.url_key` is a stored generated column over that function and the
+ * unique index is on it, so this copy is here to let the flow answer "we
+ * already list that" without a round trip and to keep the rule readable.
+ * tests/submit.test.mjs drives the two against each other over a list of
+ * addresses, exactly as tests/embeddings.test.mjs does for `normalizeQuery`.
+ *
+ *   * the fragment is dropped              #anything is a place on a page
+ *   * the query is dropped                 ?ref=1 is a campaign, not a tool
+ *   * the scheme and host are lower-cased
+ *   * a leading `www.` is dropped
+ *   * a bare trailing slash, `/.` or `/./` on an otherwise empty path is
+ *     dropped
+ *   * EVERYTHING ELSE IS KEPT, path case included: a case-sensitive server
+ *     serves /Pricing and /pricing as two pages.
+ *
+ * Dropping the query is the one line that costs something, and it is
+ * deliberate: a tracking parameter is the commonest way one page arrives
+ * twice. `tools.url` still holds the address as typed and that is what every
+ * screen renders, so a maker's link keeps its parameters — only the key that
+ * decides whether two rows are the same page loses them.
+ */
+export function urlKey(raw: unknown): string {
+  const value = cleanText(raw);
+  if (value === '') return '';
+
+  // Parsed where it parses, and reduced textually where it does not, so this
+  // answers something for a string the database would refuse rather than
+  // throwing inside a flow whose job is to explain the refusal.
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return value.toLowerCase();
+  }
+
+  let host = parsed.hostname.toLowerCase();
+  if (host.startsWith('www.')) host = host.slice(4);
+  const port = parsed.port === '' ? '' : `:${parsed.port}`;
+
+  // `new URL` has already resolved `/.` and `/./` to `/`, so the one case left
+  // is the bare slash the parser adds to an empty path.
+  const path = parsed.pathname === '/' ? '' : parsed.pathname;
+
+  return `${parsed.protocol.toLowerCase()}//${host}${port}${path}`;
 }
 
 /**

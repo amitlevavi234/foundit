@@ -58,7 +58,7 @@ export const CREATE_DRAFT_SQL = `
     ) as free
   returning id, slug::text as slug`;
 
-/** SQLSTATE unique_violation. `tools.url` is unique and that is the message. */
+/** SQLSTATE unique_violation. `tools.url_key` is unique and that is the message. */
 export const SQLSTATE_DUPLICATE = '23505';
 
 /**
@@ -70,16 +70,29 @@ export const SQLSTATE_DUPLICATE = '23505';
  * a URL somebody else already listed learns the listing exists, which they
  * could learn by searching, and nothing about the person behind it.
  *
- * `status = 'published'` because an unpublished listing is not something a
- * stranger may be told about, even obliquely. A collision with somebody's
- * draft comes back with no name, and the message says only that the address is
- * already listed.
+ * THE NAME IS NULL FOR ANYTHING THAT IS NOT PUBLISHED, rather than the row
+ * being absent, and that changed with the Phase 7 review. This statement is
+ * now the PRE-CHECK — it runs before the insert rather than after the
+ * constraint has fired — so it has to answer "there is already a row" and
+ * "here is its public name" separately. An unpublished listing is not
+ * something a stranger may be told about even obliquely, so the message it
+ * produces says only that the address is already listed.
+ *
+ * `url_key` and not `url`: 0018's generated column, which is what the unique
+ * index is on. Matching on the raw string is what let the review list one page
+ * eight times.
  */
 export const EXISTING_BY_URL_SQL = `
-  select name, slug::text as slug
-    from public.tools
-   where url = $1::text and status = 'published'
+  select case when t.status = 'published' then t.name end as name,
+         case when t.status = 'published' then t.slug::text end as slug
+    from public.tools t
+   where t.url_key = public.url_key($1::text)
    limit 1`;
+
+/** Create the draft inside a savepoint, so a duplicate is not a dead transaction. */
+export const SAVEPOINT_DRAFT_SQL = 'savepoint create_draft';
+export const ROLLBACK_TO_DRAFT_SQL = 'rollback to savepoint create_draft';
+export const RELEASE_DRAFT_SQL = 'release savepoint create_draft';
 
 /** The listing a step of the submit flow is editing, if it is the caller's. */
 export const MY_DRAFT_SQL = `
@@ -105,7 +118,45 @@ export const MY_DRAFT_SQL = `
      and public.tool_is_mine(t.id)`;
 
 /**
- * Edit the listing. Eight columns, which are the eight 0017 grants UPDATE on.
+ * The same, for the SUBMIT FLOW, which is about a DRAFT.
+ *
+ * The Phase 7 review (F7): `MY_DRAFT_SQL` has no status predicate, so
+ * /submit/preview kept serving an enabled "Publish it" button for a listing
+ * that was already live. A double-click, a browser resubmit or a
+ * back-button-and-retry each burned one of the three publishes a person gets
+ * in a day on a publish that did nothing, and the person was then told they
+ * had hit the daily ceiling. The replay the review recorded spent two of three
+ * tokens on no-ops and was refused on the third with an eight-hour wait.
+ *
+ * A separate statement rather than a predicate on the one above, because the
+ * EDIT screen reads the same columns for a PUBLISHED listing and would break.
+ */
+export const MY_DRAFT_ONLY_SQL = `${MY_DRAFT_SQL}
+     and t.status = 'draft'`;
+
+/**
+ * Which of my listings this id is, if it is mine at all.
+ *
+ * Two columns and a round trip, for two things that both used to be taken from
+ * the form (F12) or inferred from an empty result (F7):
+ *
+ *   the SLUG, so `revalidatePath` purges the path of the row that was actually
+ *   written rather than a path named in the same POST. A person who edits
+ *   their own listing could otherwise name any slug and evict somebody else's
+ *   page from the cache — not a read and not a write, but the slug is on the
+ *   row and never needed to come from the request.
+ *
+ *   the STATUS, so the submit flow can say "that listing is already published"
+ *   without spending a publish token to find out.
+ */
+export const MY_LISTING_SQL = `
+  select t.slug::text as slug, t.status::text as status
+    from public.tools t
+   where t.id = $1::bigint
+     and public.tool_is_mine(t.id)`;
+
+/**
+ * Edit the listing. Six columns, which are the six 0017 and 0018 grant UPDATE on.
  *
  * `tools_update using (tool_is_mine(id))` is what decides whether this touches
  * a row, and row-level security FILTERS rather than refusing — the shape of the
@@ -197,10 +248,15 @@ export const MY_LISTINGS_SQL = `
          t.rating_avg, t.rating_count,
          t.claimable, t.made_by_owner,
          (select count(*) from public.tool_problems tp where tp.tool_id = t.id) as statement_count,
-         (select count(*) from public.search_event_tools st
-            join public.search_events e on e.id = st.event_id
-           where st.tool_id = t.id
-             and e.created_at >= now() - interval '30 days') as matched_count
+         -- THROUGH A DEFINER FUNCTION, like the sentences on the dashboard
+         -- beneath it. This was a subquery straight onto
+         -- public.search_event_tools, whose only SELECT policy is
+         -- an admin-only one — so for a maker it counted nothing and every
+         -- listing said "0 searches matched". Row-level security FILTERS, it
+         -- does not refuse, which is the exact defect class lib/maker.ts's own
+         -- header says every write in that file guards against, applied to a
+         -- read. The Phase 7 review found it (F6).
+         (select m.matched_count from public.maker_listing_metrics(t.id, 30) m) as matched_count
     from public.tools t
    where t.owner_id = $1::text
    order by (t.status = 'published') desc, t.published_at desc nulls first, t.id desc`;
@@ -233,6 +289,13 @@ export const MAKER_DASHBOARD_SQL = `
     m.status::text as status, m.published_at, m.updated_at,
     m.like_count, m.save_count, m.open_count, m.review_count,
     m.rating_avg, m.rating_count,
+    -- The number the "Searches matched" card draws, which this statement did
+    -- not select at all — so the marshaller read an absent value, coerced it to 0,
+    -- and the page rendered "0 · Searches matched · Last 30 days" directly
+    -- above a panel listing three sentences and seven searches. Both halves of
+    -- F6: the policy that filtered the count to nothing, and the column that
+    -- was never asked for.
+    (select k.matched_count from public.maker_listing_metrics(m.id, 30) k) as matched_count,
     (select p.handle::text from public.profiles p where p.id = m.submitted_by) as added_by,
     coalesce(
       (select array_agg(tp.statement order by tp.sort_order, tp.id)
@@ -377,7 +440,15 @@ interface ListingRow {
   rating_avg: unknown;
   rating_count: unknown;
   statement_count?: unknown;
-  matched_count?: unknown;
+  /**
+   * REQUIRED, and that is the second half of F6's fix.
+   *
+   * It was optional, so `MAKER_DASHBOARD_SQL` not selecting it was not a type
+   * error — `num(undefined)` is 0 and the dashboard drew a zero it had never
+   * been given a number for. A row shape that does not carry it now fails to
+   * compile rather than rendering a plausible lie.
+   */
+  matched_count: unknown;
   claimable?: boolean;
   made_by_owner?: boolean;
 }
@@ -501,10 +572,110 @@ export function toDraftListing(row: DraftRow): DraftListing {
   };
 }
 
+/**
+ * One of my listings, in the shape the forms need.
+ *
+ * `draftOnly` is the submit flow's; the edit screen reads a published listing
+ * through the same columns. See MY_DRAFT_ONLY_SQL for why the two are apart.
+ */
 export async function runMyDraft(
   exec: Executor,
   toolId: string,
+  draftOnly = false,
 ): Promise<DraftListing | null> {
-  const { rows } = await exec.query<DraftRow>(MY_DRAFT_SQL, [toolId]);
+  const { rows } = await exec.query<DraftRow>(
+    draftOnly ? MY_DRAFT_ONLY_SQL : MY_DRAFT_SQL,
+    [toolId],
+  );
   return rows[0] ? toDraftListing(rows[0]) : null;
+}
+
+/** The slug and the status of one of my listings, or null. */
+export interface MyListing {
+  slug: string;
+  status: string;
+}
+
+export async function runMyListing(
+  exec: Executor,
+  toolId: string,
+): Promise<MyListing | null> {
+  const { rows } = await exec.query<{ slug: string; status: string }>(MY_LISTING_SQL, [toolId]);
+  const row = rows[0];
+  return row ? { slug: row.slug, status: row.status } : null;
+}
+
+/* ===========================================================================
+ * Creating one, and the duplicate address
+ * ======================================================================== */
+
+/** What `runCreateDraft` answers with. A duplicate is a sentence, not a 500. */
+export type CreateDraftResult =
+  | { ok: true; id: string; slug: string }
+  | { ok: false; reason: 'duplicate'; name: string | null; slug: string | null }
+  | { ok: false; reason: 'refused' };
+
+/**
+ * Create the draft, and answer a duplicate address with a sentence.
+ *
+ * THE DEFECT THIS SHAPE EXISTS TO CLOSE (F1). `withIdentity` runs the whole
+ * callback in ONE transaction with no savepoints. The first version caught the
+ * 23505 from the unique constraint and then sent a second query — the lookup
+ * for the existing listing's name — on the same, now-ABORTED transaction.
+ * PostgreSQL answered 25P02, the throw escaped the Server Action, and the
+ * person got an HTTP 500 and lost the form they had filled in. The gate asks
+ * for "a message naming the existing listing"; what it got was a stack trace.
+ *
+ * So there are two guards and they are not redundant:
+ *
+ *   THE LOOK-UP HAPPENS FIRST. In the ordinary case the row is found before
+ *   anything is inserted, the transaction is untouched, and the message is the
+ *   one the gate asks for.
+ *
+ *   THE INSERT IS INSIDE A SAVEPOINT. The look-up cannot see a draft somebody
+ *   else owns — `tools_read` correctly hides it — and two people submitting
+ *   the same address at the same instant is a race whatever the look-up says.
+ *   Either way the constraint fires, `rollback to savepoint` leaves a
+ *   transaction that still works, and the answer is a duplicate with no name,
+ *   which is also the right answer: an unpublished listing is not something a
+ *   stranger may be told about.
+ */
+export async function runCreateDraft(
+  exec: Executor,
+  values: readonly unknown[],
+  url: string,
+): Promise<CreateDraftResult> {
+  const existing = await exec.query<{ name: string | null; slug: string | null }>(
+    EXISTING_BY_URL_SQL,
+    [url],
+  );
+  const already = existing.rows[0];
+  if (already) {
+    return { ok: false, reason: 'duplicate', name: already.name, slug: already.slug };
+  }
+
+  await exec.query(SAVEPOINT_DRAFT_SQL, []);
+  try {
+    const { rows } = await exec.query<{ id: string | number; slug: string }>(
+      CREATE_DRAFT_SQL,
+      values as unknown[],
+    );
+    await exec.query(RELEASE_DRAFT_SQL, []);
+    const row = rows[0];
+    // No row and no error means the policy filtered the insert, or every
+    // candidate slug was taken. Both are "we could not", and neither is worth
+    // telling apart to the person.
+    if (!row) return { ok: false, reason: 'refused' };
+    return { ok: true, id: String(row.id), slug: row.slug };
+  } catch (error) {
+    // The savepoint is what makes the next statement possible at all.
+    await exec.query(ROLLBACK_TO_DRAFT_SQL, []);
+    if ((error as { code?: string } | null)?.code !== SQLSTATE_DUPLICATE) throw error;
+    const raced = await exec.query<{ name: string | null; slug: string | null }>(
+      EXISTING_BY_URL_SQL,
+      [url],
+    );
+    const row = raced.rows[0];
+    return { ok: false, reason: 'duplicate', name: row?.name ?? null, slug: row?.slug ?? null };
+  }
 }

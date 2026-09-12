@@ -9,12 +9,13 @@ import {
   claimListing,
   createDraft,
   myDraft,
+  myListing,
   publishListing,
   setCategory,
   setStatements,
   updateListing,
 } from '@/lib/maker';
-import { allowPublish } from '@/lib/rate-limit';
+import { allowEdit, allowPublish } from '@/lib/rate-limit';
 import {
   STATEMENTS_MAX,
   checkDraftBasics,
@@ -193,6 +194,7 @@ export async function createListing(formData: FormData): Promise<void> {
     }
     redirect(
       `/submit/details?problem=${encodeURIComponent(created.message)}`
+        + (created.field ? `&field=${created.field}` : '')
         + `&name=${encodeURIComponent(name)}&summary=${encodeURIComponent(summary)}`,
     );
   }
@@ -220,15 +222,43 @@ function statementsFrom(formData: FormData): string[] {
   return out;
 }
 
+/**
+ * The sentence a person sees when they have saved too many times in an hour.
+ *
+ * One place, because `setProblems` and `saveListing` are the same limit and
+ * the same explanation, and a limit that is explained two slightly different
+ * ways on two screens is a limit somebody will eventually describe wrongly.
+ */
+function editRefusal(retryAfterSeconds: number): string {
+  const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+  return (
+    'That is a lot of saves in one hour. Nothing is lost — the listing is as you last saved it '
+    + `and saving works again in about ${minutes} minute${minutes === 1 ? '' : 's'}. `
+    + 'Every save re-reads the sentences that changed, which costs something, so there is a ceiling on it.'
+  );
+}
+
 export async function setProblems(formData: FormData): Promise<void> {
   const draft = cleanText(formData.get('draft'));
-  await requireSignIn(`/submit/problems?draft=${draft}`);
+  const me = await requireSignIn(`/submit/problems?draft=${draft}`);
 
   const statements = statementsFrom(formData);
   if (statements.length === 0) {
     redirect(
       `/submit/problems?draft=${draft}`
         + `&problem=${encodeURIComponent('Describe at least one problem it solves — this is what people search for.')}`,
+    );
+  }
+
+  // EVERY STATEMENT EDIT QUEUES AN EMBEDDING, and until the Phase 7 review
+  // nothing bounded how often. `allowPublish` was called in `publishDraft` and
+  // nowhere else, so one account could rewrite one listing's sentences in a
+  // loop; the review did it fifty times. docs/product-decisions.md §19.
+  const allowance = allowEdit(me);
+  if (!allowance.allowed) {
+    redirect(
+      `/submit/problems?draft=${draft}`
+        + `&problem=${encodeURIComponent(editRefusal(allowance.retryAfterSeconds))}`,
     );
   }
 
@@ -296,8 +326,23 @@ export async function publishDraft(formData: FormData): Promise<void> {
     redirect(`/submit/preview?draft=${draft}&problem=accuracy`);
   }
 
+  // `myDraft` is DRAFTS ONLY since the Phase 7 review. A listing that is
+  // already live is not "not there": it is a thing worth saying, and saying it
+  // here is what stops a double-click, a browser resubmit or a
+  // back-button-and-retry from spending a publish token on a no-op. The review
+  // replayed this form five times against a published listing and watched two
+  // of three daily publishes go on publishes that did nothing, followed by an
+  // eight-hour refusal.
   const listing = await myDraft(draft);
-  if (!listing) redirect('/maker');
+  if (!listing) {
+    const row = await myListing(draft);
+    if (row && row.status !== 'draft') {
+      redirect(
+        `/maker/${row.slug}?published=1`,
+      );
+    }
+    redirect('/maker');
+  }
 
   // The whole submission, checked as one thing for the first time. Every
   // earlier step checked its own fields; this is the one that refuses a
@@ -312,7 +357,16 @@ export async function publishDraft(formData: FormData): Promise<void> {
   // THE LIMIT IS SPENT HERE AND NOT EARLIER. A draft costs nothing and is
   // invisible to everybody; refusing one would mean a person loses the form
   // they filled in. docs/product-decisions.md §19.
-  const allowance = allowPublish(me, await visitorAddress());
+  //
+  // IT IS PEEKED HERE AND CHARGED AFTER THE PUBLISH SUCCEEDS. A refusal from
+  // `publish_tool` — a listing already live, a listing with no statement, a
+  // listing that is not yours — used to cost one of the three a person gets
+  // for the day, which is a ceiling on the catalogue charging for things that
+  // never reached it. The peek is still first because the refusal page has to
+  // come before the write, and the token is taken at the moment there is
+  // something to take it for.
+  const address = await visitorAddress();
+  const allowance = allowPublish(me, address, { peek: true });
   if (!allowance.allowed) {
     redirect(
       `/submit/preview?draft=${draft}&refused=${allowance.refusedBy}`
@@ -324,6 +378,9 @@ export async function publishDraft(formData: FormData): Promise<void> {
   if (!published.ok) {
     redirect(`/submit/preview?draft=${draft}&problem=${encodeURIComponent(published.message)}`);
   }
+
+  // It is in the catalogue. Now it costs one.
+  allowPublish(me, address);
 
   await clearStarted();
 
@@ -373,9 +430,26 @@ export async function claimTool(formData: FormData): Promise<void> {
  * ======================================================================== */
 
 export async function saveListing(formData: FormData): Promise<void> {
-  const slug = cleanText(formData.get('slug'));
+  // The slug off the FORM is used for one thing only: the address to send
+  // somebody back to while they are still being refused. Everything that
+  // depends on which row was written — the revalidations and the redirect at
+  // the end — reads the slug off the ROW. F12: a signed-in person editing
+  // their own listing could name any slug in the same POST and purge that
+  // path's cache, which is a cache miss for somebody else's page rather than a
+  // read or a write, and the slug never needed to come from the request.
+  const typed = cleanText(formData.get('slug'));
   const toolId = cleanText(formData.get('tool'));
-  await requireSignIn(`/maker/${slug}/edit`);
+  const me = await requireSignIn(`/maker/${typed}/edit`);
+
+  // The same ceiling as the submit flow's statements step, and the same
+  // sentence. F4: nothing bounded how often a listing could be rewritten, and
+  // every statement edit writes a row to public.embedding_jobs.
+  const allowance = allowEdit(me);
+  if (!allowance.allowed) {
+    redirect(
+      `/maker/${typed}/edit?problem=${encodeURIComponent(editRefusal(allowance.retryAfterSeconds))}`,
+    );
+  }
 
   const checked = checkSubmission({
     name: formData.get('name'),
@@ -394,24 +468,43 @@ export async function saveListing(formData: FormData): Promise<void> {
   const wrong = checked.problems[0];
   if (wrong) {
     redirect(
-      `/maker/${slug}/edit?problem=${encodeURIComponent(wrong.message)}`
+      `/maker/${typed}/edit?problem=${encodeURIComponent(wrong.message)}`
         + `&field=${wrong.field}`,
     );
   }
 
+  // WHICH ROW IS ABOUT TO BE WRITTEN, and what it is called. `tool_is_mine` in
+  // the database is what decides, exactly as it decides the UPDATE below; this
+  // asks it for the name of the thing rather than believing the form.
+  const row = await myListing(toolId);
+  if (!row) {
+    redirect(
+      `/maker/${typed}/edit?problem=${encodeURIComponent('That listing is not yours to change.')}`,
+    );
+  }
+  const slug = row.slug;
+
   const saved = await updateListing(toolId, checked.value);
   if (!saved.ok) {
-    redirect(`/maker/${slug}/edit?problem=${encodeURIComponent(saved.message)}`);
+    redirect(
+      `/maker/${slug}/edit?problem=${encodeURIComponent(saved.message)}`
+        + (saved.field ? `&field=${saved.field}` : ''),
+    );
   }
 
   // Two statements rather than one, because they are two different writes with
-  // two different rules: the eight columns go through the UPDATE policy, and
+  // two different rules: the six columns go through the UPDATE policy, and
   // the statements go through public.set_owner_statements. The second one is
   // also what re-queues the embeddings that changed — a statement whose text
-  // is identical keeps its row, its vector and its provenance.
+  // is identical keeps its row, its vector and its provenance, and one whose
+  // text changed keeps its ROW and loses its vector (0018), so fifty edits are
+  // one queued job rather than fifty.
   const statements = await setStatements(toolId, checked.value.statements);
   if (!statements.ok) {
-    redirect(`/maker/${slug}/edit?problem=${encodeURIComponent(statements.message)}`);
+    redirect(
+      `/maker/${slug}/edit?problem=${encodeURIComponent(statements.message)}`
+        + (statements.field ? `&field=${statements.field}` : ''),
+    );
   }
 
   const category = cleanText(formData.get('category'));

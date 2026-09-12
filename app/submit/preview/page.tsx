@@ -10,7 +10,7 @@ import { SubmitEyebrow, SubmitSteps } from '@/components/SubmitSteps';
 import { Tag } from '@/components/Chip';
 import { ToolTile } from '@/components/ToolTile';
 import { flagLabel, platformLabel, pricingLabel } from '@/lib/constraints';
-import { myDraft } from '@/lib/maker';
+import { myDraft, myListing } from '@/lib/maker';
 import { checkSubmission } from '@/lib/submit';
 import type { Platform, ToolFlag } from '@/lib/types';
 
@@ -74,8 +74,17 @@ export default async function SubmitPreview({ searchParams }: Props) {
   const refused = first(params.refused);
   const wait = Number.parseInt(first(params.wait) ?? '', 10);
 
+  // A DRAFT, and this page is about drafts. A listing that is already live has
+  // no Preview step left — the Phase 7 review (F7) found this page drawing an
+  // enabled "Publish it" for one, so a resubmit spent one of three daily
+  // publishes on a no-op and the person was then told they had hit the
+  // ceiling. Their own dashboard is the honest place to send them.
   const draft = await myDraft(draftId);
-  if (!draft) redirect('/maker');
+  if (!draft) {
+    const row = await myListing(draftId);
+    if (row && row.status !== 'draft') redirect(`/maker/${row.slug}?published=1`);
+    redirect('/maker');
+  }
 
   const checked = checkSubmission(draft);
 

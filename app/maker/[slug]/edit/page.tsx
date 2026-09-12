@@ -7,7 +7,7 @@ import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { ToolTile } from '@/components/ToolTile';
 import { flagLabel, platformLabel, pricingLabel } from '@/lib/constraints';
-import { categoryOptions, makerDashboard, myDraft } from '@/lib/maker';
+import { categoryOptions, makerDashboard, myListingToEdit } from '@/lib/maker';
 import {
   LANGUAGES,
   NAME_MAX,
@@ -116,7 +116,12 @@ export default async function EditListing({ params, searchParams }: Props) {
   // The full row, with the arrays the form needs. One more round trip, and it
   // is the same statement the submit flow's steps use — MY_DRAFT_SQL, which is
   // `tool_is_mine` all over again rather than a second rule.
-  const listing = await myDraft(data.listing.id);
+  //
+  // `myListingToEdit` and not `myDraft`: since the Phase 7 review the latter
+  // is drafts only, because the submit flow is about a draft and kept offering
+  // to publish one that was already live (F7). This screen edits a PUBLISHED
+  // listing, which is most of what it is for.
+  const listing = await myListingToEdit(data.listing.id);
   if (!listing) notFound();
   const categories = await categoryOptions();
 
