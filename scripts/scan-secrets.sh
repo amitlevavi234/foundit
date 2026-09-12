@@ -30,11 +30,16 @@ cd "$(dirname "$0")/.."
 # Values that may legitimately appear as a password in a tracked file.
 # Anything not on this list is treated as real.
 #
-#   local_development_only        the three throwaway passwords in
+#   local_development_only        the four throwaway passwords in
 #   local_development_only_app    db/docker-compose.dev.yml, published on
 #   local_development_only_embed  purpose; that file says why. The third is
-#                                 foundit_embed, added in
-#                                 db/migrations/0005_embed_role.sql.
+#   local_development_only_auth   foundit_embed, added in
+#                                 db/migrations/0005_embed_role.sql, and the
+#                                 fourth is foundit_auth, added in
+#                                 db/migrations/0013_accounts.sql. All four
+#                                 belong to a database that holds invented
+#                                 data, listens on 127.0.0.1 only, and can be
+#                                 deleted at any time.
 #   REPLACE_*, <...>, your-*      placeholders in .env.example.
 #   pass, password, changeme,     placeholders in documentation, e.g. the
 #   secret, hunter2               "postgres://user:pass@host" in eval/README.md
@@ -43,7 +48,7 @@ cd "$(dirname "$0")/.."
 #                                 the mistake not to make.
 #   %s, ${VAR}, %VAR%             a value the shell or printf substitutes at
 #                                 run time, which is the safe pattern.
-ALLOWED_SECRET_LITERALS='local_development_only|local_development_only_app|local_development_only_embed|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|your[-_a-z]*|xxx+|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
+ALLOWED_SECRET_LITERALS='local_development_only|local_development_only_app|local_development_only_embed|local_development_only_auth|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|your[-_a-z]*|xxx+|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
 
 # Files whose content is not text we can usefully scan.
 SKIP_PATH_RE='\.(pdf|png|jpg|jpeg|gif|webp|ico|woff2?|ttf|zip|gz)$'

@@ -106,6 +106,12 @@ jobs:
       # privilege on any table — see db/migrations/0005_embed_role.sql, which
       # explains why this is not the application's job to do.
       DATABASE_URL_EMBED: postgresql://foundit_embed:local_development_only_embed@127.0.0.1:5433/foundit
+      # Better Auth's own role. It reaches the five tables in auth_core and no
+      # object in any other schema — db/migrations/0013_accounts.sql explains
+      # why that is a boundary rather than tidiness. Nothing in CI signs
+      # anybody in; it is here so the job's database is the same shape as a
+      # development one, and so db/test/accounts_test.sql can read its grants.
+      DATABASE_URL_AUTH: postgresql://foundit_auth:local_development_only_auth@127.0.0.1:5433/foundit
       # db/test.sh reaches the database over the network rather than through
       # `docker exec`, because in CI the database is a service container, not
       # a container this job can name.
@@ -140,7 +146,7 @@ jobs:
           fi
           echo "vector, pg_trgm and citext are all available."
 
-      - name: Create the application and embedding roles
+      - name: Create the application, embedding and authentication roles
         # Exactly what db/docker-compose.dev.yml creates on a fresh data
         # directory, and for the same reason: the migrations create both roles
         # with no password if they do not already exist, and a role that
@@ -166,11 +172,18 @@ jobs:
             else
               create role foundit_embed login noinherit password 'local_development_only_embed';
             end if;
+
+            if exists (select 1 from pg_roles where rolname = 'foundit_auth') then
+              alter role foundit_auth login noinherit password 'local_development_only_auth';
+            else
+              create role foundit_auth login noinherit password 'local_development_only_auth';
+            end if;
           end
           $$;
           SQL
           psql "$DATABASE_URL" -qXAt -c "select 'foundit_app can log in: ' || current_user"
           psql "$DATABASE_URL_EMBED" -qXAt -c "select 'foundit_embed can log in: ' || current_user"
+          psql "$DATABASE_URL_AUTH" -qXAt -c "select 'foundit_auth can log in: ' || current_user"
 
       - name: Apply every migration and load the development catalogue
         run: node db/apply.mjs --seed
