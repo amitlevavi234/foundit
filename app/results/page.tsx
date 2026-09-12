@@ -543,11 +543,23 @@ async function Answer({
             judgement = checked.judgement;
             after(() => touchQueryRerank(query, hash));
           } else {
+            // A REFUSED CACHED ROW USED TO PIN THIS PAGE TO THE PHASE 4 ORDER
+            // FOR EVER. The `else if` below was an `else if`, so a row that no
+            // longer validates — one written before a validator got stricter,
+            // or one whose candidate set has shifted — took the miss branch's
+            // place and no fresh call was ever made for that key again. It was
+            // invisible: the page looked exactly like a page whose reranker had
+            // timed out once.
+            //
+            // So a refusal is a MISS. It falls through to the call below, and
+            // the answer overwrites the row it could not read.
             console.error(
-              `a cached judgement was refused (${checked.error}); the search order stands`,
+              `a cached judgement was refused (${checked.error}); asking again`,
             );
           }
-        } else if (mayCallRerank()) {
+        }
+
+        if (judgement === null && mayCallRerank()) {
           const fresh = await rerank(query, candidates);
           mark('rerank-done');
           if (fresh) {
@@ -665,11 +677,58 @@ async function Answer({
     //   if dropping them would turn something up. One search, one row, no
     //   category — and if that comes back empty too, the sentence has no
     //   answer here and the offer would be a wild goose chase.
+    /* --- is "drop a constraint" an honest offer? -------------------------
+     *
+     * One extra search, on a path that is already empty, asking whether the
+     * same sentence without the filters turns anything up.
+     *
+     * ON THE JUDGED BRANCH THAT QUESTION CHANGED, and the Phase 5 review caught
+     * the page not noticing. The probe runs the Phase 4 search; the page the
+     * person would land on runs the reranker over it. So a probe that found
+     * three tools offered "Drop free", and the search behind that link then
+     * judged all three "not for this" and emptied again — a link to the same
+     * page with a different heading.
+     *
+     * So on the judged branch the probe is judged too: one more model call,
+     * only when the page is already empty and only when there is a constraint
+     * to offer dropping. If that judgement cannot be made — no key, the cap,
+     * a timeout — the offer is withdrawn rather than made on the unjudged
+     * probe, because an offer that leads nowhere is worse than no offer.
+     */
     let loosenWouldHelp = false;
     if (!category && constraints.length > 0 && !browseOnly) {
       try {
-        const unconstrained = await searchToolsDetailed(searchText, {}, 1, null);
+        const unconstrained = await searchToolsDetailed(
+          searchText,
+          {},
+          judged ? Math.max(RESULT_LIMIT, RERANK_TOP_N) : 1,
+          null,
+        );
         loosenWouldHelp = unconstrained.results.length > 0;
+
+        if (loosenWouldHelp && judged) {
+          const probe = rerankCandidates(unconstrained.results, RERANK_TOP_N);
+          const probeHash = candidatesHash(probe.map((c) => c.slug));
+          const probeSlugs = probe.map((c) => c.slug);
+          const cachedProbe = await getQueryRerank(query, probeHash);
+          const checkedProbe =
+            cachedProbe !== null && cachedProbe !== undefined
+              ? validateJudgement(cachedProbe, probeSlugs)
+              : null;
+          let probeJudgement =
+            checkedProbe && 'judgement' in checkedProbe ? checkedProbe.judgement : null;
+
+          if (probeJudgement === null && mayCallRerank()) {
+            const fresh = await rerank(query, probe);
+            if (fresh) {
+              probeJudgement = fresh.judgement;
+              after(() => storeQueryRerank(query, probeHash, fresh.judgement, RERANK_MODEL));
+            }
+          }
+          // No judgement means the offer cannot be shown to lead anywhere, so
+          // it is not made.
+          loosenWouldHelp = probeJudgement !== null && applyRerank(unconstrained.results, probeJudgement).length > 0;
+        }
       } catch (error) {
         if (error instanceof QueryTooLongError) throw error;
         // The offer is a courtesy; a failure here must not take the page down.
@@ -678,6 +737,7 @@ async function Answer({
             (error as { code?: string } | null)?.code ?? 'unknown'
           }); the empty page was drawn without it`,
         );
+        loosenWouldHelp = false;
       }
     }
 
@@ -1213,10 +1273,26 @@ function Nothing({
           against each of them. None of them does the thing you described, so this page is empty
           rather than a list of near misses under a confident heading.
         </p>
+        {loosenWouldHelp ? (
+          <p style={{ margin: '12px 0 0' }}>
+            Dropping <strong>{stated.join(', ')}</strong> would turn something up — that search was
+            run and read as well, so the link below leads somewhere rather than to this page with a
+            different heading.
+          </p>
+        ) : stated.length > 0 ? (
+          <p style={{ margin: '12px 0 0' }}>
+            Dropping <strong>{stated.join(', ')}</strong> would not help either: the same sentence
+            with no constraint at all was searched and read, and nothing there fits it.
+          </p>
+        ) : null}
+        {/* The count is honest either way: three ways forward when there is a
+            constraint worth dropping, two when there is not. The page used to
+            say "Two ways forward" while rendering three controls. */}
         <p style={{ margin: '12px 0 0' }}>
-          Two ways forward: browse the problems people have already solved here, or describe it
-          differently in the box below — the situation rather than the tool: what you are trying to
-          get done, and what would make an answer no use to you.
+          {loosenWouldHelp ? 'The other two ways forward: browse' : 'Two ways forward: browse'} the
+          problems people have already solved here, or describe it differently in the box below —
+          the situation rather than the tool: what you are trying to get done, and what would make
+          an answer no use to you.
         </p>
       </EmptyState>
     );

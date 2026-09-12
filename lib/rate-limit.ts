@@ -50,50 +50,60 @@ import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
  * Defaults, all overridable from the environment, and all counted in HTTP
  * REQUESTS rather than in operations.
  *
- * The two daily numbers are not round numbers somebody liked. They are the
- * largest values whose worst case — every cap spent every day for a month, by
- * somebody doing it on purpose — stays under `MAX_MONTHLY_SPEND`, which is five
- * dollars against a server that costs about five euros. `lib/prices.ts` does
- * that arithmetic and `tests/rate-limit.test.mjs` fails if these two drift above
- * it:
+ * The daily numbers are not round numbers somebody liked. They are the largest
+ * values whose worst case — every cap spent every day for a month, by somebody
+ * doing it on purpose — stays under `MAX_MONTHLY_SPEND`, which is five dollars
+ * against a server that costs about five euros. `lib/prices.ts` does that
+ * arithmetic and `tests/rate-limit.test.mjs` recomputes it from the fixture, so
+ * a cap raised past what the money allows fails a test.
  *
- *   reader    1,200 requests/day = 600 readings/day    $4.19 a month
- *   embedding 2,000 requests/day                       $0.02 a month
+ * The asymmetry between them is the price list: a reading is about 1,965 input
+ * tokens twice over, a judgement 2,126 once, and embedding a capped sentence is
+ * fifteen. The embedder could be ten times more generous and still cost
+ * nothing; the other two could not.
  *
- * The asymmetry is the price list: a reading is ~1,850 input tokens twice over,
- * and embedding a capped sentence is fifteen. The embedder could be ten times
- * more generous and still cost nothing; the reader could not.
+ * So the caps are set TOGETHER, from one number: how many first-ever searches a
+ * day a stranger may make us pay for. One search is two reader requests, one
+ * rerank request and at most one embedding request.
  *
- * PHASE 5 MOVED TWO OF THESE, AND IT IS WORTH SAYING WHY RATHER THAN LEAVING
- * THE NUMBERS TO BE NOTICED. The reranker is a third paid call and the dearest
- * of the three per request — it carries thirty listings rather than one
- * sentence. The ceiling did not move, so something had to: at the old reader
- * cap of 1,200 the three together cost $9.05 a month at worst, which is not a
- * ceiling, it is a hope.
+ * **THE NUMBER FELL FROM 320 TO 120, AND THE REASON IS THE ARITHMETIC RATHER
+ * THAN THE PRODUCT.** The Phase 5 review found the cost model computed from
+ * AVERAGE output tokens — 65 for a reading, 206 for a judgement. A cap does not
+ * bound the average; it bounds the bill, and the bill's worst case is a model
+ * that reasons to `max_output_tokens` on every call, which is 900 and 700. At
+ * the averages the three caps cost $4.05 a month and looked comfortable; at the
+ * ceilings the same caps cost $17.52, and the number that was supposed to be a
+ * ceiling was a hope with three decimal places.
  *
- * So the caps are now set TOGETHER, from one number: how many searches a day a
- * stranger may make us pay for. One search is two reader requests, one rerank
- * request and at most one embedding request, so
- *
- *   reader    2 x 320 = 640 requests/day    $2.24 a month
- *   rerank        320 = 320 requests/day    $1.80 a month
+ *   reader    2 x 120 = 240 requests/day    $3.30 a month at the ceiling
+ *   rerank        120 = 120 requests/day    $1.37 a month at the ceiling
  *   embedding    2,000 requests/day         $0.02 a month
- *                                   total   $4.05 a month
+ *                                   total   $4.68 a month
  *
- * against a $5 ceiling. The embedder keeps its generous number because it costs
- * nothing and because it is the one call that still helps when the other two
- * have been spent.
+ * against a $5 ceiling, and `tests/rate-limit.test.mjs` now recomputes all of
+ * it from `db/seed/embeddings.fixture.json` and the two ceilings, so a drifting
+ * constant or a raised cap fails a test rather than a statement. THE TEST IS
+ * THE AUTHORITY AND THIS COMMENT IS NOT: the measured input tokens move by a
+ * few percent each time the fixture is re-recorded, and these three lines are
+ * the last recomputation rather than a promise.
  *
- * 320 first-ever sentences a day is a small product's traffic, and that is the
- * honest position: the caps bound the BILL, not the traffic, and a sentence
- * somebody has typed before costs nothing against any of them. When there is
- * real traffic the ceiling is the thing to revisit, in `lib/prices.ts`, on
- * purpose.
+ * **What this is and is not.** It is a bound on what a STRANGER can make us
+ * spend in a day, and it is not a traffic limit: a sentence somebody has typed
+ * before costs nothing against any of these, so a popular product with a warm
+ * cache runs on a fraction of it. 120 first-ever sentences a day is small, and
+ * saying so is better than saying 320 from a model that understated the worst
+ * case by four times.
+ *
+ * **What to change when there is real traffic**, in this order: the reader's
+ * `max_output_tokens`, which is now the binding constraint at 900 against a
+ * measured 65 and was chosen after an incident rather than from a measurement;
+ * then `MAX_MONTHLY_SPEND` in lib/prices.ts, on purpose, with the owner. Not
+ * these three numbers one at a time.
  */
 export const DEFAULT_SEARCHES_PER_IP_PER_HOUR = 60;
 export const DEFAULT_EMBEDDING_CALLS_PER_DAY = 2000;
-export const DEFAULT_READER_CALLS_PER_DAY = 640;
-export const DEFAULT_RERANK_CALLS_PER_DAY = 320;
+export const DEFAULT_READER_CALLS_PER_DAY = 240;
+export const DEFAULT_RERANK_CALLS_PER_DAY = 120;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -302,6 +312,8 @@ declare global {
         reader: DailyCap;
         rerank: DailyCap;
         circuit: RefusalCircuit;
+        /** Whether the "the rerank budget is spent" line has been said today. */
+        rerankCapAnnounced: boolean;
       }
     | undefined;
 }
@@ -316,6 +328,7 @@ function state() {
     reader: new DailyCap(),
     rerank: new DailyCap(),
     circuit: new RefusalCircuit(),
+    rerankCapAnnounced: false,
   };
   return globalThis.__founditLimiter;
 }
@@ -393,7 +406,22 @@ export function mayCallReader(requests = READER_REQUESTS_PER_READING): boolean {
  * and assumed in another.
  */
 export function mayCallRerank(requests = RERANK_REQUESTS_PER_JUDGEMENT): boolean {
-  return state().rerank.take(limits().rerankCallsPerDay, requests);
+  const allowed = state().rerank.take(limits().rerankCallsPerDay, requests);
+  // SAY SO, ONCE. A spent reader cap is visible — the page says "ordered by
+  // text match" — and a spent EMBEDDING cap logs a line. A spent rerank cap was
+  // silent: the page falls back to the Phase 4 order and says "words and
+  // meaning", which is a true sentence about a degraded product, and nothing
+  // anywhere recorded that the degradation had started. One line, at the
+  // moment it starts and not on every search after it, carrying a count and no
+  // sentence.
+  if (!allowed && !state().rerankCapAnnounced) {
+    state().rerankCapAnnounced = true;
+    console.error(
+      `today's reranker budget of ${limits().rerankCallsPerDay} request(s) is spent; ` +
+        'searches are ordered by the Phase 4 ranking until it resets',
+    );
+  }
+  return allowed;
 }
 
 /* ===========================================================================
@@ -411,19 +439,38 @@ export function mayCallRerank(requests = RERANK_REQUESTS_PER_JUDGEMENT): boolean
  * `readSentence` defends against NOISE, and not against a model, a prompt or a
  * provider that has gone wrong in one direction.
  *
- * So if more than half of the last twenty live readings refused, stop honouring
- * refusals at all and search instead. A real traffic mix is overwhelmingly
- * people asking for software — the golden set refuses none of its 60, and both
- * negatives files together refuse about a fifth — so half is far outside
- * anything normal and well inside anything broken.
+ * So if ENOUGH of the last twenty live readings refused, stop honouring
+ * refusals at all and search instead.
  *
- * `CIRCUIT_MIN_SAMPLES` stops a quiet morning with three plumbers in it from
- * tripping the circuit, and bounds the damage of a genuinely broken model at
- * about ten pages rather than at every page until somebody notices.
+ * "ENOUGH" WAS HALF, AND HALF WAS WRONG. The Phase 5 review ran its own 25
+ * unanswerable sentences through the shipped path — a legitimate thing to do,
+ * and exactly what a person evaluating the product does — and tripped the
+ * circuit twice: 6 refusals in the first 10 samples, 11 in the first 20. The
+ * reader was working perfectly. The circuit then stopped honouring correct
+ * refusals and started answering "I need a plumber" with software, which is the
+ * failure it exists to prevent, caused by the thing that prevents it.
+ *
+ * The numbers were reasoned from "a real traffic mix is overwhelmingly people
+ * asking for software", which is true of traffic and false of any deliberate
+ * sweep of hard cases — a reviewer, an evaluation, a curious owner, or a person
+ * who has typed four unanswerable things in a row because the first three did
+ * not work.
+ *
+ * So: **80% of a FULL window of twenty**. A model that has genuinely broken
+ * refuses everything, so sixteen of twenty is still reached within twenty
+ * searches of it breaking; a run of unanswerable questions is not, because
+ * eleven of twenty is not sixteen. `CIRCUIT_MIN_SAMPLES` is the full window
+ * rather than half of it, so the circuit never concludes anything from ten
+ * samples again.
+ *
+ * The cost of the change is the damage bound: a broken model can now refuse up
+ * to about twenty pages before the circuit opens rather than about ten. That is
+ * the right trade — the ten it buys back are pages a working reader emptied
+ * correctly.
  */
 const CIRCUIT_WINDOW = 20;
-const CIRCUIT_MIN_SAMPLES = 10;
-const CIRCUIT_THRESHOLD = 0.5;
+const CIRCUIT_MIN_SAMPLES = 20;
+const CIRCUIT_THRESHOLD = 0.8;
 
 export class RefusalCircuit {
   private readonly recent: boolean[] = [];
@@ -435,9 +482,11 @@ export class RefusalCircuit {
     if (this.recent.length > CIRCUIT_WINDOW) this.recent.shift();
 
     const refusals = this.recent.filter(Boolean).length;
+    // `>=` rather than `>`: the threshold is a share the circuit trips AT, and
+    // exactly sixteen of twenty is a model refusing four fifths of everything.
     const tripped =
       this.recent.length >= CIRCUIT_MIN_SAMPLES &&
-      refusals / this.recent.length > CIRCUIT_THRESHOLD;
+      refusals / this.recent.length >= CIRCUIT_THRESHOLD;
 
     if (tripped && !this.open) {
       this.open = true;

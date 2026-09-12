@@ -389,6 +389,7 @@ test('a reader that refuses EVERYTHING stops emptying pages', async () => {
   console.error = () => {};
 
   let emptied = 0;
+  let reachedTheSearchAfterwards = 0;
   try {
     for (const sentence of QUESTIONS) {
       const fresh = await withStubbedFetch(
@@ -401,18 +402,28 @@ test('a reader that refuses EVERYTHING stops emptying pages', async () => {
       if (fresh.value) circuit.record(!plan.asksForSoftware);
       const notSoftware = !plan.asksForSoftware && circuit.trusted;
       if (notSoftware) emptied += 1;
+      // Once it is open, the rest of the run has to reach the search. Counted
+      // rather than assumed, because "the circuit opened" and "the pages came
+      // back" are two different claims and only the second one is the product.
+      if (!circuit.trusted && !notSoftware) reachedTheSearchAfterwards += 1;
     }
   } finally {
     console.error = realError;
   }
 
   assert.equal(circuit.trusted, false, 'the circuit must be open after a run like that');
-  // The circuit needs ten samples before it will conclude anything, so the
-  // first ten pages are lost and every one after them renders. That is the
-  // bound, stated: ten, not all of them.
-  assert.ok(emptied <= 10, `at most ten pages may be emptied before it trips, not ${emptied}`);
+  // THE BOUND MOVED IN THE PHASE 5 REVIEW, and this number is the price of that
+  // change. The circuit used to conclude from ten samples and a half-share, and
+  // it tripped twice during a legitimate run of unanswerable sentences —
+  // deciding a working reader was broken, which is the expensive direction of
+  // the two. It now needs a FULL WINDOW of twenty and four fifths of them, so a
+  // genuinely broken model gets up to twenty pages rather than up to ten before
+  // it is cut off. Sixteen here, because four of these twenty-four sentences
+  // are rescued by the rules pass before the reader's verdict is consulted at
+  // all — which is also why the run trips at exactly 16 of 20.
+  assert.ok(emptied <= 20, `at most twenty pages may be emptied before it trips, not ${emptied}`);
   assert.ok(
-    QUESTIONS.length - emptied >= 14,
+    reachedTheSearchAfterwards >= 4,
     'and every question after it trips must reach the search',
   );
 });

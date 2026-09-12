@@ -98,30 +98,58 @@ export const MAX_COST_PER_SEARCH = 0.002;
 export const MAX_MONTHLY_SPEND = 5;
 
 /**
- * What one reader request costs, measured.
+ * What one request costs, measured — and a number that goes stale.
  *
- * Averages over the 355 readings recorded into db/seed/embeddings.fixture.json,
- * divided by the two requests each of them is. Kept here rather than read from
- * the fixture so the arithmetic below works with no file and no database — the
- * eval prints the live figure from the fixture itself and the two agree.
+ * These are averages over everything recorded into
+ * `db/seed/embeddings.fixture.json`, divided by the requests each operation is.
+ * They are kept here as CONSTANTS rather than read from the fixture so that the
+ * arithmetic below works with no file and no database, and that is exactly how
+ * they go wrong: the Phase 5 review found the reader's figure still saying
+ * 1,850 when the file said 1,965, and a comment citing "327 judgements /
+ * 684,735 tokens" that matched no recording that shipped.
+ *
+ * So the numbers are no longer defended by a comment quoting a run. They are
+ * defended by `tests/rate-limit.test.mjs`, which reads the fixture, recomputes
+ * every one of them, and fails if a constant here has drifted more than a
+ * tenth from what the file measures. A figure with a test under it can be
+ * trusted; a figure with an anecdote under it cannot.
  */
-export const READER_INPUT_TOKENS_PER_REQUEST = 1_850;
-export const READER_OUTPUT_TOKENS_PER_REQUEST = 60;
-/** A capped search sentence. Measured over the golden set: 866 tokens for 60. */
+export const READER_INPUT_TOKENS_PER_REQUEST = 1_965;
+export const READER_OUTPUT_TOKENS_PER_REQUEST = 65;
+/** A capped search sentence. Measured the same way: 2,352 tokens for 164. */
 export const EMBEDDING_TOKENS_PER_REQUEST = 15;
 
 /**
  * What one reranker request costs, measured.
  *
- * Averaged over the 327 judgements recorded into db/seed/embeddings.fixture.json
- * at the shipped candidate count of twenty — 684,735 input tokens and 66,028
- * output — the same way the reader's two numbers are averaged over its recorded
- * readings. The figure is dominated by the CANDIDATES rather than by the
- * instructions, so it moves with RERANK_TOP_N and has to be re-measured when
- * that does: at fifty it was about 2,630 input tokens rather than 2,100.
+ * Averaged over every judgement recorded into db/seed/embeddings.fixture.json,
+ * the same way as the reader's, and checked against that file by
+ * tests/rate-limit.test.mjs rather than against a sentence here — the sentence
+ * that used to stand in this place cited "327 judgements, 684,735 tokens" and
+ * matched no recording that shipped.
+ *
+ * The figure is dominated by the CANDIDATES rather than by the instructions, so
+ * it moves with RERANK_TOP_N and has to be re-measured when that does: at fifty
+ * it was about 2,630 input tokens against about 2,130 at twenty.
  */
-export const RERANK_INPUT_TOKENS_PER_REQUEST = 2_100;
-export const RERANK_OUTPUT_TOKENS_PER_REQUEST = 205;
+export const RERANK_INPUT_TOKENS_PER_REQUEST = 2_126;
+export const RERANK_OUTPUT_TOKENS_PER_REQUEST = 206;
+
+/**
+ * The ceilings the two requests are made with — lib/reader-model.ts's and
+ * lib/rerank.ts's `max_output_tokens`.
+ *
+ * THE WORST CASE FOR AN OUTPUT BILL IS NOT THE AVERAGE, it is the ceiling: a
+ * model that starts reasoning to the limit on every call bills
+ * `max_output_tokens` every time, and a daily cap is a bound on the worst case
+ * rather than on the ordinary one. The average is what the per-search figure
+ * uses; this is what the cap arithmetic uses.
+ *
+ * Written here rather than imported so lib/prices.ts stays a leaf with no
+ * imports of its own; tests/rate-limit.test.mjs asserts the two pairs agree.
+ */
+export const READER_MAX_OUTPUT_TOKENS = 900;
+export const RERANK_MAX_OUTPUT_TOKENS = 700;
 
 export interface DailyCaps {
   embeddingCallsPerDay: number;
@@ -143,16 +171,39 @@ export interface WorstCase {
  * counts — which is the fix for the defect where one token was taken for the
  * reader's two calls and the real ceiling was double the stated one.
  */
-export function worstCaseMonthly(caps: DailyCaps): WorstCase {
+/**
+ * Per-request token counts, so a caller with better numbers than the constants
+ * can hand them over.
+ *
+ * `tests/rate-limit.test.mjs` passes the fixture's own measurements and the
+ * `max_output_tokens` ceilings, which is the arithmetic the daily caps are
+ * actually chosen against; everything else uses the defaults.
+ */
+export interface PerRequestTokens {
+  readerIn: number;
+  readerOut: number;
+  rerankIn: number;
+  rerankOut: number;
+  embeddingIn: number;
+}
+
+export const DEFAULT_PER_REQUEST: PerRequestTokens = {
+  readerIn: READER_INPUT_TOKENS_PER_REQUEST,
+  readerOut: READER_OUTPUT_TOKENS_PER_REQUEST,
+  rerankIn: RERANK_INPUT_TOKENS_PER_REQUEST,
+  rerankOut: RERANK_OUTPUT_TOKENS_PER_REQUEST,
+  embeddingIn: EMBEDDING_TOKENS_PER_REQUEST,
+};
+
+export function worstCaseMonthly(
+  caps: DailyCaps,
+  tokens: PerRequestTokens = DEFAULT_PER_REQUEST,
+): WorstCase {
   const perReaderRequest =
-    (READER_INPUT_TOKENS_PER_REQUEST * READER_INPUT_PER_MTOK +
-      READER_OUTPUT_TOKENS_PER_REQUEST * READER_OUTPUT_PER_MTOK) /
-    1e6;
-  const perEmbeddingRequest = (EMBEDDING_TOKENS_PER_REQUEST * EMBEDDING_INPUT_PER_MTOK) / 1e6;
+    (tokens.readerIn * READER_INPUT_PER_MTOK + tokens.readerOut * READER_OUTPUT_PER_MTOK) / 1e6;
+  const perEmbeddingRequest = (tokens.embeddingIn * EMBEDDING_INPUT_PER_MTOK) / 1e6;
   const perRerankRequest =
-    (RERANK_INPUT_TOKENS_PER_REQUEST * RERANK_INPUT_PER_MTOK +
-      RERANK_OUTPUT_TOKENS_PER_REQUEST * RERANK_OUTPUT_PER_MTOK) /
-    1e6;
+    (tokens.rerankIn * RERANK_INPUT_PER_MTOK + tokens.rerankOut * RERANK_OUTPUT_PER_MTOK) / 1e6;
 
   const reader = caps.readerCallsPerDay * perReaderRequest * 30;
   const embedding = caps.embeddingCallsPerDay * perEmbeddingRequest * 30;

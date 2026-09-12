@@ -72,22 +72,44 @@ export const RERANK_TIMEOUT_MS = 4_000;
  * How many candidates are judged.
  *
  * MEASURED, not chosen: `eval/run.mjs --rerank-n=` runs the whole golden set,
- * both negatives files and the 240 perturbations at 20, 30 and 50, and the
- * table is in `eval/baselines.md`. The cost is roughly linear in this number
- * and the quality is not, which is the whole reason to measure it.
+ * both negatives files and the 240 perturbations at a given N. The first time
+ * this was decided it was decided on ONE recording each at 20, 30 and 50, which
+ * the Phase 5 review pointed out is not enough to distinguish a knob from the
+ * model's own wobble. THREE recordings each at 20 and 30, in
+ * `eval/recordings/n20-{1,2,3}.json` and `n30-{1,2,3}.json`:
  *
- *   N     nDCG@10   negatives   held-out   $/search
- *   20    0.8682    21 of 30    21 of 25   0.000433
- *   30    0.8579    22 of 30    21 of 25   0.000463
- *   50    0.8477    22 of 30    21 of 25   0.000487
+ *   N    nDCG@10                      mean      recall mean   $/search
+ *   20   0.8811  0.8707  0.8711       0.8743    0.7744        0.000427
+ *   30   0.8392  0.8585  0.8654       0.8544    0.7578        0.000434
  *
- * Twenty wins on the number, on the money and on the clock, and it is the only
- * one of the three that is not also worse at answering: 30 and 50 empty one
- * more of our own negatives and neither empties one more of the held-out file.
- * `docs/build-phases.md` names fifty; fifty is measurably the worst of the
- * three, and the reason is legible in the run — a longer candidate list makes a
- * longer prompt, and at 50 the four-second timeout was missed on 28 of 341
- * sentences against 9 at 20, each of which then measures the Phase 4 order.
+ * **Every recording at 20 beats every recording at 30**, the lowest 20 (0.8707)
+ * above the highest 30 (0.8654), so this is not the two distributions
+ * overlapping — it is a real difference, and it points the way the first
+ * measurement said it did. Recall says the same thing, so the "consider 30 if
+ * its recall is reproducibly higher" case does not arise.
+ *
+ * The negatives columns are IDENTICAL at both — 22.7 of 30 either way — and
+ * that is not a coincidence and not evidence either: a sentence the catalogue
+ * cannot answer returns about four rows, and 0 of the 25 held-out negatives
+ * return more than twenty at all, so N cannot reach them. Any difference there
+ * is the model wobbling. The golden set is where N binds: 60% of those searches
+ * return more than twenty rows and 42% more than thirty.
+ *
+ * Why MORE candidates make it WORSE is legible in the runs: a longer candidate
+ * list is a longer prompt against the same four-second budget, and coverage
+ * falls from 348 of 353 searches judged at N=20 to 342.7 at N=30. Every
+ * unjudged search measures the Phase 4 order. At N=50, on the single recording
+ * taken, the timeout was missed on 28 of 341.
+ *
+ * WHAT 20 GIVES UP, counted rather than waved at: over the 60 golden queries the
+ * search returns 195 graded-relevant tools inside its top 50, and **12 of them
+ * sit at ranks 21-50** — 6.2%, spread over 11 queries. Those twelve are never
+ * shown to the reranker at N=20 and could have been promoted at N=50. That is
+ * the price, and it is paid to get the other 183 judged by a model that has not
+ * been handed a prompt it answers worse.
+ *
+ * `docs/build-phases.md` names fifty. Fifty is measurably the worst of the
+ * three.
  */
 export const RERANK_TOP_N = 20;
 
@@ -113,10 +135,83 @@ export const MAX_RERANK_INPUT = 200;
  */
 export const RERANK_REQUESTS_PER_JUDGEMENT = 1;
 
+/**
+ * The ceiling on what one judgement may produce.
+ *
+ * IT WAS 2,000, AND 2,000 WAS NOT A CEILING. Twenty verdicts of about a dozen
+ * tokens each plus minimal reasoning measures ~206 output tokens across every
+ * judgement in the fixture, so two thousand was nearly ten times the need — and
+ * `max_output_tokens` is the number the WORST case is billed at, which is what
+ * a daily cap has to bound. The Phase 5 review made the cap arithmetic compute
+ * from these ceilings rather than from the averages, and at 2,000 the three
+ * caps together came to $17.52 a month against a $5 ceiling.
+ *
+ * 700 is three and a half times the measured mean, which is headroom for a
+ * candidate list that reasons harder than usual and is still a bound. If a
+ * judgement ever comes back with no text because it ran past this, the response
+ * carries `status: incomplete`, `callResponses` refuses it by name, and the
+ * page is the Phase 4 page — the same failure as a timeout, and visible in the
+ * "recorded judgements refused" line of any run.
+ */
+export const RERANK_MAX_OUTPUT_TOKENS = 700;
+
+/**
+ * How hard the model may think before judging.
+ *
+ * MEASURED, and the measurement is in eval/baselines.md. The Phase 5 review
+ * found that 27 of 194 (slug, sentence) judgements changed across three live
+ * calls — 14% — and 26 of those crossed the line between shown and not shown,
+ * which is a page that changes under a person who reloads it. The obvious lever
+ * is reasoning effort, so it was tried rather than assumed.
+ *
+ * TEN SENTENCES, THREE CALLS EACH, AT BOTH SETTINGS:
+ *
+ *   minimal  30 calls, 0 failed   37 of 147 pairs changed (25.2%), 26 crossed
+ *   low      12 calls, 18 FAILED   0 of  38 pairs changed, on the 12 that returned
+ *
+ * `low` is not a choice this timeout can make. Eighteen of its thirty calls did
+ * not finish inside the four seconds a visitor is waiting — the slowest that did
+ * took 4,020 ms — so the setting that looks perfectly stable is stable on the
+ * third of its calls that came back, and the other two thirds are a page with no
+ * judgement on it at all. Buying stability by not answering is not buying
+ * stability. It is also dearer per judgement ($0.000238 against $0.000183),
+ * because the reasoning tokens are output tokens.
+ *
+ * So: `minimal`, and the instability is written down rather than fixed —
+ * `docs/loop-progress.md` known weaknesses, and beside the spread in
+ * `eval/baselines.md`. The honest ways to spend money on it are a longer
+ * timeout, or two samples that vote the way the reader's do; both are changes to
+ * what a search costs and neither is a constant in this file.
+ */
+export const RERANK_EFFORT: 'minimal' | 'low' = 'minimal';
+
 /** Candidate text is capped too: one listing may not fill the whole prompt. */
 const MAX_CANDIDATE_SUMMARY = 300;
 const MAX_CANDIDATE_STATEMENT = 200;
-const MAX_CANDIDATE_STATEMENTS = 4;
+
+/**
+ * How many of a candidate's problem statements the model is shown. FOUR.
+ *
+ * THE MODEL DOES NOT SEE THE WHOLE LISTING, and a claim that it judged "the
+ * tool" is a claim about these four sentences and the summary. A listing with
+ * nine statements is judged on the first four in `sort_order` — which is the
+ * order the listing's own author chose, not a ranking against the sentence, so
+ * the statement that would have answered this particular person can be the
+ * fifth one and never leave the database.
+ *
+ * Four because the prompt is public and paid for by the request: twenty
+ * candidates at four statements each is the ~2,100 input tokens the cost model
+ * in `lib/prices.ts` is built on, and `docs/build-phases.md`'s own seed
+ * requirement is four statements per tool, so four is what nearly every
+ * published listing has. It is a budget, though, not a finding — nobody has
+ * measured what eight would do, and the honest way to raise it is to measure
+ * the nDCG and the bill together rather than to assume more text is better.
+ *
+ * `docs/loop-progress.md` and `docs/product-decisions.md` §6 say the same thing
+ * in prose, because it is the kind of limit a reader of a ranked page would
+ * want to know about and would never guess.
+ */
+export const MAX_CANDIDATE_STATEMENTS = 4;
 
 /**
  * One candidate, as the model sees it. Four fields, and there is no fifth.
@@ -305,20 +400,61 @@ export function rerankCandidates(
   }));
 }
 
-/** The one string the model is given. Exported so a test can read what goes out. */
+/**
+ * Control characters, and everything a line-oriented prompt can be split with.
+ *
+ * THIS IS THE FIX FOR A REAL ATTACK, and the attack is worth writing down
+ * because the damage was invisible. The first version of `rerankInput` built a
+ * line-per-field YAML-ish block by interpolation, so a problem statement
+ * containing a newline — `"...\n- slug: something-else"` — forged a second
+ * candidate in the list. The model then answered about a slug that was not in
+ * the schema's enum, or omitted a real one, and `validateJudgement` refused the
+ * WHOLE judgement. Every search whose candidate set contained that tool fell
+ * silently back to the Phase 4 order, for ever, with one log line nobody reads.
+ *
+ * A statement is written by a person today and by a MAKER from Phase 7, so this
+ * is the path a listing owner will one day control.
+ *
+ * Two defences, because either alone is thin. The candidates go out as JSON
+ * rather than as lines, so a newline inside a value is escaped by
+ * `JSON.stringify` and cannot start a new field. And every field is stripped of
+ * control characters first, so the escaped form does not reach the model as
+ * `\n` either — it is not there at all.
+ */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu;
+
+/** One candidate field, capped and stripped. Never a place to hide a newline. */
+function clean(text: unknown, limit: number): string {
+  return capText(String(text ?? '').replace(CONTROL_CHARACTERS, ' '), limit).replace(/\s+/gu, ' ').trim();
+}
+
+/**
+ * The one string the model is given. Exported so a test can read what goes out.
+ *
+ * JSON, not prose: `{"sentence": ..., "tools": [{slug, name, summary, solves}]}`.
+ * The shape is fixed by `JSON.stringify` rather than by this function's
+ * formatting, which is what makes a candidate unable to forge a sibling.
+ */
 export function rerankInput(sentence: string, candidates: readonly RerankCandidate[]): string {
-  const lines = [`sentence: ${JSON.stringify(capText(sentence, MAX_RERANK_INPUT))}`, '', 'tools:'];
-  for (const candidate of candidates) {
-    lines.push(`- slug: ${candidate.slug}`);
-    lines.push(`  name: ${candidate.name}`);
-    if (candidate.summary) {
-      lines.push(`  summary: ${capText(candidate.summary, MAX_CANDIDATE_SUMMARY)}`);
-    }
-    for (const statement of candidate.statements.slice(0, MAX_CANDIDATE_STATEMENTS)) {
-      lines.push(`  solves: ${capText(statement, MAX_CANDIDATE_STATEMENT)}`);
-    }
-  }
-  return lines.join('\n');
+  return JSON.stringify(
+    {
+      sentence: clean(capText(sentence, MAX_RERANK_INPUT), MAX_RERANK_INPUT),
+      tools: candidates.map((candidate) => ({
+        slug: clean(candidate.slug, 120),
+        name: clean(candidate.name, 120),
+        summary: clean(candidate.summary, MAX_CANDIDATE_SUMMARY),
+        solves: candidate.statements
+          .slice(0, MAX_CANDIDATE_STATEMENTS)
+          .map((statement) => clean(statement, MAX_CANDIDATE_STATEMENT))
+          .filter(Boolean),
+      })),
+    },
+    // COMPACT, with no indentation, and that is part of the guarantee rather
+    // than a saving: with no pretty-printing there is not a single control
+    // character anywhere in what goes out, so "this prompt contains no control
+    // characters" is one assertion over the whole string rather than a walk of
+    // its values. It is also a few hundred tokens cheaper per search.
+  );
 }
 
 export type RerankFailure = string;
@@ -456,9 +592,15 @@ export function relevanceBand(
 ): { label: string; note: string; tone: 'both' | 'one' | 'name' } {
   switch (relevance) {
     case 3:
+      // SOFTENED after the Phase 5 review. It used to read "this is what the
+      // tool is for", which is a claim about the TOOL — and the judgement
+      // behind it is one model's reading of one listing's own description
+      // against one sentence, which cannot establish what a product is for. It
+      // can say that the two were read together and came out looking like a
+      // close match, and that is what it now says.
       return {
         label: 'Strong',
-        note: 'Your sentence and this listing were read together, and this is what the tool is for.',
+        note: 'Your sentence and this listing were read together, and this looked like a close match.',
         tone: 'both',
       };
     case 2:
@@ -490,6 +632,7 @@ export function hadGoodMatch(judgement: RerankJudgement | null, shown: readonly 
 export async function rerankOrThrow(
   sentence: string,
   candidates: readonly RerankCandidate[],
+  options: { effort?: 'minimal' | 'low' } = {},
 ): Promise<RerankResult> {
   const capped = capText(sentence, MAX_RERANK_INPUT);
   if (capped.trim() === '') throw new ReaderError('the sentence is empty');
@@ -510,8 +653,8 @@ export async function rerankOrThrow(
     schemaName: 'rerank_judgement',
     schema: rerankSchema(slugs),
     timeoutMs: RERANK_TIMEOUT_MS,
-    // Fifty verdicts of about twelve tokens each, plus minimal reasoning.
-    maxOutputTokens: 2_000,
+    maxOutputTokens: RERANK_MAX_OUTPUT_TOKENS,
+    effort: options.effort ?? RERANK_EFFORT,
   });
 
   const checked = validateJudgement(answer.parsed, slugs);

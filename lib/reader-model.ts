@@ -665,6 +665,17 @@ export interface ResponsesRequest {
   timeoutMs: number;
   /** The ceiling on output tokens, reasoning tokens included. */
   maxOutputTokens: number;
+  /**
+   * How hard the model may think before answering.
+   *
+   * `minimal` everywhere unless a caller says otherwise, and the default is a
+   * measurement rather than a preference: at `low` the reader's sentences cost
+   * three to five times as much and missed the three-second timeout
+   * (lib/prices.ts). Phase 5 re-measured it for the RERANKER, whose question is
+   * harder and whose budget is a second longer — the numbers are in
+   * eval/baselines.md.
+   */
+  effort?: 'minimal' | 'low';
 }
 
 /** What one call produced, before anything has validated its shape. */
@@ -734,7 +745,7 @@ export async function callResponses(request: ResponsesRequest): Promise<Response
             schema: request.schema,
           },
         },
-        reasoning: { effort: 'minimal' },
+        reasoning: { effort: request.effort ?? 'minimal' },
         max_output_tokens: request.maxOutputTokens,
         store: false,
       }),

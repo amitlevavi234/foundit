@@ -15,6 +15,7 @@
 // ===========================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   DEFAULT_EMBEDDING_CALLS_PER_DAY,
@@ -28,7 +29,18 @@ import {
   visitorKey,
 } from '../lib/rate-limit.ts';
 import { READER_REQUESTS_PER_READING } from '../lib/reader-model.ts';
-import { costOf, MAX_MONTHLY_SPEND, worstCaseMonthly } from '../lib/prices.ts';
+import {
+  costOf,
+  EMBEDDING_TOKENS_PER_REQUEST,
+  MAX_MONTHLY_SPEND,
+  READER_INPUT_TOKENS_PER_REQUEST,
+  READER_MAX_OUTPUT_TOKENS,
+  READER_OUTPUT_TOKENS_PER_REQUEST,
+  RERANK_INPUT_TOKENS_PER_REQUEST,
+  RERANK_MAX_OUTPUT_TOKENS,
+  RERANK_OUTPUT_TOKENS_PER_REQUEST,
+  worstCaseMonthly,
+} from '../lib/prices.ts';
 
 const HOUR = 60 * 60 * 1000;
 const MINUTE = 60 * 1000;
@@ -184,8 +196,8 @@ test('the limits come from the environment, with the documented defaults', () =>
     // move, so the reader's 1,200 would have put the three together at $9.05 a
     // month. The three caps are now set together from one number — how many
     // first-ever searches a day a stranger may make us pay for — which is 320.
-    assert.equal(DEFAULT_READER_CALLS_PER_DAY, 640, '.env.example says 640 — two requests per reading, 320 readings');
-    assert.equal(DEFAULT_RERANK_CALLS_PER_DAY, 320, '.env.example says 320 — one request per judgement');
+    assert.equal(DEFAULT_READER_CALLS_PER_DAY, 240, '.env.example says 240 — two requests per reading, 120 readings');
+    assert.equal(DEFAULT_RERANK_CALLS_PER_DAY, 120, '.env.example says 120 — one request per judgement');
 
     process.env.MAX_SEARCHES_PER_IP_PER_HOUR = '5';
     assert.equal(limits().searchesPerIpPerHour, 5, 'the environment wins');
@@ -248,6 +260,71 @@ test('the worst case at the default caps is under the monthly ceiling', () => {
   assert.ok(costOf({ readerIn: 1, readerOut: 1, embeddingIn: 1, searches: 1 }).total > 0);
 });
 
+test('the cap arithmetic is computed from the fixture, not from a comment', () => {
+  // THE PHASE 5 REVIEW'S FINDING. lib/prices.ts held per-request token counts
+  // as constants defended by a sentence quoting a run — and the sentence quoted
+  // a run that never shipped, while the constant said 1,850 where the file said
+  // 1,965. A cost model nobody recomputes is a cost model that is wrong by an
+  // unknown amount in an unknown direction.
+  //
+  // So the fixture is the authority, and this test recomputes everything from
+  // it. Two assertions, and the second is the one that catches drift:
+  //
+  //   * the WORST case, from the fixture's measured input and the
+  //     max_output_tokens ceilings — because a model that reasons to the limit
+  //     on every call bills the ceiling, and a daily cap bounds the worst case
+  //     rather than the ordinary one;
+  //   * and the constants in lib/prices.ts, against the fixture, within a
+  //     tenth. A constant that has drifted further than that fails here with
+  //     both numbers in the message.
+  const fixture = JSON.parse(
+    readFileSync(new URL('../db/seed/embeddings.fixture.json', import.meta.url), 'utf8'),
+  );
+  const { readingTokens: rd, rerankTokens: rr, queryTokens: qt } = fixture;
+  assert.ok(rd?.sentences > 0, 'the fixture must carry reader token counts');
+  assert.ok(rr?.judgements > 0, 'the fixture must carry reranker token counts');
+  assert.ok(qt?.sentences > 0, 'the fixture must carry embedding token counts');
+
+  const measured = {
+    readerIn: rd.in / (rd.sentences * READER_REQUESTS_PER_READING),
+    readerOut: rd.out / (rd.sentences * READER_REQUESTS_PER_READING),
+    rerankIn: rr.in / rr.judgements,
+    rerankOut: rr.out / rr.judgements,
+    embeddingIn: qt.in / qt.sentences,
+  };
+
+  // The ceilings the requests are actually made with, asserted against the
+  // modules that make them so the two cannot drift apart.
+  assert.equal(READER_MAX_OUTPUT_TOKENS, 900, 'lib/reader-model.ts sends max_output_tokens: 900');
+  assert.equal(RERANK_MAX_OUTPUT_TOKENS, 700, 'lib/rerank.ts sends max_output_tokens: 700');
+
+  const worstCase = worstCaseMonthly(limits(), {
+    ...measured,
+    readerOut: READER_MAX_OUTPUT_TOKENS,
+    rerankOut: RERANK_MAX_OUTPUT_TOKENS,
+  });
+  assert.ok(
+    worstCase.total < MAX_MONTHLY_SPEND,
+    `at the fixture's measured input and every call reasoning to its output ceiling, ` +
+      `spending every cap for a month costs $${worstCase.total.toFixed(2)} — over the ` +
+      `$${MAX_MONTHLY_SPEND.toFixed(2)} ceiling. Lower a cap in lib/rate-limit.ts.`,
+  );
+
+  for (const [name, constant, from] of [
+    ['READER_INPUT_TOKENS_PER_REQUEST', READER_INPUT_TOKENS_PER_REQUEST, measured.readerIn],
+    ['READER_OUTPUT_TOKENS_PER_REQUEST', READER_OUTPUT_TOKENS_PER_REQUEST, measured.readerOut],
+    ['RERANK_INPUT_TOKENS_PER_REQUEST', RERANK_INPUT_TOKENS_PER_REQUEST, measured.rerankIn],
+    ['RERANK_OUTPUT_TOKENS_PER_REQUEST', RERANK_OUTPUT_TOKENS_PER_REQUEST, measured.rerankOut],
+    ['EMBEDDING_TOKENS_PER_REQUEST', EMBEDDING_TOKENS_PER_REQUEST, measured.embeddingIn],
+  ]) {
+    assert.ok(
+      Math.abs(constant - from) <= Math.max(from * 0.1, 1),
+      `lib/prices.ts says ${name} = ${constant}; db/seed/embeddings.fixture.json ` +
+        `measures ${from.toFixed(1)}. Correct the constant.`,
+    );
+  }
+});
+
 test('a reader that refuses everything stops being believed', () => {
   // Two samples of a broken model are two samples of a broken model. A review
   // pointed a stub that refused every sentence at the page and three of four
@@ -284,18 +361,62 @@ test('a reader that refuses everything stops being believed', () => {
   }
 });
 
-test('the circuit needs enough evidence before it trips', () => {
+test('the circuit needs a full window before it concludes anything', () => {
   const circuit = new RefusalCircuit();
   const realError = console.error;
   console.error = () => {};
   try {
-    // Nine refusals out of nine is 100% and still under the minimum sample
-    // count, so it holds its nerve.
-    for (let i = 0; i < 9; i += 1) circuit.record(true);
-    assert.equal(circuit.trusted, true, 'nine samples is not enough to conclude anything');
+    // Nineteen refusals out of nineteen is 100% and still under the minimum
+    // sample count, so it holds its nerve.
+    for (let i = 0; i < 19; i += 1) circuit.record(true);
+    assert.equal(circuit.trusted, true, 'nineteen samples is not a full window');
     circuit.record(true);
-    assert.equal(circuit.trusted, false, 'ten is');
-    assert.equal(circuit.samples, 10);
+    assert.equal(circuit.trusted, false, 'twenty of twenty is');
+    assert.equal(circuit.samples, 20);
+  } finally {
+    console.error = realError;
+  }
+});
+
+test('a legitimate run of unanswerable sentences does not trip it', () => {
+  // THE PHASE 5 REVIEW'S FINDING, and the reason the threshold moved from half
+  // to four fifths. The reviewer ran their own 25 unanswerable sentences
+  // through the shipped path — a legitimate thing to do, and exactly what a
+  // person evaluating the product does — and tripped the circuit twice: 6
+  // refusals in the first 10 samples, 11 in the first 20. The reader was
+  // working perfectly. The circuit then stopped honouring correct refusals and
+  // started answering "I need a plumber" with software, which is the failure it
+  // exists to prevent, caused by the thing that prevents it.
+  const circuit = new RefusalCircuit();
+  const realError = console.error;
+  const said = [];
+  console.error = (line) => said.push(String(line));
+  try {
+    // The review's first ten: six refused, four did not.
+    for (let i = 0; i < 6; i += 1) circuit.record(true);
+    for (let i = 0; i < 4; i += 1) circuit.record(false);
+    assert.equal(circuit.trusted, true, 'six of ten unanswerable sentences is not a broken reader');
+
+    // Their first twenty: eleven refused.
+    for (let i = 0; i < 5; i += 1) circuit.record(true);
+    for (let i = 0; i < 5; i += 1) circuit.record(false);
+    assert.equal(circuit.samples, 20);
+    assert.equal(circuit.trusted, true, 'eleven of twenty is a hard set, not a broken reader');
+
+    // A whole file of them — fifteen in twenty, three quarters — is still
+    // somebody working through difficult cases rather than a model that has
+    // stopped reading.
+    const window = [];
+    for (let i = 0; i < 20; i += 1) window.push(i < 15);
+    for (const refused of window) circuit.record(refused);
+    assert.equal(circuit.trusted, true, 'fifteen of twenty is still under the bar');
+
+    assert.deepEqual(said, [], 'and it has said nothing at all');
+
+    // Sixteen is not.
+    for (let i = 0; i < 20; i += 1) circuit.record(i < 16);
+    assert.equal(circuit.trusted, false, 'sixteen of twenty is a model refusing four fifths');
+    assert.equal(said.length, 1);
   } finally {
     console.error = realError;
   }
