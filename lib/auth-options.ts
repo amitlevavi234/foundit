@@ -89,6 +89,82 @@ export async function hashSignInCode(code: string): Promise<string> {
   return createHmac('sha256', signInCodeKey()).update(code, 'utf8').digest('base64url');
 }
 
+/* ===========================================================================
+ * The scopes, the tokens we refuse to keep, and the header the library's own
+ * limiter counts by
+ *
+ * All three are here rather than in lib/auth.ts for the reason at the top of
+ * this file: lib/auth.ts imports `server-only` and opens a pool, and these are
+ * three decisions a test in plain Node has to be able to read and drive.
+ * ======================================================================== */
+
+/**
+ * `openid email profile`, once each.
+ *
+ * Better Auth MERGES its defaults with a configured list rather than replacing
+ * them, so `scope: ['openid','email','profile']` on its own produced a consent
+ * URL reading `email+profile+openid+openid+email+profile`. Harmless to Google
+ * and embarrassing to read; `disableDefaultScope` in lib/auth.ts is what turns
+ * the merge off so this list is the whole of it.
+ */
+export const GOOGLE_SCOPES = ['openid', 'email', 'profile'] as const;
+
+/**
+ * The columns Better Auth would otherwise keep from the provider, and does not.
+ *
+ * After a Google sign-in, `auth_core.account` held an access token and an ID
+ * token for an account this application never calls again: everything it needs
+ * arrived in the profile at sign-in, and nothing anywhere asks Google anything
+ * afterwards. A stored token is a credential to somebody else's system sitting
+ * in our database for as long as it is valid, bought for nothing — and the
+ * cheapest way to not leak a secret is to not have it.
+ *
+ * `updateAccountOnSignIn` is the library's default, so the same hook runs on
+ * the create AND the update, or the second sign-in would put back what the
+ * first one refused.
+ */
+export const PROVIDER_TOKEN_COLUMNS = [
+  'accessToken',
+  'refreshToken',
+  'idToken',
+  'accessTokenExpiresAt',
+  'refreshTokenExpiresAt',
+] as const;
+
+/**
+ * The same account row with every provider token nulled.
+ *
+ * Only keys that are already there are touched: `update.before` is handed a
+ * PARTIAL account, and inventing a column the adapter was not going to write is
+ * a different bug.
+ */
+export function withoutProviderTokens(
+  account: Record<string, unknown>,
+): Record<string, unknown> {
+  const data: Record<string, unknown> = { ...account };
+  for (const column of PROVIDER_TOKEN_COLUMNS) {
+    if (column in data) data[column] = null;
+  }
+  return data;
+}
+
+/**
+ * Which header Better Auth's own rate limiter counts a client by.
+ *
+ * Its default is `x-forwarded-for`, which anybody talking to the origin can
+ * write — so an attacker minting a fresh value per request would get a fresh
+ * bucket per request, which is worse than no limit because it looks like one.
+ * `cf-connecting-ip` is set by Cloudflare and overwritten on every request
+ * (lib/visitor.ts says the same thing at more length, and this list is
+ * deliberately its first entry).
+ *
+ * When that header is absent — a direct-to-origin request, or development —
+ * `getIP` resolves nothing and the library keys on one shared bucket per path.
+ * That is the same trade lib/rate-limit.ts makes: unavailable-ish for everybody
+ * unattributable, rather than unlimited for anybody who can type a header.
+ */
+export const AUTH_IP_HEADERS = ['cf-connecting-ip'] as const;
+
 /**
  * The plugins and the rate-limit backend — the two things that add tables.
  *

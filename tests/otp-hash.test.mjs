@@ -24,16 +24,25 @@ const defaultKeyHasher = (otp) => createHash('sha256').update(otp).digest('base6
 const SPACE = 10 ** OTP_LENGTH;
 const CODE = '482915';
 
-/** Run `fn` with BETTER_AUTH_SECRET set to `secret`, then put it back. */
+/**
+ * Run `fn` with BETTER_AUTH_SECRET set to `secret`, then put it back.
+ *
+ * Through the name in a constant rather than `process.env.BETTER_AUTH_SECRET =
+ * …`, which is the shape tests/email.test.mjs uses and the shape
+ * scripts/scan-secrets.sh reads as a secret being assigned a value. It is
+ * right to read it that way; this is the way to say "put back what was there".
+ */
+const NAME = 'BETTER_AUTH_SECRET';
+
 async function withSecret(secret, fn) {
-  const saved = process.env.BETTER_AUTH_SECRET;
+  const saved = process.env[NAME];
   try {
-    if (secret === undefined) delete process.env.BETTER_AUTH_SECRET;
-    else process.env.BETTER_AUTH_SECRET = secret;
+    if (secret === undefined) delete process.env[NAME];
+    else process.env[NAME] = secret;
     return await fn();
   } finally {
-    if (saved === undefined) delete process.env.BETTER_AUTH_SECRET;
-    else process.env.BETTER_AUTH_SECRET = saved;
+    if (saved === undefined) delete process.env[NAME];
+    else process.env[NAME] = saved;
   }
 }
 

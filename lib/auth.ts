@@ -4,7 +4,12 @@ import { betterAuth } from 'better-auth';
 import { nextCookies } from 'better-auth/next-js';
 
 import { authDatabaseConfigured, authPool } from './auth-db';
-import { schemaOptions } from './auth-options';
+import {
+  AUTH_IP_HEADERS,
+  GOOGLE_SCOPES,
+  schemaOptions,
+  withoutProviderTokens,
+} from './auth-options';
 import { emailConfigured } from './email';
 
 export {
@@ -118,6 +123,15 @@ function build() {
     advanced: {
       // Only over HTTPS in production; localhost has no certificate.
       useSecureCookies: process.env.NODE_ENV === 'production',
+
+      // Which header the library's OWN limiter counts a client by. Its default
+      // is `x-forwarded-for`, which anybody talking to the origin can write,
+      // so the default is a limit somebody can opt out of by typing. The list
+      // and the reasoning are in lib/auth-options.ts beside AUTH_IP_HEADERS;
+      // it matches lib/visitor.ts, which is what the application's own limiter
+      // uses, so the two count the same visitor.
+      ipAddress: { ipAddressHeaders: [...AUTH_IP_HEADERS] },
+
       defaultCookieAttributes: {
         httpOnly: true,
         // Lax and not Strict, deliberately: the Google callback is a top-level
@@ -135,11 +149,34 @@ function build() {
             clientId: env('GOOGLE_CLIENT_ID'),
             clientSecret: env('GOOGLE_CLIENT_SECRET'),
             // openid email profile, which is what Google's own guidance says
-            // to ask for and is everything this product needs.
-            scope: ['openid', 'email', 'profile'],
+            // to ask for and is everything this product needs — ONCE EACH.
+            // Better Auth appends a configured list to its own defaults rather
+            // than replacing them, so without the line below the consent URL
+            // read `email+profile+openid+openid+email+profile`.
+            disableDefaultScope: true,
+            scope: [...GOOGLE_SCOPES],
           },
         }
       : {},
+
+    // NOTHING FROM THE PROVIDER IS KEPT EXCEPT WHO THEY ARE. Google hands back
+    // an access token and an ID token with the profile, and Better Auth stores
+    // both by default — a credential to somebody else's system, in our
+    // database, for an account this application never calls again. The hook
+    // runs on the update as well as the create because `updateAccountOnSignIn`
+    // defaults to true, so the second sign-in would otherwise put back what the
+    // first one refused. lib/auth-options.ts has the column list and the
+    // reasoning; tests/auth-account.test.mjs drives it.
+    databaseHooks: {
+      account: {
+        create: {
+          before: async (account) => ({ data: withoutProviderTokens(account) }),
+        },
+        update: {
+          before: async (account) => ({ data: withoutProviderTokens(account) }),
+        },
+      },
+    },
 
     // The plugins and the rate-limit backend come from lib/auth-options.ts,
     // which is the half of this configuration that decides what TABLES exist —
