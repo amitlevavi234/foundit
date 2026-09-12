@@ -274,6 +274,19 @@ export interface SearchEvent {
    */
   matchJudged?: boolean;
   latencyMs?: number | null;
+  /**
+   * Which tools this search returned, in the order it showed them.
+   *
+   * Phase 7. It becomes rows in `public.search_event_tools` — the maker
+   * dashboard's "searches that found you" — and it is passed through
+   * `public.log_search_event_tools`, which inserts the event and these rows
+   * together and RETURNS NOTHING. The event id never reaches the application,
+   * for the reason 0001 gives about this table: an id handed back is a
+   * correlation handle, and search text must never become joinable to a
+   * person. There is still no user field on this interface and no user column
+   * on either table, and there never will be.
+   */
+  toolIds?: readonly string[];
 }
 
 /** The three bands a fit is shown in until there are labels to calibrate on. */

@@ -647,6 +647,13 @@ async function Answer({
         hadGoodMatch: hadGoodMatch(relevance, results.map((r) => r.slug)),
         matchJudged: judged,
         latencyMs,
+        // PHASE 7. Which tools came back, in the order this page showed them,
+        // so a maker can see the demand their listing answers
+        // (public.search_event_tools, and /maker). It carries no user field
+        // and there is no user column on either table to put one in: what
+        // reaches a maker is an aggregate over at least five separate searches
+        // (public.maker_query_threshold), decided in the database.
+        toolIds: results.map((r) => r.toolId),
       });
     });
   }

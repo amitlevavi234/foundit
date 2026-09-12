@@ -24,9 +24,12 @@ import {
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_RERANK_CALLS_PER_DAY,
   DEFAULT_SEARCHES_PER_IP_PER_HOUR,
+  DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY,
+  DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
   DailyCap,
   RefusalCircuit,
   TokenBuckets,
+  allowPublish,
   allowSignInCode,
   limits,
   visitorKey,
@@ -192,6 +195,8 @@ test('the limits come from the environment, with the documented defaults', () =>
     MAX_RERANK_CALLS_PER_DAY: process.env.MAX_RERANK_CALLS_PER_DAY,
     MAX_CODES_PER_ADDRESS_PER_HOUR: process.env.MAX_CODES_PER_ADDRESS_PER_HOUR,
     MAX_CODES_PER_IP_PER_HOUR: process.env.MAX_CODES_PER_IP_PER_HOUR,
+    MAX_TOOLS_PER_ACCOUNT_PER_DAY: process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY,
+    MAX_TOOLS_PER_ADDRESS_PER_HOUR: process.env.MAX_TOOLS_PER_ADDRESS_PER_HOUR,
   };
   try {
     for (const name of Object.keys(saved)) delete process.env[name];
@@ -205,7 +210,17 @@ test('the limits come from the environment, with the documented defaults', () =>
       rerankCallsPerDay: DEFAULT_RERANK_CALLS_PER_DAY,
       codesPerAddressPerHour: DEFAULT_CODES_PER_ADDRESS_PER_HOUR,
       codesPerIpPerHour: DEFAULT_CODES_PER_IP_PER_HOUR,
+      toolsPerAccountPerDay: DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY,
+      toolsPerAddressPerHour: DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
     });
+    // Phase 7. docs/product-decisions.md §19: neither of these is about money
+    // — publishing costs one embedding call per statement, which
+    // MAX_EMBEDDING_CALLS_PER_DAY already bounds — so neither appears in the
+    // worst-case arithmetic below. They bound what a script can do to the
+    // CATALOGUE, which is a different kind of damage and is not undone by a
+    // refund.
+    assert.equal(DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY, 3, '.env.example says 3');
+    assert.equal(DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR, 10, '.env.example says 10');
     // Phase 6. research/09 §6: five an hour for one address protects a
     // stranger's inbox and our sending reputation; twenty for one connection
     // is the enumeration bound. Neither is what protects an ACCOUNT — that is
@@ -531,4 +546,88 @@ test('the sixth code for one address is refused, and so is the twenty-first from
   // And another connection is unaffected, because this is per connection.
   const elsewhere = allowSignInCode('someone@example.com', '198.51.100.22');
   assert.equal(elsewhere.allowed, true, 'a different connection has its own twenty');
+});
+
+/* ===========================================================================
+ * Phase 7: publishing a listing
+ * ======================================================================== */
+
+test("a token bucket's window belongs to the instance, so a day is expressible", () => {
+  const clock = fakeClock();
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+
+  // The defect this pins: before Phase 7 the window was hardcoded to an hour
+  // inside take(), so "three per day" written as take(key, 3) was three per
+  // HOUR — seventy-two a day — and would have looked like it worked.
+  const daily = new TokenBuckets(clock, 50_000, DAY);
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(daily.take('k', 3).allowed, true, `publish ${i + 1} of 3`);
+  }
+  const refused = daily.take('k', 3);
+  assert.equal(refused.allowed, false, 'the fourth in one day is refused');
+  assert.ok(refused.retryAfterSeconds > HOUR / 1000, 'and the wait is hours, not seconds');
+  assert.ok(refused.retryAfterSeconds <= DAY / 1000, 'and no longer than the window');
+
+  clock.advance(HOUR);
+  assert.equal(daily.take('k', 3).allowed, false, 'an hour later, still refused');
+
+  clock.advance(8 * HOUR);
+  assert.equal(daily.take('k', 3).allowed, true, 'a third of a day refills one token');
+
+  // And the hourly default is unchanged, which is the other half of the claim.
+  const hourly = new TokenBuckets(clock);
+  for (let i = 0; i < 10; i += 1) hourly.take('h', 10);
+  assert.equal(hourly.take('h', 10).allowed, false);
+  clock.advance(6 * 60 * 1000 + 1000);
+  assert.equal(hourly.take('h', 10).allowed, true, 'a tenth of an hour refills one token');
+});
+
+test('publishing is limited per account per day and per address per hour', () => {
+  // Against the process-wide buckets with the real clock, exactly like the
+  // allowSignInCode tests below: fresh ids per case, no advancing.
+  const account = `acct-${Math.random()}`;
+  const address = `198.51.100.${Math.floor(Math.random() * 200)}`;
+
+  for (let i = 0; i < DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY; i += 1) {
+    const allowed = allowPublish(account, address);
+    assert.equal(allowed.allowed, true, `publish ${i + 1} of the day`);
+    assert.equal(allowed.refusedBy, null);
+  }
+
+  const fourth = allowPublish(account, address);
+  assert.equal(fourth.allowed, false, 'the fourth listing in a day is refused');
+  assert.equal(fourth.refusedBy, 'account', 'and the page must say WHICH ceiling');
+  assert.ok(fourth.retryAfterSeconds > 0, 'with something to tell the person');
+
+  // A different account from the same address gets through, until the address
+  // ceiling. That is the point of there being two.
+  let allowed = 0;
+  let refusedByAddress = 0;
+  for (let i = 0; i < 20; i += 1) {
+    const answer = allowPublish(`${account}-other-${i}`, address);
+    if (answer.allowed) allowed += 1;
+    else if (answer.refusedBy === 'address') refusedByAddress += 1;
+  }
+  assert.ok(refusedByAddress > 0, 'the per-address ceiling must bite for a second account');
+  assert.ok(
+    allowed <= DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
+    `${allowed} listings from one address in an hour, over the ceiling of ${DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR}`,
+  );
+});
+
+test('the publishing limiter keeps neither the account id nor the address', () => {
+  // The same rule as every other bucket in this file, and the reason it is
+  // worth a test of its own: this is the first limiter keyed on something that
+  // IS a person rather than on a connection.
+  const source = readFileSync(new URL('../lib/rate-limit.ts', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('export function allowPublish'));
+  // The function body, which ends at the first `}` in the first column.
+  // String.fromCharCode rather than an escape, because an escape written into
+  // this file by a shell heredoc becomes the byte itself — the hazard
+  // scripts/scan-control-bytes.mjs exists to catch.
+  const fn = body.slice(0, body.indexOf(String.fromCharCode(10) + '}'));
+  assert.match(fn, /visitorKey\(`publish-account:/, 'the account id is hashed, not kept');
+  assert.match(fn, /visitorKey\(`publish-address:/, 'and so is the address');
+  assert.doesNotMatch(fn, /console\./, 'and neither is logged');
 });

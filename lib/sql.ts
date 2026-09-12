@@ -60,6 +60,30 @@ export const LOG_SEARCH_EVENT_SQL = `
     p_match_judged   => $6::boolean
   )`;
 
+/**
+ * The same call, plus which tools came back.
+ *
+ * Also returns no row id, and that is the whole reason it exists as a separate
+ * function in 0017 rather than as `log_search_event` handing the id over:
+ * writing the child rows needs the parent's id, and the id is a correlation
+ * handle. So the insert and the join happen inside one SECURITY DEFINER
+ * function and nothing comes out.
+ *
+ * The ranks are NOT a parameter. They come from `with ordinality` over this
+ * array inside the function, so a caller cannot record an order that disagrees
+ * with the one it reported.
+ */
+export const LOG_SEARCH_EVENT_TOOLS_SQL = `
+  select public.log_search_event_tools(
+    p_query          => $1::text,
+    p_result_count   => $2::int,
+    p_top_score      => $3::real,
+    p_had_good_match => $4::boolean,
+    p_latency_ms     => $5::int,
+    p_match_judged   => $6::boolean,
+    p_tool_ids       => $7::bigint[]
+  )`;
+
 /** The database's own ceiling, and the application's. All three layers agree. */
 export const MAX_QUERY_LENGTH = 200;
 
@@ -186,7 +210,20 @@ export function logSearchEventParams(event: SearchEvent): unknown[] {
  * to await it: this runs after the response has gone out.
  */
 export async function runLogSearchEvent(exec: Executor, event: SearchEvent): Promise<void> {
-  await exec.query(LOG_SEARCH_EVENT_SQL, logSearchEventParams(event));
+  // One statement either way. With tool ids it is the 0017 function, which
+  // writes the event AND the join; without them it is the original, which is
+  // still what eval/run.mjs and every test drive.
+  const ids = event.toolIds ?? [];
+  if (ids.length === 0) {
+    await exec.query(LOG_SEARCH_EVENT_SQL, logSearchEventParams(event));
+    return;
+  }
+  await exec.query(LOG_SEARCH_EVENT_TOOLS_SQL, [
+    ...logSearchEventParams(event),
+    // Capped here as well as in the function: 200 is the most ranks one page
+    // could honestly have, and `search_tools` is clamped to 50.
+    ids.slice(0, 200),
+  ]);
 }
 
 /* ===========================================================================

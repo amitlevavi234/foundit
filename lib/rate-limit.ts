@@ -145,6 +145,39 @@ export const DEFAULT_RERANK_CALLS_PER_DAY = 120;
 export const DEFAULT_CODES_PER_ADDRESS_PER_HOUR = 5;
 export const DEFAULT_CODES_PER_IP_PER_HOUR = 20;
 
+/**
+ * The two limits on publishing a listing, from docs/product-decisions.md §19.
+ *
+ * Neither of these is about money — publishing costs one embedding call per
+ * statement, which the daily cap above already bounds — and neither is about
+ * queueing, because §5 says nothing waits for approval. They are about what a
+ * script can do to the catalogue in an afternoon.
+ *
+ *   PER ACCOUNT — three a day. A person adding a fourth tool they personally
+ *   made, on the same day, is rare enough to be worth a conversation; a person
+ *   adding thirty is not adding tools they made. Three is deliberately low
+ *   because the refusal is recoverable — the drafts stay, and tomorrow they
+ *   publish — and because raising a limit is easy where un-publishing a
+ *   hundred listings by hand is not.
+ *
+ *   PER ADDRESS — ten an hour. This is the one that survives somebody making
+ *   accounts: the per-account limit is per account, and accounts are free. Ten
+ *   an hour from one address covers a team at an office and a person on a
+ *   phone network sharing an address with a town, and does not cover a script.
+ *
+ * Nothing is persisted, exactly like the other buckets: the account id and the
+ * address are hashed with the per-process salt on the way in and the strings
+ * are dropped. The limiter cannot become a list of who published what.
+ *
+ * BOTH ARE PER PROCESS, which is the honest weakness of every bucket in this
+ * file: two web processes behind a load balancer allow twice this, and a
+ * restart forgives everything. `url`'s unique constraint is what stops the
+ * duplicate listings that would actually be damaging, and it is in the
+ * database where a restart cannot reach it.
+ */
+export const DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY = 3;
+export const DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR = 10;
+
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -175,6 +208,8 @@ export interface Limits {
   rerankCallsPerDay: number;
   codesPerAddressPerHour: number;
   codesPerIpPerHour: number;
+  toolsPerAccountPerDay: number;
+  toolsPerAddressPerHour: number;
 }
 
 /** The configured ceilings. Read at call time so a test can set them. */
@@ -204,6 +239,14 @@ export function limits(): Limits {
       process.env.MAX_RERANK_CALLS_PER_DAY,
       DEFAULT_RERANK_CALLS_PER_DAY,
     ),
+    toolsPerAccountPerDay: positiveInt(
+      process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY,
+      DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY,
+    ),
+    toolsPerAddressPerHour: positiveInt(
+      process.env.MAX_TOOLS_PER_ADDRESS_PER_HOUR,
+      DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
+    ),
   };
 }
 
@@ -227,24 +270,39 @@ interface Bucket {
  * limit, back to back, with no bug anywhere. The bucket refills at
  * `limit / hour` continuously, so sixty an hour means one a minute however they
  * are spaced, with sixty available at once after an idle hour.
+ *
+ * THE WINDOW IS PER INSTANCE, not per call, and Phase 7 is why. "Three tools
+ * per account per day" cannot be `take(key, 3)` on an hourly instance — that is
+ * three an hour — and it cannot be a `DailyCap`, because those are global and
+ * keyed on nothing. So the window is a constructor argument and every bucket in
+ * one instance shares it. Per instance rather than per call because `sweep`
+ * decides what to forget from the rate: "this bucket has refilled to full"
+ * needs ONE rate for the whole map, and mixing an hourly and a daily bucket in
+ * one map would make the sweep discard the daily ones an hour early.
  */
 export class TokenBuckets {
   private readonly buckets = new Map<string, Bucket>();
   private readonly clock: Clock;
   /** Stop the map growing without bound when a botnet turns up. */
   private readonly maxKeys: number;
+  /** How long a full allowance takes to refill. One per instance; see above. */
+  private readonly windowMs: number;
 
   // Fields assigned in the body rather than as parameter properties: Node runs
   // this file directly from TypeScript in strip-only mode, which has no way to
   // emit the assignment a parameter property implies and refuses it outright.
   // tests/rate-limit.test.mjs is what imports it that way.
-  constructor(clock: Clock = SYSTEM_CLOCK, maxKeys = 50_000) {
+  constructor(clock: Clock = SYSTEM_CLOCK, maxKeys = 50_000, windowMs = HOUR_MS) {
     this.clock = clock;
     this.maxKeys = maxKeys;
+    this.windowMs = windowMs;
   }
 
   /**
    * Spend one token for this key.
+   *
+   * `perWindow` is per this instance's window — an hour unless the constructor
+   * was given another one.
    *
    * @returns `{ allowed, remaining, retryAfterSeconds }` — `retryAfterSeconds`
    *          is how long until one token is available again.
@@ -255,7 +313,7 @@ export class TokenBuckets {
     retryAfterSeconds: number;
   } {
     const now = this.clock.now();
-    const ratePerMs = perHour / HOUR_MS;
+    const ratePerMs = perHour / this.windowMs;
 
     let bucket = this.buckets.get(key);
     if (!bucket) {
@@ -362,6 +420,12 @@ declare global {
         reader: DailyCap;
         rerank: DailyCap;
         circuit: RefusalCircuit;
+        /**
+         * Publishing a listing. A SECOND instance, with a day-long window,
+         * because a window belongs to an instance (see TokenBuckets) and this
+         * one counts per day where `buckets` counts per hour.
+         */
+        published: TokenBuckets;
         /** Whether the "the rerank budget is spent" line has been said today. */
         rerankCapAnnounced: boolean;
       }
@@ -378,6 +442,7 @@ function state() {
     reader: new DailyCap(),
     rerank: new DailyCap(),
     circuit: new RefusalCircuit(),
+    published: new TokenBuckets(undefined, 50_000, DAY_MS),
     rerankCapAnnounced: false,
   };
   return globalThis.__founditLimiter;
@@ -464,6 +529,62 @@ export function allowSignInCode(emailAddress: string, ip: string): CodeAllowance
   const perIp = buckets.take(visitorKey(`code-ip:${ip}`), config.codesPerIpPerHour);
   if (!perIp.allowed) {
     return { allowed: false, retryAfterSeconds: perIp.retryAfterSeconds, refusedBy: 'ip' };
+  }
+
+  return { allowed: true, retryAfterSeconds: 0, refusedBy: null };
+}
+
+/** Which of the two publishing ceilings refused, for the page that says so. */
+export type PublishRefusal = 'account' | 'address' | null;
+
+export interface PublishAllowance {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  refusedBy: PublishRefusal;
+}
+
+/**
+ * May this account publish a listing from this address right now?
+ *
+ * Two ceilings, spent in this order, and the order matters: the per-account one
+ * first, so a person who has published their three for today is told that
+ * rather than being told about an address they share with a town.
+ *
+ * Called at PUBLISH and not at draft creation. A draft costs nothing, is
+ * invisible to everybody (0017, and db/test/adding_a_tool_test.sql §1), and
+ * refusing one would mean a person loses the form they just filled in. What is
+ * limited is the thing that reaches the catalogue.
+ *
+ * Neither string is kept: both go through `visitorKey`, which hashes with the
+ * per-process salt and drops the input, so these buckets cannot become a record
+ * of who published what and when.
+ */
+export function allowPublish(accountId: string, address: string): PublishAllowance {
+  const config = limits();
+  const perDay = state().published;
+
+  const perAccount = perDay.take(
+    visitorKey(`publish-account:${accountId.trim()}`),
+    config.toolsPerAccountPerDay,
+  );
+  if (!perAccount.allowed) {
+    return {
+      allowed: false,
+      retryAfterSeconds: perAccount.retryAfterSeconds,
+      refusedBy: 'account',
+    };
+  }
+
+  const perAddress = state().buckets.take(
+    visitorKey(`publish-address:${address.trim()}`),
+    config.toolsPerAddressPerHour,
+  );
+  if (!perAddress.allowed) {
+    return {
+      allowed: false,
+      retryAfterSeconds: perAddress.retryAfterSeconds,
+      refusedBy: 'address',
+    };
   }
 
   return { allowed: true, retryAfterSeconds: 0, refusedBy: null };
