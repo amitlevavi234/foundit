@@ -3817,7 +3817,10 @@ export function buildRerankReport(reranker, passes) {
   out.push(`${reranker.model} and graded 0 to 3. Anything graded 0 is dropped.`);
   out.push('');
   out.push(`  candidates judged per search  top ${reranker.n}`);
-  out.push(`  samples per judgement         ${reranker.samples ?? 1} (the LOWER mark of them is the grade)`);
+  out.push(
+    `  samples per judgement         ${reranker.samples ?? 1}` +
+      ((reranker.samples ?? 1) > 1 ? ' (the LOWER mark of them is the grade)' : ''),
+  );
   out.push(
     `  shown from relevance          ${reranker.floor ?? 1}` +
       (reranker.floor >= 2 ? ' (a "Loose" 1 is dropped, not shown)' : ' (0 is dropped)'),
