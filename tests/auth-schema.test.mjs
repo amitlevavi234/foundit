@@ -67,15 +67,27 @@ test('and every column of every one of them', () => {
   }
 });
 
-test('the code is hashed at rest, and that is not the library default', () => {
+test('the code is hashed at rest under a key, and neither is a library default', () => {
   // The library's default for `storeOTP` is 'plain'. A plaintext code in a
   // table is a live credential for its whole life: anybody with a backup, a
   // read replica or a SQL-injection foothold could sign in as whoever is
-  // waiting for one. research/09 §6 says hash it, and there is no usability
-  // cost at all.
+  // waiting for one.
+  //
+  // Its 'hashed' is not enough either, and that is the Phase 6 review's F3:
+  // `defaultKeyHasher` is an unsalted, unkeyed SHA-256, and six digits is a
+  // search space of 10^6 that sweeps in about two seconds. The configuration
+  // is the object form with a hash of ours, keyed by BETTER_AUTH_SECRET, and
+  // tests/otp-hash.test.mjs runs both sweeps against it.
   const options = schemaOptions();
   const source = readFileSync(join(ROOT, 'lib', 'auth-options.ts'), 'utf8');
-  assert.match(source, /storeOTP: 'hashed' as const/);
+  assert.match(source, /storeOTP: \{ hash: hashSignInCode \}/);
+  // The old configuration line, not the prose about it two comments above.
+  assert.doesNotMatch(
+    source,
+    /storeOTP: 'hashed' as const/,
+    'the unkeyed digest does not come back',
+  );
+  assert.match(source, /createHmac\('sha256', signInCodeKey\(\)\)/);
   assert.match(source, /otpLength: OTP_LENGTH/);
   assert.match(source, /allowedAttempts: OTP_ALLOWED_ATTEMPTS/);
   assert.equal(options.rateLimit.storage, 'database');
