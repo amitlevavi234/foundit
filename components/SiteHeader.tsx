@@ -1,7 +1,10 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 
-import { Button, GhostButton } from './Button';
+import { signOut } from '@/app/sign-in/actions';
+import { currentViewer } from '@/lib/accounts';
+
+import { ButtonLink, GhostButton } from './Button';
 import { Icon } from './Icon';
 import { Wordmark } from './Logo';
 
@@ -9,30 +12,44 @@ import { Wordmark } from './Logo';
  * The header, from `header()` in design/canvas/build.mjs. 84px tall, the
  * wordmark at 30px on the left, four targets on the right.
  *
- * Sign-in is Google and a 6-digit emailed code, and those are the only two
- * that exist anywhere in this codebase. docs/product-decisions.md §2 settles
- * which providers ship; the designed sign-in artboards were drawn before that
- * decision and show one more than the product has.
+ * THREE OF THE FOUR WERE DISABLED UNTIL THIS PHASE and two of them are now
+ * real. `Saved` and `Sign in` have screens behind them; `Add a tool` is Phase 7
+ * and keeps the drawn-but-disabled treatment with its "Soon" badge, which is
+ * what docs/product-decisions.md §14 settled: a control whose screen is a later
+ * phase stays drawn and is disabled in place, because taking it out would hide
+ * a plan that is real and a control that cannot be clicked beats one that can
+ * be clicked and breaks.
  *
- * Three of the four targets have nothing behind them yet. `Add a tool` is
- * Phase 7, `Saved` and `Sign in` are Phase 6 (docs/build-phases.md), and until
- * those phases run `/submit`, `/saved` and `/sign-in` are not routes — all
- * three were links to a 404. They stay in the header, because the artboards
- * draw them and because a person should be able to see what Foundit intends to
- * have; they are drawn in the disabled state the design already specifies,
- * with "Soon" beside them, so they read as *not yet* rather than as *broken*.
- * The sentence saying when is in the footer, where there is room for one.
+ * SIGNED IN, THE RIGHT-HAND CONTROL BECOMES THE AVATAR MENU the artboards draw
+ * — and it is a native `<details>`, so it opens from the keyboard, announces
+ * its own state, and needs no JavaScript. Sign out is a form posting to a
+ * Server Action rather than a link, because signing out is a change and a
+ * change is never a GET: a link would be followed by every preloader and
+ * antivirus proxy that walks a page.
  *
- * This is the choice the tool page already makes about claiming — "Claiming
- * opens when sign-in does" — rather than a control that pretends.
+ * READING THE SESSION MAKES EVERY PAGE THAT CARRIES THIS HEADER PER-PERSON,
+ * which is why the pages carrying it declare `dynamic = 'force-dynamic'`. What
+ * is cached is the catalogue underneath (lib/db.ts), not the page, and nothing
+ * that ran with somebody's identity ever goes in that cache.
  */
 export type HeaderSection = 'browse' | 'add' | 'saved' | 'top' | undefined;
 
 export interface SiteHeaderProps {
   active?: HeaderSection;
+  /**
+   * Draw the signed-out header without asking who this is.
+   *
+   * For the two places that cannot ask: `loading.tsx`, which is a still frame
+   * rendered before anything is known, and `not-found.tsx`, which Next
+   * pre-renders at build time where there is no request to read a session
+   * from. Both are momentary and neither carries anything personal.
+   */
+  anonymous?: boolean;
 }
 
-export function SiteHeader({ active }: SiteHeaderProps) {
+export async function SiteHeader({ active, anonymous = false }: SiteHeaderProps) {
+  const viewer = anonymous ? null : await currentViewer();
+
   return (
     <header className="site-header">
       <Wordmark />
@@ -41,20 +58,40 @@ export function SiteHeader({ active }: SiteHeaderProps) {
           Browse problems
         </NavLink>
 
-        <NotYet note="Adding a tool arrives after accounts do.">Add a tool</NotYet>
+        <NotYet note="Adding a tool arrives with the maker dashboard.">Add a tool</NotYet>
 
-        <NotYet note="Saved lists arrive with accounts.">
+        <NavLink href="/saved" active={active === 'saved'}>
           <Icon name="bookmark" size={18} />
           Saved
-        </NotYet>
+        </NavLink>
 
-        <Button size="sm" disabled style={{ marginLeft: 8 }}>
-          Sign in
-          <span className="soon" aria-hidden="true">
-            Soon
-          </span>
-          <span className="sr-only">— not built yet. Signing in arrives with accounts.</span>
-        </Button>
+        {viewer ? (
+          <AccountMenu handle={viewer.handle} displayName={viewer.displayName} />
+        ) : (
+          <ButtonLink href="/sign-in" size="sm" style={{ marginLeft: 8 }}>
+            Sign in
+          </ButtonLink>
+        )}
+      </nav>
+    </header>
+  );
+}
+
+/**
+ * The header on the sign-in screens themselves.
+ *
+ * No Sign in control, because it is the page, and no Saved, because Saved is
+ * where they are being sent afterwards. Synchronous: this screen has already
+ * established that nobody is signed in.
+ */
+export function SignInHeader() {
+  return (
+    <header className="site-header">
+      <Wordmark />
+      <nav aria-label="Main">
+        <NavLink href="/browse" active={false}>
+          Browse problems
+        </NavLink>
       </nav>
     </header>
   );
@@ -77,6 +114,45 @@ function NavLink({
     >
       {children}
     </Link>
+  );
+}
+
+/**
+ * The avatar and its menu.
+ *
+ * The avatar is an initial on a coloured ground, not a photograph. Google
+ * hands us a picture URL with the profile and storing it would mean every page
+ * this header appears on asking Google's CDN for a file — which is a visitor's
+ * browser telling a third party where they are, on every page, for a decoration.
+ * docs/product-decisions.md §12's distinction is about our server fetching a
+ * URL; this is the neighbouring one, and the answer is the same shape: draw it
+ * ourselves.
+ */
+function AccountMenu({ handle, displayName }: { handle: string; displayName: string | null }) {
+  const name = displayName?.trim() || `@${handle}`;
+  const initial = (displayName?.trim() || handle).slice(0, 1).toUpperCase();
+
+  return (
+    <details className="accountmenu">
+      <summary aria-label={`Account menu for ${name}`}>
+        <span className="avatar" aria-hidden="true">
+          {initial}
+        </span>
+        <Icon name="chevron" size={16} />
+      </summary>
+      <div className="accountmenu-sheet">
+        <div className="accountmenu-who">
+          <strong>{name}</strong>
+          <span className="faint tab">@{handle}</span>
+        </div>
+        <Link href="/saved">Saved</Link>
+        <Link href={`/u/${handle}`}>Your public profile</Link>
+        <Link href="/settings">Settings</Link>
+        <form action={signOut}>
+          <button type="submit">Sign out</button>
+        </form>
+      </div>
+    </details>
   );
 }
 

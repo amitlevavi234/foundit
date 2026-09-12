@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 
 import { Button } from './Button';
 import { SatisfactionChip, Tag } from './Chip';
@@ -79,6 +79,21 @@ export interface ToolCardProps {
   big?: boolean;
   /** Position in the list; staggers the entrance. */
   index?: number;
+  /**
+   * The Save control, from Phase 6 — either a real save menu or the gate, and
+   * the card does not know or care which (components/LibraryControls.tsx).
+   *
+   * Optional because one caller has no person behind it: the component sheet
+   * at /components draws a specimen card with nothing to save it to, and gets
+   * the drawn-but-disabled control it always had. Every card with a real tool
+   * on it passes this.
+   */
+  actions?: ReactNode;
+  /**
+   * The Like control, replacing the bare count. Same arrangement: a form when
+   * somebody is signed in, the gate when they are not.
+   */
+  like?: ReactNode;
 }
 
 export function ToolCard({
@@ -99,6 +114,8 @@ export function ToolCard({
   likes,
   big = false,
   index = 0,
+  actions,
+  like,
 }: ToolCardProps) {
   const toolHref = href ?? `/tools/${slug}`;
   // The two-column span is `.toolcard.big` in styles/components.css, not an
@@ -173,32 +190,38 @@ export function ToolCard({
               {ratingCount ? <span className="muted">({ratingCount})</span> : null}
             </span>
           ) : null}
-          {likes ? (
-            /* A span is not a control and takes no accessible name, so an
-               aria-label here is simply dropped: a screen reader would read
-               the bare numeral with no idea what it counts. The words go in
-               the element instead, where they are read in order — "218 people
-               found this useful" — and stay invisible. */
-            <span className="ghost like">
-              <Icon name="heart" size={17} strokeWidth={2} />
-              {likes}
-              <span className="sr-only">
-                {likes === '1' ? ' person found this useful' : ' people found this useful'}
+          {like ??
+            (likes ? (
+              /* A span is not a control and takes no accessible name, so an
+                 aria-label here is simply dropped: a screen reader would read
+                 the bare numeral with no idea what it counts. The words go in
+                 the element instead, where they are read in order — "218 people
+                 found this useful" — and stay invisible. */
+              <span className="ghost like">
+                <Icon name="heart" size={17} strokeWidth={2} />
+                {likes}
+                <span className="sr-only">
+                  {likes === '1' ? ' person found this useful' : ' people found this useful'}
+                </span>
               </span>
-            </span>
-          ) : null}
+            ) : null)}
         </div>
 
         <div className="toolcard-actions">
-          {/* Saving is Phase 6. The control is drawn now so the card is the
-              card; it announces that it is not wired up rather than lying. */}
-          <Button size="sm" disabled aria-describedby={`save-later-${slug}`}>
-            <Icon name="bookmark" size={16} />
-            Save
-          </Button>
-          <span id={`save-later-${slug}`} className="sr-only">
-            Saving needs an account and is not available yet.
-          </span>
+          {actions ?? (
+            /* No person behind this card — the component sheet's specimen. The
+               control stays drawn so the card is the card, and says it is a
+               specimen rather than pretending to save something. */
+            <>
+              <Button size="sm" disabled aria-describedby={`save-later-${slug}`}>
+                <Icon name="bookmark" size={16} />
+                Save
+              </Button>
+              <span id={`save-later-${slug}`} className="sr-only">
+                This card is a specimen. Save works on a real result.
+              </span>
+            </>
+          )}
           {/* docs/product-decisions.md §12: every result carries the link to
               the address the maker entered, with the domain beside it so a
               person can see where they are going before they go. Our server

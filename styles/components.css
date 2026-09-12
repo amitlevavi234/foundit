@@ -1647,3 +1647,278 @@ dl.facts dd {
 .field input::placeholder {
   color: var(--c-muted);
 }
+
+/* ===========================================================================
+ * Phase 6 — accounts.
+ *
+ * Everything below draws a screen that exists in design/canvas/build.mjs:
+ * SignIn, EnterCode, Saved, SavedEmpty, Profile, ProfilePublic, Settings,
+ * RateReview, ShareCollection and PublicCollection. The tokens, the 2px ink
+ * borders and the offset shadows are the ones already here; nothing in this
+ * block invents a colour or a radius.
+ * ======================================================================== */
+
+/* --- The avatar menu in the header ---------------------------------------- */
+/* A native <details>, so it opens from the keyboard, announces its own state
+ * and needs no script. The summary is the avatar and its chevron. */
+.accountmenu {
+  position: relative;
+  margin-left: var(--s-2);
+}
+
+.accountmenu > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-md);
+}
+
+.accountmenu > summary::-webkit-details-marker,
+.accountmenu > summary::marker {
+  display: none;
+  content: '';
+}
+
+.accountmenu > summary:hover {
+  background: var(--c-tint);
+}
+
+.accountmenu[open] > summary {
+  background: var(--c-tint);
+}
+
+.accountmenu .avatar {
+  width: 34px;
+  height: 34px;
+  font-size: 14px;
+}
+
+.accountmenu-sheet {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  min-width: 220px;
+  background: var(--c-surface);
+  border: var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--sh-card, 6px 6px 0 var(--c-ink));
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+}
+
+.accountmenu-who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s-4) var(--s-5) var(--s-5);
+  border-bottom: var(--border-soft);
+  margin-bottom: var(--s-2);
+}
+
+.accountmenu-sheet a,
+.accountmenu-sheet button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--s-4) var(--s-5);
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  font: inherit;
+  color: var(--c-ink);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.accountmenu-sheet a:hover,
+.accountmenu-sheet button:hover {
+  background: var(--c-tint);
+  text-decoration: none;
+}
+
+/* --- The six code boxes --------------------------------------------------- */
+.codebox {
+  width: 56px;
+  height: 64px;
+  border: var(--border);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+  text-align: center;
+  font-family: var(--font-display);
+  font-weight: var(--fw-display);
+  font-size: 28px;
+  color: var(--c-ink);
+  padding: 0;
+}
+
+.codebox:focus-visible {
+  outline: none;
+  border-color: var(--c-coral);
+  box-shadow: 3px 3px 0 var(--c-coral);
+}
+
+/* --- Saved: the sidebar of collections and the cards ---------------------- */
+.savedgrid {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: var(--s-16);
+  align-items: start;
+}
+
+.savednav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  position: sticky;
+  top: var(--s-11);
+}
+
+.savednav a {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-4) var(--s-5);
+  border-radius: var(--r-md);
+  border: 2px solid transparent;
+  font-size: var(--t-body-sm);
+  color: var(--c-ink);
+  text-decoration: none;
+}
+
+.savednav a:hover {
+  background: var(--c-tint);
+  text-decoration: none;
+}
+
+.savednav a.on {
+  background: var(--c-tint);
+  border-color: var(--c-ink);
+  font-weight: var(--fw-heading);
+}
+
+.savedcards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-12);
+}
+
+.savednote {
+  font-size: var(--t-meta);
+  line-height: var(--lh-body);
+  padding: var(--s-5) var(--s-6);
+  border-radius: var(--r-md);
+  background: var(--c-tint);
+  color: var(--c-ink);
+}
+
+.savednote.empty {
+  background: var(--c-sunk);
+  color: var(--c-faint);
+  border: 2px dashed var(--c-rule);
+  text-align: left;
+  padding: var(--s-5) var(--s-6);
+}
+
+/* --- Settings: a label, a sentence, and a control on the right ------------ */
+.setrow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-14);
+  padding: var(--s-9) 0;
+  border-bottom: var(--border-soft);
+}
+
+.setrow:last-child {
+  border-bottom: 0;
+}
+
+.setrow-label {
+  font-weight: var(--fw-semibold);
+  font-size: var(--t-body);
+}
+
+.setrow-help {
+  font-size: var(--t-body-sm);
+  color: var(--c-muted);
+  margin-top: 2px;
+  line-height: var(--lh-body);
+  max-width: 520px;
+}
+
+/* --- The gate ------------------------------------------------------------- */
+/* A native <dialog>, opened by its own button. Modal by the browser's own
+ * rules: focus is trapped, Escape closes it, and the rest of the page is
+ * inert without a line of our script saying so. */
+.gate::backdrop {
+  background: rgba(28, 26, 36, 0.45);
+}
+
+.gate {
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  border: var(--border);
+  border-radius: var(--r-2xl);
+  box-shadow: 10px 10px 0 var(--c-coral);
+  background: var(--c-surface);
+  color: var(--c-ink);
+  padding: var(--s-14) var(--s-14) var(--s-12);
+}
+
+.gate-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s-5);
+  margin-bottom: var(--s-8);
+}
+
+/* --- A star rating that is six radio buttons ------------------------------ */
+/* Radios and not a slider: a rating is one of five named things, it has to be
+ * reachable from the keyboard, and it has to submit without script. */
+.ratefield {
+  display: flex;
+  gap: var(--s-2);
+  align-items: center;
+}
+
+.ratefield input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ratefield label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: var(--border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  cursor: pointer;
+}
+
+.ratefield label:hover {
+  background: var(--c-tint);
+}
+
+.ratefield input:checked + label {
+  background: var(--c-coral);
+  color: var(--c-on-fill);
+  box-shadow: var(--sh-pill);
+}
+
+.ratefield input:focus-visible + label {
+  outline: 3px solid var(--c-violet);
+  outline-offset: 2px;
+}

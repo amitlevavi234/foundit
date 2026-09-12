@@ -4,14 +4,17 @@ import { notFound } from 'next/navigation';
 import { cache, type ReactNode } from 'react';
 
 import { BackLink } from '@/components/BackLink';
-import { Button } from '@/components/Button';
 import { SatisfactionChip, Tag } from '@/components/Chip';
 import { Icon } from '@/components/Icon';
+import { LikeControl, SaveControl } from '@/components/LibraryControls';
 import { OutboundButton, OutboundDomain } from '@/components/OutboundLink';
+import { ReviewForm } from '@/components/ReviewForm';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { Stars } from '@/components/Stars';
 import { ToolTile } from '@/components/ToolTile';
+import { getToolViewerState } from '@/lib/accounts';
+import { emailCodeConfigured, googleConfigured } from '@/lib/auth';
 import {
   flagLabel,
   languageName,
@@ -146,6 +149,15 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
   const missing = TRACKED_FLAGS.filter((flag) => !tool.flags.includes(flag));
   const reviewsShown = tool.reviews.length;
 
+  /* What THIS person has already done to this tool — liked it, saved it, said
+     something about it. A second round trip, on purpose: the page above is the
+     same page for everybody and is cached for a minute, and nothing that ran
+     under somebody's identity may ever go into that cache. Null means nobody
+     is signed in, and every control below reads it as "draw the gate". */
+  const mine = await getToolViewerState(slug);
+  const here = query ? `/tools/${slug}?q=${encodeURIComponent(query)}` : `/tools/${slug}`;
+  const signIn = { google: googleConfigured(), email: emailCodeConfigured() };
+
   return (
     <div className="page">
       <SiteHeader />
@@ -236,10 +248,15 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
               ) : (
                 <span className="muted">No ratings yet</span>
               )}
-              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <Icon name="heart" size={16} color="var(--c-coral)" strokeWidth={2} />
-                {tool.likeCount} found it useful
-              </span>
+              {/* The count is public and the attribution is not (0003): this
+                  says how many, never who. */}
+              <LikeControl
+                slug={tool.slug}
+                name={tool.name}
+                back={here}
+                liked={mine ? mine.liked : null}
+                likes={`${tool.likeCount} found it useful`}
+              />
               <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <Icon name="bookmark" size={16} color="var(--c-violet)" strokeWidth={2} />
                 {tool.saveCount} saved it
@@ -492,16 +509,39 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
             )}
           </section>
 
-          <section>
+          <section id="reviews">
             <h2 className="h2">Reviews</h2>
+
+            {/* Writing one, editing your own, or taking your own down. Nobody
+                can touch anybody else's — not the maintainer of this listing,
+                not us — and db/test/accounts_test.sql tries it as the
+                maintainer on this very tool. */}
+            <ReviewForm
+              slug={tool.slug}
+              name={tool.name}
+              back={here}
+              mine={mine?.review ?? null}
+              signedIn={mine !== null}
+              google={signIn.google}
+              email={signIn.email}
+            />
+
             {reviewsShown === 0 ? (
-              <p className="muted" style={{ margin: 0 }}>
-                No reviews yet. Writing one needs an account, which arrives with sign-in.
+              <p className="muted" style={{ margin: '18px 0 0' }}>
+                Nobody has written one yet.
               </p>
             ) : (
               <div>
                 {tool.reviews.map((review) => {
-                  const who = review.displayName ?? (review.handle ? `@${review.handle}` : 'Someone');
+                  // The byline is the public @name and nothing else. A display
+                  // name is a string somebody chose and can change to anybody
+                  // else's; a review is the one place in this product where
+                  // who wrote it has to be the same string as the profile it
+                  // points at. The fallback should be unreachable — a review
+                  // cascades away with its author's profile — and it is here
+                  // rather than an assertion because a blank byline on a page
+                  // is a worse way to find that out.
+                  const who = review.handle ? `@${review.handle}` : 'A closed account';
                   return (
                     <div className="review" key={review.id}>
                       <div className="review-head">
@@ -681,13 +721,7 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
               <OutboundDomain url={tool.url} />
             </div>
 
-            <Button size="sm" disabled aria-describedby="save-needs-account">
-              <Icon name="bookmark" size={16} />
-              Save
-            </Button>
-            <span id="save-needs-account" className="sr-only">
-              Saving needs an account and is not available yet.
-            </span>
+            <SaveControl slug={tool.slug} name={tool.name} back={here} state={mine} size="md" />
           </div>
 
           <div className="panel" style={{ padding: 20 }}>

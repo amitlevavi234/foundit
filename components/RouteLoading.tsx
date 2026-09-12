@@ -48,7 +48,10 @@ export function RouteLoading({
 }) {
   return (
     <div className="page">
-      <SiteHeader active={active} />
+      {/* `anonymous`: a loading state is a still frame rendered before
+          anything about this request is known, and asking who is signed in
+          here would make every route's skeleton wait on a session lookup. */}
+      <SiteHeader active={active} anonymous />
       {back ? <BackLink href={back.href}>{back.label}</BackLink> : null}
       <main
         id="main"

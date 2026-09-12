@@ -105,6 +105,34 @@ export const DEFAULT_EMBEDDING_CALLS_PER_DAY = 2000;
 export const DEFAULT_READER_CALLS_PER_DAY = 240;
 export const DEFAULT_RERANK_CALLS_PER_DAY = 120;
 
+/**
+ * The two limits on asking for a 6-digit sign-in code, from research/09 §6.
+ *
+ * They defend different things and both are needed.
+ *
+ *   PER ADDRESS — five an hour. This one protects a STRANGER'S INBOX. Without
+ *   it, anybody who knows somebody's email address can have Foundit mail them
+ *   a sign-in code once a second, from a domain whose sending reputation is
+ *   then ours to explain. Five an hour is generous for a person who did not
+ *   get the first one and nowhere near enough to be a weapon.
+ *
+ *   PER IP — twenty an hour. This one is about enumeration and about the bill:
+ *   one script working through a list of addresses is one address here.
+ *
+ * The code itself is defended by neither of these. That is `allowedAttempts:
+ * 3` in lib/auth.ts, and research/09 §6 is blunt about which of the two
+ * matters: three attempts against a million codes is three in a million, and
+ * the same code with no attempt cap is guessable by a script in minutes. The
+ * attempt limit is not a nicety, it is the entire security of the scheme;
+ * these two are about somebody else's inbox.
+ *
+ * Nothing is persisted, exactly as above: an email address is hashed with the
+ * per-process salt on the way in and the string is dropped, so the buckets
+ * cannot become a list of who has tried to sign in.
+ */
+export const DEFAULT_CODES_PER_ADDRESS_PER_HOUR = 5;
+export const DEFAULT_CODES_PER_IP_PER_HOUR = 20;
+
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -133,11 +161,21 @@ export interface Limits {
   embeddingCallsPerDay: number;
   readerCallsPerDay: number;
   rerankCallsPerDay: number;
+  codesPerAddressPerHour: number;
+  codesPerIpPerHour: number;
 }
 
 /** The configured ceilings. Read at call time so a test can set them. */
 export function limits(): Limits {
   return {
+    codesPerAddressPerHour: positiveInt(
+      process.env.MAX_CODES_PER_ADDRESS_PER_HOUR,
+      DEFAULT_CODES_PER_ADDRESS_PER_HOUR,
+    ),
+    codesPerIpPerHour: positiveInt(
+      process.env.MAX_CODES_PER_IP_PER_HOUR,
+      DEFAULT_CODES_PER_IP_PER_HOUR,
+    ),
     searchesPerIpPerHour: positiveInt(
       process.env.MAX_SEARCHES_PER_IP_PER_HOUR,
       DEFAULT_SEARCHES_PER_IP_PER_HOUR,
@@ -368,6 +406,55 @@ export function allowSearch(address: string): SearchAllowance {
     allowed: visitor.allowed,
     retryAfterSeconds: visitor.retryAfterSeconds,
   };
+}
+
+/** Which ceiling refused, for a message that is honest without being useful. */
+export type CodeRefusal = 'address' | 'ip' | null;
+
+export interface CodeAllowance {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  refusedBy: CodeRefusal;
+}
+
+/**
+ * May this visitor have a 6-digit code sent to this address?
+ *
+ * Both buckets, address first. The order matters in one small way and it is
+ * the conservative direction: a request the ADDRESS bucket allows and the IP
+ * bucket then refuses has spent an address token it did not use. That costs a
+ * person who is being mailed by somebody else nothing — their bucket is the
+ * one being protected, and it refills — and the alternative, checking both
+ * before spending either, means a "peek" that two concurrent requests can both
+ * pass.
+ *
+ * Neither the address nor the IP is stored: both are salted-hashed on the way
+ * in by `visitorKey`, with a different prefix each so that one person's inbox
+ * and one person's connection are different buckets even in the impossible
+ * case of the two strings being equal.
+ */
+export function allowSignInCode(emailAddress: string, ip: string): CodeAllowance {
+  const config = limits();
+  const buckets = state().buckets;
+
+  const perAddress = buckets.take(
+    visitorKey(`code-address:${emailAddress.trim().toLowerCase()}`),
+    config.codesPerAddressPerHour,
+  );
+  if (!perAddress.allowed) {
+    return {
+      allowed: false,
+      retryAfterSeconds: perAddress.retryAfterSeconds,
+      refusedBy: 'address',
+    };
+  }
+
+  const perIp = buckets.take(visitorKey(`code-ip:${ip}`), config.codesPerIpPerHour);
+  if (!perIp.allowed) {
+    return { allowed: false, retryAfterSeconds: perIp.retryAfterSeconds, refusedBy: 'ip' };
+  }
+
+  return { allowed: true, retryAfterSeconds: 0, refusedBy: null };
 }
 
 /**

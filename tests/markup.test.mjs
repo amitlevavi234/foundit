@@ -77,32 +77,44 @@ test('every screen that shows a tool goes through it', () => {
  * The files allowed to open a socket, and the one address each is allowed to
  * open it to.
  *
- * TWO, since Phase 4, and the list is exhaustive: a search embeds the sentence
- * somebody typed and asks a model to read it. Everything below is written
- * against these pairs rather than against a blanket ban, because a rule with no
- * exception would have been deleted rather than narrowed the first time one was
- * needed. Adding a third entry to this list is a decision somebody has to make
- * on purpose, in this file, with a reason.
+ * THREE, SINCE PHASE 6, and the list is exhaustive: a search embeds the
+ * sentence somebody typed and asks a model to read it, and signing in sends a
+ * 6-digit code to somebody's inbox. Everything below is written against these
+ * pairs rather than against a blanket ban, because a rule with no exception
+ * would have been deleted rather than narrowed the first time one was needed.
+ * Adding a fourth entry is a decision somebody has to make on purpose, in this
+ * file, with a reason.
+ *
+ * THE THIRD ENTRY'S REASON, since that is what this comment is for. A code has
+ * to reach an inbox. The alternative to a provider is an SMTP client on the
+ * box and a sending reputation to manage by hand (research/09 §6), and the
+ * rule this list protects — the server never fetches an address a STRANGER
+ * supplied — is untouched by one request to one address written out in full in
+ * lib/email.ts. What goes in that request is asserted below, field by field,
+ * exactly as the other two are.
  */
 const EMBEDDINGS_FILE = 'lib/embeddings.ts';
 const EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings';
 const READER_FILE = 'lib/reader-model.ts';
 const READER_URL = 'https://api.openai.com/v1/responses';
+const EMAIL_FILE = 'lib/email.ts';
+const EMAIL_URL = 'https://api.resend.com/emails';
 
 /** file -> [the constant's name, the one address it holds]. */
 const OUTBOUND = [
   [EMBEDDINGS_FILE, 'EMBEDDINGS_URL', EMBEDDINGS_URL],
   [READER_FILE, 'READER_URL', READER_URL],
+  [EMAIL_FILE, 'RESEND_URL', EMAIL_URL],
 ];
 
 test('nothing on the server asks a stranger’s address for anything', () => {
-  // Two exceptions, both named. A tool's own URL is still never fetched by us,
+  // Three exceptions, all named. A tool's own URL is still never fetched by us,
   // and the tests below say so precisely for each of them.
   const fetchers = SOURCES.filter((path) => /(^|[^.\w])fetch\s*\(/.test(read(path))).map(rel);
   assert.deepEqual(
     fetchers.sort(),
-    [EMBEDDINGS_FILE, READER_FILE].sort(),
-    `${EMBEDDINGS_FILE} and ${READER_FILE} are the only files that may make an outbound request`,
+    [EMBEDDINGS_FILE, READER_FILE, EMAIL_FILE].sort(),
+    `${EMBEDDINGS_FILE}, ${READER_FILE} and ${EMAIL_FILE} are the only files that may make an outbound request`,
   );
 
   const imageLoaders = SOURCES.filter((path) => /from ['"]next\/image['"]/.test(read(path))).map(rel);
@@ -336,6 +348,51 @@ test('and it sends the model, the length, and the capped sentence — nothing el
   }
 });
 
+test('a sign-in code email carries four fields, and no fifth', () => {
+  // Phase 6's addition to this file, and the reason it is here rather than in
+  // a test of its own: the other two request bodies are enumerated exactly
+  // like this, and the thing that must never happen to any of the three is a
+  // field arriving that nobody decided on.
+  //
+  // What goes out is one recipient, one subject, one line of text — and the
+  // code is in the subject as well as the body so it can be read from a
+  // phone's notification without opening anything (research/09 §6). No HTML,
+  // no image, no tracking pixel, no link of any kind: a sign-in code that
+  // looks like marketing arrives in Spam, and a link in one is a phishing
+  // lesson taught by us.
+  const source = read(join(ROOT, EMAIL_FILE));
+
+  const body = /body:\s*JSON\.stringify\(\{([\s\S]*?)\n      \}\)/.exec(source);
+  assert.ok(body, 'the request body must be one JSON.stringify of an object literal');
+
+  const keys = [...body[1].matchAll(/^\s{8}([A-Za-z_$][\w$]*)[,:]/gm)].map((m) => m[1]);
+  assert.deepEqual(
+    keys.sort(),
+    ['from', 'subject', 'text', 'to'].sort(),
+    'four fields: who it is from, who it is to, the subject and the text',
+  );
+
+  // No HTML body, ever. `html` is the field a template would arrive in.
+  assert.doesNotMatch(body[1], /\bhtml\b/i, 'a code email is plain text');
+  // Nothing about the visitor travels with it.
+  for (const forbidden of ['session', 'cookie', 'referer', 'visitor', 'device', 'query']) {
+    assert.doesNotMatch(
+      body[1],
+      new RegExp(`\\b${forbidden}`, 'i'),
+      `the request body must not carry anything ${forbidden}-shaped`,
+    );
+  }
+
+  // The development-only log path, and the pairing that makes production
+  // unable to reach it. tests/email.test.mjs runs this; here it is asserted as
+  // a SHAPE, so the check cannot be moved into a variable somebody sets.
+  assert.match(
+    source,
+    /process\.env\.NODE_ENV !== 'production' && trimmed\(process\.env\.AUTH_DEV_CODE_TO_LOG\) === '1'/,
+    'both halves are required, and the production half is not configurable',
+  );
+});
+
 test('each key is read from a named variable, and never written anywhere', () => {
   // One name for the embedder. Two for the reader, and that is deliberate
   // rather than sloppy: there is ONE account behind both, OPENAI_API_KEY is
@@ -352,6 +409,18 @@ test('each key is read from a named variable, and never written anywhere', () =>
       READER_FILE,
       ['name'],
       /const KEY_VARIABLES = \['OPENAI_API_KEY', 'EMBEDDINGS_API_KEY'\] as const;/,
+    ],
+    // The email client reads FOUR variables and reads each one by its literal
+    // name rather than through `process.env[whatever]`, which is what lets
+    // this list be exhaustive: these four, in this order, and nothing else.
+    // RESEND_API_KEY is the secret; EMAIL_FROM is the verified sender;
+    // NODE_ENV and AUTH_DEV_CODE_TO_LOG are the pair that decides whether a
+    // code may be printed to a log instead of sent, and BOTH are required, so
+    // production cannot reach that path however the second one is set.
+    [
+      EMAIL_FILE,
+      ['RESEND_API_KEY', 'EMAIL_FROM', 'NODE_ENV', 'AUTH_DEV_CODE_TO_LOG'],
+      /export const RESEND_URL = 'https:\/\/api\.resend\.com\/emails';/,
     ],
   ]) {
     const source = read(join(ROOT, file));

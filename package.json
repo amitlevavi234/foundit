@@ -26,6 +26,7 @@
     "test:all": "node eval/scoring.test.mjs && node --test tests/*.test.mjs && bash db/test.sh && node eval/run.mjs --baseline"
   },
   "dependencies": {
+    "better-auth": "^1.7.4",
     "next": "^15.5.0",
     "pg": "^8.13.0",
     "react": "^19.0.0",

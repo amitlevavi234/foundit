@@ -18,6 +18,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
+  DEFAULT_CODES_PER_ADDRESS_PER_HOUR,
+  DEFAULT_CODES_PER_IP_PER_HOUR,
   DEFAULT_EMBEDDING_CALLS_PER_DAY,
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_RERANK_CALLS_PER_DAY,
@@ -25,6 +27,7 @@ import {
   DailyCap,
   RefusalCircuit,
   TokenBuckets,
+  allowSignInCode,
   limits,
   visitorKey,
 } from '../lib/rate-limit.ts';
@@ -180,15 +183,28 @@ test('the limits come from the environment, with the documented defaults', () =>
     MAX_EMBEDDING_CALLS_PER_DAY: process.env.MAX_EMBEDDING_CALLS_PER_DAY,
     MAX_READER_CALLS_PER_DAY: process.env.MAX_READER_CALLS_PER_DAY,
     MAX_RERANK_CALLS_PER_DAY: process.env.MAX_RERANK_CALLS_PER_DAY,
+    MAX_CODES_PER_ADDRESS_PER_HOUR: process.env.MAX_CODES_PER_ADDRESS_PER_HOUR,
+    MAX_CODES_PER_IP_PER_HOUR: process.env.MAX_CODES_PER_IP_PER_HOUR,
   };
   try {
     for (const name of Object.keys(saved)) delete process.env[name];
+    // Deliberately exhaustive: a limit added without a default and without a
+    // line in .env.example fails here rather than being discovered as an
+    // undefined ceiling in production.
     assert.deepEqual(limits(), {
       searchesPerIpPerHour: DEFAULT_SEARCHES_PER_IP_PER_HOUR,
       embeddingCallsPerDay: DEFAULT_EMBEDDING_CALLS_PER_DAY,
       readerCallsPerDay: DEFAULT_READER_CALLS_PER_DAY,
       rerankCallsPerDay: DEFAULT_RERANK_CALLS_PER_DAY,
+      codesPerAddressPerHour: DEFAULT_CODES_PER_ADDRESS_PER_HOUR,
+      codesPerIpPerHour: DEFAULT_CODES_PER_IP_PER_HOUR,
     });
+    // Phase 6. research/09 §6: five an hour for one address protects a
+    // stranger's inbox and our sending reputation; twenty for one connection
+    // is the enumeration bound. Neither is what protects an ACCOUNT — that is
+    // the 3-attempt cap on the code itself, in lib/auth.ts.
+    assert.equal(DEFAULT_CODES_PER_ADDRESS_PER_HOUR, 5, '.env.example says 5');
+    assert.equal(DEFAULT_CODES_PER_IP_PER_HOUR, 20, '.env.example says 20');
     assert.equal(DEFAULT_SEARCHES_PER_IP_PER_HOUR, 60, '.env.example says 60');
     assert.equal(DEFAULT_EMBEDDING_CALLS_PER_DAY, 2000, '.env.example says 2000');
     // PHASE 5 MOVED THIS, and the reason is in lib/rate-limit.ts: the reranker
@@ -420,4 +436,60 @@ test('a legitimate run of unanswerable sentences does not trip it', () => {
   } finally {
     console.error = realError;
   }
+});
+
+test('the sixth code for one address is refused, and so is the twenty-first from one connection', () => {
+  // Phase 6, research/09 §6. Two ceilings that defend two different things:
+  //
+  //   PER ADDRESS, five an hour, protects a STRANGER'S INBOX. Anybody who
+  //   knows somebody's email address can point this flow at it; without this,
+  //   they could have Foundit mail them a sign-in code once a second, from a
+  //   domain whose sending reputation is then ours to explain.
+  //
+  //   PER CONNECTION, twenty an hour, is the enumeration bound: one script
+  //   working through a list of addresses is one connection here.
+  //
+  // Neither of them is what protects an ACCOUNT. That is `allowedAttempts: 3`
+  // on the code itself (lib/auth.ts): three guesses against a million codes is
+  // three in a million, and the same code with no attempt cap is guessable by
+  // a script in minutes.
+  //
+  // These run against the process-wide buckets with the real clock, which is
+  // why each case uses addresses of its own: a bucket refills at limit/hour,
+  // so nothing here refills within a test.
+  const ip = '203.0.113.7';
+
+  for (let i = 1; i <= 5; i += 1) {
+    const allowance = allowSignInCode('noa@example.com', ip);
+    assert.equal(allowance.allowed, true, `code ${i} of 5 for one address`);
+    assert.equal(allowance.refusedBy, null);
+  }
+
+  const sixth = allowSignInCode('noa@example.com', ip);
+  assert.equal(sixth.allowed, false, 'the sixth code for that address is refused');
+  assert.equal(sixth.refusedBy, 'address', 'and it says which ceiling refused');
+  assert.ok(sixth.retryAfterSeconds > 0, 'with a wait that is a real number of seconds');
+
+  // Case matters to nobody's mail server and must not mint a fresh bucket.
+  const shouty = allowSignInCode('  NOA@EXAMPLE.COM ', ip);
+  assert.equal(shouty.allowed, false, 'the same address in capitals is the same address');
+
+  // A different address from the same connection still has its own five — and
+  // the connection's twenty is what stops that going on for ever. Fifteen have
+  // been spent above (five allowed, plus the two refusals which do not touch
+  // the IP bucket); walk the rest of them from fresh addresses.
+  let allowed = 0;
+  let refusedByIp = false;
+  for (let i = 0; i < 40 && !refusedByIp; i += 1) {
+    const allowance = allowSignInCode(`person${i}@example.com`, ip);
+    if (allowance.allowed) allowed += 1;
+    else if (allowance.refusedBy === 'ip') refusedByIp = true;
+    else assert.fail('a fresh address was refused by the address ceiling');
+  }
+  assert.equal(refusedByIp, true, 'one connection cannot ask for codes for ever');
+  assert.equal(allowed, 15, 'twenty an hour, five of which went to the first address');
+
+  // And another connection is unaffected, because this is per connection.
+  const elsewhere = allowSignInCode('someone@example.com', '198.51.100.22');
+  assert.equal(elsewhere.allowed, true, 'a different connection has its own twenty');
 });

@@ -29,6 +29,16 @@ export const metadata: Metadata = {
 };
 
 /**
+ * Per-visitor, because the header is.
+ *
+ * Nothing on this page differs between two people — but the header above it
+ * now shows an avatar or a Sign in button, which means the page cannot be one
+ * static file served to everybody. The catalogue reads underneath are still
+ * cached (lib/db.ts); what is no longer cached is the page.
+ */
+export const dynamic = 'force-dynamic';
+
+/**
  * The eight swatches, with the hex the artboard prints under each one.
  *
  * The artboard prints the value, not the token name, and that was the point of

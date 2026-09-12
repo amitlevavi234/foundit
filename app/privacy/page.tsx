@@ -8,6 +8,16 @@ export const metadata: Metadata = {
 };
 
 /**
+ * Per-visitor, because the header is.
+ *
+ * Nothing on this page differs between two people — but the header above it
+ * now shows an avatar or a Sign in button, which means the page cannot be one
+ * static file served to everybody. The catalogue reads underneath are still
+ * cached (lib/db.ts); what is no longer cached is the page.
+ */
+export const dynamic = 'force-dynamic';
+
+/**
  * The one page in the footer that is not merely missing but overdue.
  *
  * A privacy notice is a legal requirement, not a nice-to-have, and it has to

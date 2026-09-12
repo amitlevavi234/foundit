@@ -3,6 +3,7 @@ import 'server-only';
 import { unstable_cache } from 'next/cache';
 import pg from 'pg';
 
+import { runWithIdentity, type RequestIdentity } from './identity';
 import {
   runBrowse,
   runHome,
@@ -125,6 +126,70 @@ function createPool(): pg.Pool {
 function getPool(): pg.Pool {
   globalThis.__founditPool ??= createPool();
   return globalThis.__founditPool;
+}
+
+/* ===========================================================================
+ * Who is asking, for the length of one transaction.
+ *
+ * This is the mechanism Supabase's PostgREST used to provide for free and
+ * which, self-hosted, is ours to build — research/09 §3 calls it the heart of
+ * the whole report. Everything above this point runs with no identity at all
+ * and sees exactly what a stranger sees. Everything a signed-in person does
+ * goes through here.
+ *
+ * FOUR THINGS ABOUT IT ARE LOAD-BEARING, and each one is a documented way this
+ * fails silently (research/09 §3, "the failure modes, in order of how badly
+ * they end"):
+ *
+ *   ONE CLIENT, ONE TRANSACTION. The claim is set on a checked-out client and
+ *   every statement runs on that same client. `pool.query()` would hand the
+ *   work to a different connection and the claim would apply to nobody.
+ *
+ *   `is_local = true`, ALWAYS. That is what makes the setting die at COMMIT or
+ *   ROLLBACK. Set it session-wide and the next request to take that pooled
+ *   connection inherits the previous person's identity — horizontal privilege
+ *   escalation that only appears under concurrency, which is to say never in
+ *   testing and always in production.
+ *
+ *   `set_config($1, $2, true)` AND NOT `SET LOCAL`. `SET LOCAL` cannot take a
+ *   bind parameter, so using it means concatenating a user id into SQL, in the
+ *   authorization layer, which is the worst place in a codebase for an
+ *   injection hole.
+ *
+ *   IT FAILS CLOSED. No claim, an empty claim or a malformed one all make
+ *   `auth.uid()` null (0001 and 0013), `null = user_id` is null, the policy
+ *   does not pass, and the read returns nothing and the write is refused.
+ *   Forgetting to call this is a bug report rather than a breach.
+ *
+ * The share token rides along beside the claim because it is the same kind of
+ * thing — a fact about this request that a policy reads — and the opposite
+ * kind of thing in every other way: it is a capability somebody pasted, not an
+ * identity, and it opens exactly one row.
+ * ======================================================================== */
+
+/**
+ * Run `fn` inside ONE transaction on ONE connection, with this request's
+ * identity applied as transaction-local settings.
+ *
+ * The transaction itself is `runWithIdentity` in lib/identity.ts, which is
+ * where the four load-bearing details are written down and where
+ * tests/session.test.mjs drives them. What is here is the pool: check a client
+ * out, hand it over, and release it however that ends.
+ *
+ * The client is handed to the callback so that a screen needing two statements
+ * runs both under the same claim; it is not exported anywhere else, and
+ * lib/account-sql.ts is where the statements live.
+ */
+export async function withIdentity<T>(
+  identity: RequestIdentity,
+  fn: (tx: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    return await runWithIdentity(client, identity, (tx) => fn(tx as pg.PoolClient));
+  } finally {
+    client.release();
+  }
 }
 
 /**

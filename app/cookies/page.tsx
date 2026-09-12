@@ -8,6 +8,16 @@ export const metadata: Metadata = {
 };
 
 /**
+ * Per-visitor, because the header is.
+ *
+ * Nothing on this page differs between two people — but the header above it
+ * now shows an avatar or a Sign in button, which means the page cannot be one
+ * static file served to everybody. The catalogue reads underneath are still
+ * cached (lib/db.ts); what is no longer cached is the page.
+ */
+export const dynamic = 'force-dynamic';
+
+/**
  * The research is unusually specific about this one
  * (`research/13-required-pages-and-notices.md` §1.5 and §4.3): Foundit carries
  * no advertising, no analytics and no third-party trackers, so the cookies in

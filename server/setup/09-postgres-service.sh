@@ -39,16 +39,20 @@ sudo chmod 700 "$SECRETS"
 #   FOUNDIT_EMBED_PASSWORD foundit_embed. scripts/embed.mjs and nothing else —
 #                          see db/migrations/0005_embed_role.sql for why it is
 #                          a separate role rather than a job the app runs.
+#   FOUNDIT_AUTH_PASSWORD  foundit_auth. Better Auth and nothing else — the
+#                          five tables in auth_core, and no object in any other
+#                          schema. db/migrations/0013_accounts.sql says why.
 #
-# A file that already exists is left alone, and a file that predates
-# foundit_embed gets the one new line appended rather than being regenerated:
+# A file that already exists is left alone, and a file that predates one of
+# these roles gets the one new line appended rather than being regenerated:
 # rewriting it would change the owner's password under a running database.
 if [ ! -f "$SECRETS/db.env" ]; then
   OWNER_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
   APP_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
   EMBED_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
-  printf 'POSTGRES_PASSWORD=%s\nFOUNDIT_APP_PASSWORD=%s\nFOUNDIT_EMBED_PASSWORD=%s\n' \
-    "$OWNER_PW" "$APP_PW" "$EMBED_PW" \
+  AUTH_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
+  printf 'POSTGRES_PASSWORD=%s\nFOUNDIT_APP_PASSWORD=%s\nFOUNDIT_EMBED_PASSWORD=%s\nFOUNDIT_AUTH_PASSWORD=%s\n' \
+    "$OWNER_PW" "$APP_PW" "$EMBED_PW" "$AUTH_PW" \
     | sudo tee "$SECRETS/db.env" >/dev/null
   sudo chmod 600 "$SECRETS/db.env"
   echo "Generated new credentials in $SECRETS/db.env (root only, 0600)."
@@ -58,6 +62,12 @@ else
     printf 'FOUNDIT_EMBED_PASSWORD=%s\n' "$EMBED_PW" \
       | sudo tee -a "$SECRETS/db.env" >/dev/null
     echo "Added FOUNDIT_EMBED_PASSWORD to $SECRETS/db.env."
+  fi
+  if ! sudo grep -q '^FOUNDIT_AUTH_PASSWORD=' "$SECRETS/db.env"; then
+    AUTH_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
+    printf 'FOUNDIT_AUTH_PASSWORD=%s\n' "$AUTH_PW" \
+      | sudo tee -a "$SECRETS/db.env" >/dev/null
+    echo "Added FOUNDIT_AUTH_PASSWORD to $SECRETS/db.env."
   fi
   echo "Keeping the existing credentials in $SECRETS/db.env."
 fi
@@ -206,14 +216,14 @@ done
 sudo docker exec foundit-dev-db psql -v ON_ERROR_STOP=1 -U foundit_owner -d foundit \
   -c "select 1" >/dev/null
 
-# --- The two non-owner roles, and their passwords ---------------------------
+# --- The three non-owner roles, and their passwords -------------------------
 #
-# The migrations create foundit_app (0001) and foundit_embed (0005) with LOGIN
-# and NO PASSWORD, because a migration is a tracked file that runs on this host
-# and must never carry a credential. A role that cannot log in is the safe
-# direction to fail in — but it also means nothing can connect as either of
-# them until something outside the migrations sets a password, and that
-# something is here.
+# The migrations create foundit_app (0001), foundit_embed (0005) and
+# foundit_auth (0013) with LOGIN and NO PASSWORD, because a migration is a
+# tracked file that runs on this host and must never carry a credential. A role
+# that cannot log in is the safe direction to fail in — but it also means
+# nothing can connect as any of them until something outside the migrations
+# sets a password, and that something is here.
 #
 # Until this existed, db.env carried FOUNDIT_APP_PASSWORD and nothing ever
 # applied it, so the application role could not log in on the server at all.
@@ -232,10 +242,12 @@ set_role_password() { # set_role_password <role> <password>
 
 APP_PW_NOW=$(sudo grep '^FOUNDIT_APP_PASSWORD=' "$SECRETS/db.env" | cut -d= -f2-)
 EMBED_PW_NOW=$(sudo grep '^FOUNDIT_EMBED_PASSWORD=' "$SECRETS/db.env" | cut -d= -f2-)
+AUTH_PW_NOW=$(sudo grep '^FOUNDIT_AUTH_PASSWORD=' "$SECRETS/db.env" | cut -d= -f2-)
 echo "--- application roles ---"
 set_role_password foundit_app "$APP_PW_NOW"
 set_role_password foundit_embed "$EMBED_PW_NOW"
-unset APP_PW_NOW EMBED_PW_NOW
+set_role_password foundit_auth "$AUTH_PW_NOW"
+unset APP_PW_NOW EMBED_PW_NOW AUTH_PW_NOW
 
 # The connection strings the laptop needs are assembled from db.env by hand and
 # never written down here. To read one back:

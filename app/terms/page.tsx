@@ -8,6 +8,16 @@ export const metadata: Metadata = {
 };
 
 /**
+ * Per-visitor, because the header is.
+ *
+ * Nothing on this page differs between two people — but the header above it
+ * now shows an avatar or a Sign in button, which means the page cannot be one
+ * static file served to everybody. The catalogue reads underneath are still
+ * cached (lib/db.ts); what is no longer cached is the page.
+ */
+export const dynamic = 'force-dynamic';
+
+/**
  * Terms are one of the two pages Google's sign-in review asks for by name
  * (`research/13-required-pages-and-notices.md` §3.7), and the only place the
  * liability for a third-party tool Foundit points at can be disclaimed. They

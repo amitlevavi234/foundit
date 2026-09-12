@@ -24,8 +24,14 @@
 #                  statement must not be the role that can ask which vector is
 #                  nearest a cached query: together those two read the query
 #                  cache out one sign bit at a time. See 0005_embed_role.sql.
+#   foundit_auth   what Better Auth connects as, and nothing else. The five
+#                  tables in auth_core and no object in any other schema. It
+#                  exists so that an application bug and an authentication bug
+#                  are two incidents rather than one: foundit_app holds nothing
+#                  in auth_core and this role holds nothing in public. See
+#                  0013_accounts.sql.
 #
-# All three passwords are throwaway literals on purpose, and that is the only kind
+# All four passwords are throwaway literals on purpose, and that is the only kind
 # of password that ever belongs in a tracked file: this database holds
 # invented seed data, listens on 127.0.0.1 only, and can be deleted at any
 # time. The server's credentials are generated on the server and live in a
@@ -53,11 +59,13 @@ configs:
     #
     #   docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
     #     -c "alter role foundit_app login password 'local_development_only_app'" \
-    #     -c "alter role foundit_embed login password 'local_development_only_embed'"
+    #     -c "alter role foundit_embed login password 'local_development_only_embed'" \
+    #     -c "alter role foundit_auth login password 'local_development_only_auth'"
     #
-    # foundit_embed is created by 0005_embed_role.sql, also without a password,
-    # and for the same reason: a migration is a tracked file that runs on the
-    # production host, so it must never set one.
+    # foundit_embed is created by 0005_embed_role.sql and foundit_auth by
+    # 0013_accounts.sql, both without a password, and for the same reason: a
+    # migration is a tracked file that runs on the production host, so it must
+    # never set one.
     content: |
       do $$
       begin
@@ -71,6 +79,12 @@ configs:
           alter role foundit_embed login noinherit password 'local_development_only_embed';
         else
           create role foundit_embed login noinherit password 'local_development_only_embed';
+        end if;
+
+        if exists (select 1 from pg_roles where rolname = 'foundit_auth') then
+          alter role foundit_auth login noinherit password 'local_development_only_auth';
+        else
+          create role foundit_auth login noinherit password 'local_development_only_auth';
         end if;
       end
       $$;

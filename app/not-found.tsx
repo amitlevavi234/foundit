@@ -7,7 +7,9 @@ import { SiteHeader } from '@/components/SiteHeader';
 export default function NotFound() {
   return (
     <div className="page">
-      <SiteHeader />
+      {/* `anonymous`: Next pre-renders this page at build time, where there is
+          no request to read a session from. A 404 carries nothing personal. */}
+      <SiteHeader anonymous />
       <main
         id="main"
         style={{

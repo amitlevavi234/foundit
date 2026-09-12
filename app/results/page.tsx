@@ -4,15 +4,18 @@ import { redirect } from 'next/navigation';
 import { after } from 'next/server';
 import { Suspense } from 'react';
 
+import { AccountPrompt } from '@/components/AccountPrompt';
 import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
 import { EmptyState } from '@/components/EmptyState';
+import { LikeControl, SaveControl } from '@/components/LibraryControls';
 import { Mark } from '@/components/Logo';
 import { LoadingLine } from '@/components/RouteLoading';
 import { SearchField } from '@/components/SearchField';
 import { SiteHeader } from '@/components/SiteHeader';
 import { SkeletonGrid } from '@/components/SkeletonCard';
 import { ToolCard } from '@/components/ToolCard';
+import { currentUserId, getLibraryFor } from '@/lib/accounts';
 import {
   flagLabel,
   pricingLabel,
@@ -778,6 +781,19 @@ async function Answer({
       })
     : null;
 
+  /* What this person has already done with these twelve tools — one statement
+     for the whole page, under their own identity, after the search rather than
+     inside it. Null when nobody is signed in, which every control on a card
+     reads as "draw the gate". The search itself is unchanged by any of it:
+     nothing here filters, reorders or drops a result, and a signed-in person
+     and a stranger get the same twelve in the same order. */
+  const library = await getLibraryFor(results.map((r) => r.slug));
+  // Asked separately from `library`, which is null both for a stranger AND for
+  // a signed-in person whose search returned nothing. `currentUserId` is
+  // memoised for the render, so this costs nothing.
+  const signedIn = (await currentUserId()) !== null;
+  const backHere = href({ q: query, drop: dropped, category, skip: skipped });
+
   return (
     <>
       {/* What the rules missed and the model read.
@@ -1033,10 +1049,32 @@ async function Answer({
                 ? { rating: result.ratingAvg.toFixed(1), ratingCount: String(result.ratingCount) }
                 : {})}
               {...(result.likeCount > 0 ? { likes: String(result.likeCount) } : {})}
+              like={
+                <LikeControl
+                  slug={result.slug}
+                  name={result.name}
+                  back={backHere}
+                  liked={library ? (library.get(result.slug)?.liked ?? false) : null}
+                  likes={result.likeCount > 0 ? String(result.likeCount) : undefined}
+                />
+              }
+              actions={
+                <SaveControl
+                  slug={result.slug}
+                  name={result.name}
+                  back={backHere}
+                  state={library?.get(result.slug) ?? null}
+                />
+              }
             />
           );
         })}
       </div>
+
+      {/* From the second search onward, never before the first set of results,
+          and never at all once somebody is signed in. The counting is this
+          browser's own — see components/AccountPrompt.tsx. */}
+      <AccountPrompt signedIn={signedIn} />
 
       <div className="muted" style={{ fontSize: 'var(--t-meta)' }}>
         Not quite it? Tell me what to change below. Search stays free, and no account is needed.
