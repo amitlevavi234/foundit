@@ -45,6 +45,9 @@ import {
   DELETE_CODES_SQL,
   DELETE_SESSIONS_SQL,
   DELETE_USER_SQL,
+  MARK_DELETION_SQL,
+  UNMARK_DELETION_SQL,
+  accountIsClosing,
   runDeletion,
   type DeletionOutcome,
 } from './deletion';
@@ -106,6 +109,17 @@ const currentSession = cache(async (): Promise<{ user: SessionUser } | null> => 
 /** Run one statement with this request's identity attached. */
 async function asViewer<T>(fn: (tx: PoolClient) => Promise<T>): Promise<T> {
   return withIdentity({ userId: await currentUserId() }, fn);
+}
+
+/**
+ * One statement on the AUTH pool, answering how many rows it touched.
+ *
+ * The only door into `auth_core` from this file: foundit_app holds nothing
+ * there, and everything this side needs to ask about an account — is a deletion
+ * under way, delete these sessions — goes through here as foundit_auth.
+ */
+async function askAuth(sql: string, values: unknown[]): Promise<number> {
+  return (await authPool().query(sql, values)).rowCount ?? 0;
 }
 
 /**
@@ -173,6 +187,20 @@ export async function ensureProfile(
   userId: string,
   displayName: string | null,
 ): Promise<string | null> {
+  // FIRST, and before a row is written. A deletion that stopped half way leaves
+  // an account that can still sign in with a profile already gone, and this
+  // function is the thing that would hand it a fresh one — the account somebody
+  // closed, back as an empty shell (the review's F8). The marker is asked on
+  // the AUTH pool, as foundit_auth, because that is the only role that may see
+  // auth_core at all.
+  if (await accountIsClosing(userId, askAuth)) {
+    console.error(
+      'a profile was not created for an account whose deletion did not finish; ' +
+        'the half-completed run has to be finished or unmarked first',
+    );
+    return null;
+  }
+
   const name = (displayName ?? '').trim().slice(0, 60) || null;
 
   for (const candidate of handleCandidates(name)) {
@@ -434,12 +462,13 @@ export async function deleteAccount(): Promise<DeletionOutcome | null> {
   if (!userId) return null;
   const email = (session?.user?.email ?? '').toLowerCase();
 
-  const auth = authPool();
-  const rows = async (sql: string, values: unknown[]) =>
-    (await auth.query(sql, values)).rowCount ?? 0;
-
   return runDeletion({
-    sessions: () => rows(DELETE_SESSIONS_SQL, [userId]),
+    sessions: () => askAuth(DELETE_SESSIONS_SQL, [userId]),
+    // Before one row of theirs is touched, and taken away again by `unmark`
+    // below only if every step in between succeeded. lib/deletion.ts has the
+    // whole argument; the short version is that a run which stopped must not
+    // leave an account that can sign in and be handed a new profile.
+    mark: () => askAuth(MARK_DELETION_SQL, [userId]),
     // Under their own identity, so the delete policy — `id = auth.uid()` — is
     // what permits it rather than a predicate written here.
     publicRows: () =>
@@ -447,8 +476,9 @@ export async function deleteAccount(): Promise<DeletionOutcome | null> {
         const { rowCount } = await tx.query(DELETE_ACCOUNT_SQL, []);
         return rowCount ?? 0;
       }),
-    accounts: () => rows(DELETE_ACCOUNTS_SQL, [userId]),
-    codes: () => (email ? rows(DELETE_CODES_SQL, [email]) : Promise.resolve(0)),
-    user: () => rows(DELETE_USER_SQL, [userId]),
+    accounts: () => askAuth(DELETE_ACCOUNTS_SQL, [userId]),
+    codes: () => (email ? askAuth(DELETE_CODES_SQL, [email]) : Promise.resolve(0)),
+    user: () => askAuth(DELETE_USER_SQL, [userId]),
+    unmark: () => askAuth(UNMARK_DELETION_SQL, [userId]),
   });
 }

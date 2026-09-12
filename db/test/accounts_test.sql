@@ -132,6 +132,23 @@ begin
   if has_schema_privilege('foundit_app', 'auth_core', 'usage') then
     perform pg_temp.fail('foundit_app has USAGE on schema auth_core');
   end if;
+
+  -- The sixth table, which is ours rather than Better Auth's
+  -- (0016_deletion_marker.sql): the note that a deletion started and did not
+  -- finish. Three verbs, because nothing ever UPDATES a marker — it is written
+  -- once and taken away once.
+  if to_regclass('auth_core.deletions') is null then
+    perform pg_temp.fail('auth_core.deletions does not exist');
+  end if;
+  select string_agg(v.verb, ', ') into bad
+    from (values ('select'), ('insert'), ('delete')) v(verb)
+   where not has_table_privilege('foundit_auth', 'auth_core.deletions', v.verb);
+  if bad is not null then
+    perform pg_temp.fail('foundit_auth cannot mark a deletion: missing ' || bad);
+  end if;
+  if has_table_privilege('foundit_auth', 'auth_core.deletions', 'update') then
+    perform pg_temp.fail('a deletion marker is written once, never edited');
+  end if;
 end
 $$;
 
