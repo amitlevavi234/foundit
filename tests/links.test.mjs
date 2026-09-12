@@ -178,6 +178,223 @@ test('the site chrome in particular, since that is on every page', () => {
   }
 });
 
+/* ===========================================================================
+ * Phase 7's eleven routes
+ *
+ * THE PHASE 7 REVIEW'S F14. This file reached exactly one of them — `/submit`,
+ * at line 190, in the list of chrome controls — and the maker and claim routes
+ * were "covered" by tests/markup.test.mjs's file-existence list, which is a
+ * different question: a file being present says nothing about the router
+ * resolving a path to it, and a route resolving says nothing about the page
+ * answering.
+ *
+ * So both questions, separately.
+ * ======================================================================== */
+
+/** Every route this phase added, as a path the router has to resolve. */
+const PHASE_7_ROUTES = [
+  '/submit',
+  '/submit/url',
+  '/submit/details',
+  '/submit/problems',
+  '/submit/constraints',
+  '/submit/preview',
+  '/submit/done',
+  '/claim',
+  '/maker',
+  '/maker/*',
+  '/maker/*/edit',
+];
+
+test('every route Phase 7 added is a route the router resolves', () => {
+  for (const path of PHASE_7_ROUTES) {
+    assert.ok(resolves(path), `${path} is not a route under app/`);
+  }
+  // And the dynamic ones are dynamic rather than a literal directory called
+  // "[slug]" that only matches that string.
+  const paths = ROUTES.map((r) => `/${r.segments.join('/')}`);
+  assert.ok(paths.includes('/maker/[slug]'), '/maker/[slug] is missing from the route table');
+  assert.ok(
+    paths.includes('/maker/[slug]/edit'),
+    '/maker/[slug]/edit is missing from the route table',
+  );
+});
+
+/**
+ * The base URL to walk, or null.
+ *
+ * `BETTER_AUTH_URL` because that is the one variable that already says where
+ * this deployment answers, and `node --env-file=.env.local --test` — the
+ * command the gate runs — has it. No server, no walk, and the test says so
+ * rather than failing: `npm test` runs with no server at all.
+ */
+function baseUrl() {
+  const raw = process.env.FOUNDIT_BASE_URL ?? process.env.BETTER_AUTH_URL ?? '';
+  if (raw.trim() === '') return null;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
+
+async function reachable(origin) {
+  try {
+    // Thirty seconds, because `next dev` COMPILES a route on its first
+    // request: four seconds was enough for a warm server and not for a cold
+    // one, which is a skip that looks exactly like a missing server.
+    const response = await fetch(origin, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
+    });
+    return response.status > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The eleven, as concrete addresses a browser could be pointed at. */
+function walkable(slug) {
+  return [
+    '/submit',
+    '/submit/url',
+    '/submit/details',
+    '/submit/problems?draft=1',
+    '/submit/constraints?draft=1',
+    '/submit/preview?draft=1',
+    '/submit/done?tool=tabsplit',
+    '/claim?tool=tabsplit',
+    '/maker',
+    `/maker/${slug}`,
+    `/maker/${slug}/edit`,
+  ];
+}
+
+/**
+ * Walk them, and report the status of each.
+ *
+ * `redirect: 'manual'`, because a 303 to /sign-in IS the answer for most of
+ * these when signed out and following it would hide that. What is never
+ * acceptable is a 5xx: that is what F1 was — a duplicate address answered with
+ * an HTTP 500 — and it is the one thing a walk can catch that a static check
+ * cannot.
+ */
+async function walkRoutes(origin, paths, cookie) {
+  const out = [];
+  for (const path of paths) {
+    const response = await fetch(`${origin}${path}`, {
+      redirect: 'manual',
+      headers: cookie ? { cookie } : {},
+      signal: AbortSignal.timeout(20_000),
+    });
+    out.push({
+      path,
+      status: response.status,
+      location: response.headers.get('location'),
+    });
+  }
+  return out;
+}
+
+test('every Phase 7 route answers a stranger without a 500', async (t) => {
+  const origin = baseUrl();
+  if (!origin || !(await reachable(origin))) {
+    t.skip(
+      `no server answering at ${origin ?? '(no BETTER_AUTH_URL)'}, so the routes could not be `
+        + 'walked. The route table above was still checked. Start `npm run dev` to walk them.',
+    );
+    return;
+  }
+
+  const results = await walkRoutes(origin, walkable('receiptly'));
+  for (const { path, status, location } of results) {
+    assert.ok(status < 500, `${path} answered ${status} to a stranger${location ? ` -> ${location}` : ''}`);
+    assert.ok(status !== 404 || path.startsWith('/maker/'), `${path} does not exist`);
+  }
+
+  // The two that MUST send a stranger to sign in rather than showing them a
+  // maker's screen. The others gate inside the page and answer 200 with a
+  // sign-in panel, which is the product's own pattern.
+  const byPath = new Map(results.map((r) => [r.path, r]));
+  for (const gated of ['/maker', '/maker/receiptly', '/maker/receiptly/edit']) {
+    const row = byPath.get(gated);
+    assert.ok(row, `${gated} was not walked`);
+    assert.ok(
+      row.status === 404 || row.status === 200 || (row.status >= 300 && row.status < 400),
+      `${gated} answered ${row.status} to a stranger`,
+    );
+    if (row.status === 200) {
+      // A 200 to a stranger is only acceptable if the BODY is not somebody's
+      // dashboard — and a 200 is what Next serves here: `notFound()` in a
+      // Server Component renders the not-found page, and a Server Component
+      // cannot set a status code (the same limitation .env.example records for
+      // the rate-limit page being a 200 rather than a 429). So the status
+      // cannot tell a stranger from the maker and the body has to.
+      const body = await (await fetch(`${origin}${gated}`, { redirect: 'manual' })).text();
+      assert.doesNotMatch(
+        body,
+        /Searches matched/,
+        `${gated} showed a stranger a maker's dashboard`,
+      );
+      assert.match(
+        body,
+        /Nothing here|Sign in/,
+        `${gated} answered a stranger with something that is neither the not-found page `
+          + 'nor the sign-in gate',
+      );
+    }
+  }
+});
+
+test('every Phase 7 route answers the MAKER without a 500', async (t) => {
+  const origin = baseUrl();
+  const cookie = process.env.FOUNDIT_TEST_SESSION;
+  if (!origin || !(await reachable(origin))) {
+    t.skip('no server answering, so the signed-in walk could not run.');
+    return;
+  }
+  if (!cookie || cookie.trim() === '') {
+    t.skip(
+      'FOUNDIT_TEST_SESSION is not set, so the signed-in walk could not run. It is a session '
+        + 'cookie for an account that maintains FOUNDIT_TEST_SLUG; sign in through the flow with '
+        + 'AUTH_DEV_CODE_TO_LOG=1 and pass the cookie header.',
+    );
+    return;
+  }
+
+  const slug = process.env.FOUNDIT_TEST_SLUG ?? 'receiptly';
+  const results = await walkRoutes(origin, walkable(slug), cookie);
+  for (const { path, status, location } of results) {
+    assert.ok(
+      status < 500,
+      `${path} answered ${status} to the maker${location ? ` -> ${location}` : ''}`,
+    );
+  }
+
+  // And the maker's own screens are HERS rather than a redirect to sign in.
+  const byPath = new Map(results.map((r) => [r.path, r]));
+  for (const own of ['/maker', `/maker/${slug}`, `/maker/${slug}/edit`]) {
+    const row = byPath.get(own);
+    assert.equal(row.status, 200, `${own} answered ${row.status} to the maker who maintains it`);
+  }
+  // The submit flow's later steps are asked for a draft that is not hers, and
+  // "not yours" and "not there" are the same answer: her own listings page.
+  for (const step of ['/submit/problems?draft=1', '/submit/constraints?draft=1', '/submit/preview?draft=1']) {
+    const row = byPath.get(step);
+    assert.ok(
+      row.status === 200 || (row.status >= 300 && row.status < 400),
+      `${step} answered ${row.status}`,
+    );
+    if (row.location) {
+      assert.match(
+        row.location,
+        /\/maker/,
+        `${step} sent her somewhere other than her own listings for a draft that is not hers`,
+      );
+    }
+  }
+});
+
 test('no control in the chrome is a link to a screen a later phase builds', () => {
   // The three Phase 6/7 controls stay drawn — the artboards have them — but as
   // disabled controls saying so, never as anchors. If one of these paths comes
