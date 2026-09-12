@@ -67,7 +67,7 @@ load-bearing rather than tidiness:
 | --- | --- | --- | --- |
 | `DATABASE_URL` | `foundit_app` | nothing, no `BYPASSRLS` | the web app, `eval/run.mjs` |
 | `DATABASE_URL_OWNER` | `foundit_owner` | the schema | `db/apply.mjs` only |
-| `DATABASE_URL_EMBED` | `foundit_embed` | nothing, two function grants | `scripts/embed.mjs` only |
+| `DATABASE_URL_EMBED` | `foundit_embed` | nothing, a handful of function grants | `scripts/embed.mjs` and `scripts/embed-worker.mjs` only |
 | `DATABASE_URL_AUTH` | `foundit_auth` | nothing, five tables in `auth_core` | Better Auth only |
 
 **There is deliberately no fallback between any of them.** If the app could
@@ -170,6 +170,50 @@ need to know it is there, print its length.
 Search needs no separate warming: the query vector for a sentence is cached in
 `public.query_embeddings` the first time anybody searches for it, and the eval
 harness fills that cache for its own 60 queries before it measures.
+
+## Keeping a new listing searchable
+
+```bash
+node --env-file=.env.local scripts/embed-worker.mjs                # beside the app
+node --env-file=.env.local scripts/embed-worker.mjs --once         # one tick, then stop
+node --env-file=.env.local scripts/embed-worker.mjs --interval=2   # poll faster
+```
+
+**Run this alongside `npm run dev` whenever you are adding or editing
+listings.** Without it a published tool is findable by name and by words and
+not by meaning, because nothing has embedded its summary or its problem
+statements — which looks like the ranking being bad and is not.
+
+The difference from `scripts/embed.mjs` above is the difference between a batch
+and a queue. That one reads a work PREDICATE over the whole catalogue and ends;
+this one reads `public.embedding_work`, which is rows a trigger put there
+because something changed, and keeps going. Run `embed.mjs` after a migration
+or a re-seed; run this one while people are using the site.
+
+It connects as **`foundit_embed`**, from `DATABASE_URL_EMBED`, refuses any
+other role by name, holds no table grant of any kind, and calls three
+functions: `public.embedding_work`, `public.embedding_job_done` and
+`public.embedding_job_failed`. **Its pool is not in `lib/`** —
+`tests/markup.test.mjs` forbids that connection string anywhere under
+`app/`, `components/` or `lib/`, and the rule is right: the web process
+must never hold this role's credentials.
+
+A bad row does not stop a run. A job whose row was deleted or whose tool was
+unpublished comes back with a null body and is retired; a job the provider
+refuses is recorded with its reason and retried twice before being parked; a
+truncated input is refused rather than stored, because a vector of a prefix
+filed under the whole statement is a search that is subtly wrong forever. A
+parked job stays in the table where an operator can see it, and
+`public.queue_embedding` un-parks it the moment its text changes again.
+
+Its calls count against `MAX_EMBEDDING_CALLS_PER_DAY` — **in its own
+process**, which is the honest limitation: this worker and the web process each
+hold their own counter, and the vendor-side cap is the only ceiling actually
+shared between them.
+
+There is no `--from-fixture` and there cannot be: a queue is about text nobody
+has written before, so there is nothing recorded to load. With no
+`EMBEDDINGS_API_KEY` the worker refuses to start rather than spinning.
 
 ## Reading the sentences
 

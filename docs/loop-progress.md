@@ -2227,6 +2227,136 @@ no is worth what it costs.
   cannot be produced any more, and the "before" quoted above is a fresh
   single-sample measurement of the same question rather than his row.
 
+## Phase 7 — adding a tool — **built; item 10, the adversarial review, not yet run**
+
+One migration, one new SQL suite of fifteen sections, eleven screens, a queue
+and the worker that drains it. Six defects, all six found by doing the thing
+rather than by reading the schema — four of them mine, two of them older than
+this phase and unreachable until a listing could be added or claimed.
+
+| | What landed | Where |
+| --- | --- | --- |
+| The write boundary | `foundit_app`'s table-wide INSERT and UPDATE on `tools` replaced by column lists; INSERT, UPDATE and DELETE on `tool_problems` taken away entirely | `0017_adding_a_tool.sql` §2–3 |
+| Control characters | one class built from `chr()`, three CHECK constraints, and a stripper; the same set spelled again in `lib/submit.ts` from `String.fromCharCode` | `0017` §1, `lib/submit.ts` |
+| The four columns nobody chooses | `made_by_owner`, `claimable`, `owner_id` and `published_at` stamped by a BEFORE INSERT trigger for a row a signed-in person is adding as themselves | `0017` §2 |
+| Only seeded listings are claimable | `tools_made_by_owner_is_not_claimable`, so a person-added row cannot be made claimable by anybody, owner included | `0017` §2 |
+| One door per write | `publish_tool`, `claim_tool`, `set_owner_statements`, `reassign_tool_owner`, `log_search_event_tools` | `0017` §3, 5, 6, 7, 8 |
+| The queue | `embedding_jobs`, filled by triggers on `tools` and `tool_problems`, drained by `foundit_embed` through three functions | `0017` §4, `scripts/embed-worker.mjs` |
+| Searches that found you | `search_event_tools (event_id, tool_id, rank)`, no user column, written by one definer function that returns nothing | `0017` §8, `lib/sql.ts` |
+| The five-event threshold | `maker_query_threshold()` = 5, and the CASE that withholds the text inside `maker_search_demand` | `0017` §8 |
+| Ownership changes | a table with no write policy at all and one writer, granted to no login role | `0017` §7 |
+| The limits | 3 per account per day, 10 per address per hour; `TokenBuckets` gained a per-instance window | `lib/rate-limit.ts` |
+| The screens | `/submit` ×6 + `/submit/done`, `/claim`, `/maker`, `/maker/[slug]`, `/maker/[slug]/edit` | `app/`, `components/SubmitSteps.tsx`, `components/RequiredTick.tsx` |
+
+### What is proved, and by what
+
+| Claim | Evidence |
+| --- | --- |
+| A draft is invisible in all eight retrieval paths | `db/test/adding_a_tool_test.sql` §1 — a draft seeded with a nonsense token no other row contains AND a real vector borrowed from a published statement, so it would rank first lexically and at distance zero in the vector leg; absent from `search_tools`, the name route, the all-terms route, `query_vector_ranks` handed the id directly, and `tools_read` as a stranger, another person and an admin — while a control search still returns rows |
+| A person inserts only their own draft | §2 — a stranger refused, a row credited to somebody else refused, a row born `published` refused, and the one that works comes out with `made_by_owner` true, `claimable` false, `owner_id` the submitter and `published_at` null |
+| The application cannot write the seven columns | §3 — `has_column_privilege` over 17 columns for UPDATE and 13 for INSERT, plus the eight the edit screen needs still present, so the revoke cannot quietly take the feature with it |
+| A person-typed statement is `source = 'user'` by construction | §4 — the function refuses somebody else's listing with 42501, stores two as `'user'`, refuses 201 characters with 22001 and a ninth with 23514; thirteen control characters written one at a time and none survives; the CHECK refuses a newline even as the owner |
+| A statement cannot forge a reranker candidate | §5 — the newline-then-fake-tool attack stored as one line |
+| Publishing is the only door | §6 — somebody else's refused 42501, a plain UPDATE refused on privilege, twice refused 22023, and a listing with no statement refused 22023 |
+| An edit re-queues only what changed | §7 — a name change and a platform change queue **0** jobs; a summary change queues exactly 1; replacing one of two statements queues exactly 1, it is the one that changed, and the untouched one still has its embedding |
+| The worker survives a bad row | §8 — a job for a vanished row comes back with a null body; three failures park it and it leaves the live queue; the provider's error text is stored with its control characters gone |
+| The oracle stays split | §8 and §15 — `foundit_embed` holds no privilege on eight tables and cannot call `query_vector_ranks`; no role holds both a vector setter and the ranker; `foundit_app` can write neither vector column by any door |
+| The four claim outcomes | §9 — a stranger 42501, the one click that sets `owner_id` and records an approved claim, a second claim 42501, a claim on a person-added listing 42501, and the CHECK refusing that row to be made claimable at all; `http` evidence 22023 |
+| Nobody takes a listing over | §10 — another person's edit filtered to zero rows (not an error: row-level security filters), `owner_id` refused to a person, to the owner themselves and to an admin through the app role |
+| The one recorded exception | §11 — a non-admin actor 42501, a one-character reason 22023, then the real change recorded with who, from whom, to whom and why; the **former** owner can read their own row, the new owner and an admin can, a stranger cannot |
+| Nothing is joinable to a person | §12 — no column on `search_event_tools` matching `user|person|profile|account|session|visitor|ip|email|handle`, no foreign key out of it except to events and tools, the same check over `search_events`, and that table still has zero foreign keys |
+| A sentence one person typed never reaches a maker | §13 and a live run — two single-occurrence sentences came back `(withheld)` with their counts and ranks; five searches of one sentence through `/results` and it came back with its words |
+| No policy evaluates to true | §14 — every table in `public` has row-level security enabled AND forced; no write policy is literally `true` except `search_events_insert`, which `0003` explains; the three new tables have **no** write policy at all |
+| The tick is disabled in the HTML | live: `<button type="submit" class="btn btn-coral" disabled="">` as served, a `required` checkbox, a second Continue inside `<noscript>`, and a POST without the tick answered with "Tick “Yes, I made this tool” to carry on." |
+| The server never fetches the submitted URL | live: the whole flow driven with the address pointing at a listener on `127.0.0.1:18017`; **0 requests arrived**. `tests/markup.test.mjs` keeps the `fetch` allow-list at exactly three files |
+| Searchable within a minute | live: published **15:59:47.114**, both statements embedded **15:59:51.521**, the summary **15:59:51.798**, returned by a search sharing no word with the listing at **16:00:03** — 4.7s to the vectors, 17s to the page, against a gate of 60 |
+| The caches reflect an edit on the next request | live, on Splitwise (in the catalogue since launch, so a fair test of the minute-long cache): every page warmed as a stranger, then BEFORE `/tools/splitwise` false, `/browse` false, `/top` false; AFTER all three **true**, 5.6s after the save |
+| The publishing limit refuses with a page | live: three published back to back, the fourth refused with "That is three listings today." and "Three a day per account is the limit…", and the draft still served at its own URL |
+
+### The defects this phase found
+
+**`foundit_app` could have written a stranger's sentence as `source = 'seed'`.**
+`0001` granted table-wide INSERT and UPDATE on `tool_problems` for this phase
+and `0011` removed the three provenance columns and the vector from that grant
+— but left `statement`, with `source` defaulting to `'seed'`. The hole was
+not the column `0011` was looking at; it was the DEFAULT on the column beside
+it. `0017` takes every write privilege on that table away and makes
+`set_owner_statements` the door. The same reasoning applies to `tools`,
+where table-wide UPDATE covered `owner_id`, `claimable`, `made_by_owner`,
+`published_at` and all six counters for five phases, reachable by the first
+person to own a listing.
+
+**`MAKER_DASHBOARD_SQL` said `select t.*`** and failed with "permission
+denied for table tools" the first time the dashboard was opened. `0007`
+replaced the table-wide SELECT with a column list so `tools.embedding` could
+be excluded, and a star asks for every column including that one. The boundary
+worked exactly as designed and the query was wrong, which is the good direction
+for that pair.
+
+**`has_keeper` was true for the entire catalogue.** `lib/sql.ts` computed it
+as `owner_id is not null or submitted_by is not null`, and all 224 seeded
+listings carry `submitted_by` = the admin that ran the seed. So the tool
+page's "Unclaimed" pill, its "Nobody yet" fact and its whole claim panel were
+unreachable on every row — and a claimed listing would have kept saying "Nobody
+yet". Shipped in Phase 6, invisible until claiming existed.
+
+**A listing published with no category.** The `SubmitDetails` artboard draws a
+Category select and the first build left it out. `/browse` and `/top` are
+organised by category, so the listing published, embedded, became searchable,
+and appeared on neither. Found by watching `/browse` not change after an edit
+that had obviously worked.
+
+**Three of my own comments quoted the pattern they were explaining** and failed
+the tests that enforce it: a card's fit prop fed a score, a favicon URL, and a
+comparison of an owner id. `tests/markup.test.mjs` reads source as text and
+does not care that something is a comment. The comments are reworded and each
+now says so.
+
+**A backspace byte where a word boundary was written.**
+`scripts/scan-control-bytes.mjs` was a scratch file for four phases; it went
+into the repository at the start of this one and caught a real `0x08` in
+`tests/markup.test.mjs` the same day — the exact hazard it was added for, from
+a shell heredoc, in a regex that then silently matched nothing.
+
+### Known weaknesses, stated rather than hidden
+
+- **Five events is not five people.** The per-IP search limiter allows sixty
+  searches an hour, so one determined person can type the same sentence five
+  times and read it on a maker's dashboard. The threshold bounds
+  `search_events` rows, not distinct humans, and it cannot bound humans
+  without a per-person column that table exists to not have.
+- **`tools.open_count` has no writer.** The dashboard's "Opened from Foundit"
+  is 0 on every listing, and the card says so rather than showing a plausible
+  figure. `docs/product-decisions.md` §12 says the click is counted and it is
+  not: counting it needs a server round trip on an outbound click, which is a
+  redirect route nobody has built. This is the oldest unkept promise in the
+  product and it is now visible on a screen.
+- **The publishing limiter forgets on a restart, and in development on a
+  recompile.** That is the property `lib/rate-limit.ts` documents for every
+  bucket, and it showed during this phase's own evidence run: four listings
+  reached the catalogue for one account across two runs separated by several
+  edits, and three back-to-back within one. The ceiling that survives a restart
+  is `tools.url`'s unique constraint, which is in the database.
+- **`allowPublish` spends the per-account token before it checks the
+  address.** A publish refused by the address ceiling has still cost the person
+  one of their three for the day. `allowSignInCode` has had the same shape
+  since Phase 6 and this follows it deliberately rather than fixing one of two.
+- **The worker's daily cap is its own.** `MAX_EMBEDDING_CALLS_PER_DAY` is
+  per process, so the worker and the web process each hold one. The vendor-side
+  cap is the only ceiling actually shared.
+- **The live "searches that would find you" aside is not built**, and neither
+  are the icon, the screenshots, the pricing-plans table or a fit meter on the
+  preview. Each is absent with a sentence on the screen saying why, per
+  `docs/product-decisions.md` §14's rule about honest gaps.
+- **A definer function owned by `foundit_owner` bypasses row-level security**,
+  because that role is a superuser in the development container. Every definer
+  function added this phase therefore checks `public.tool_is_mine` itself, in
+  its own body, rather than relying on a policy it does not get. That is
+  written into each one and is the reason those checks are not redundant.
+- **`0017` was applied, reversed and re-applied** during development, once,
+  before it was committed — to prove the file on disk is the file that produced
+  the schema after an edit. It has never run anywhere but this machine.
+
 ## Tried and rejected
 
 - **Docker on the owner's laptop.** Docker Desktop crashes on an orphaned

@@ -795,3 +795,151 @@ phases.
 The lesson is not about counters. It is that a rule which has only ever been
 exercised by the migration that wrote it has not been exercised at all, and that
 the way to find out is to do the thing rather than to read the schema.
+
+## 19. Adding a tool (added 12 September 2026)
+
+Phase 7. The rules in §3 and §5 were written in July and did not change; what
+follows is what building them required deciding.
+
+### The flow is six steps, and the first one is a tick
+
+`SubmitRelationship` → `SubmitURL` → `SubmitDetails` → `SubmitTool`
+(problems) → `SubmitConstraints` → `SubmitPreview`, then `SubmitSuccess`.
+The artboards number five of them and put the tick in front, unnumbered, as
+"Before we start" — which is the same six-step flow §3 describes with the tick
+as step one.
+
+**Continue is disabled in the HTML, not styled to look it**, and because CSS
+cannot un-disable a button that is the one client component in the flow. It
+still works with JavaScript off: the checkbox is `required` so a browser
+refuses the form in its own words, a second Continue is drawn inside
+`<noscript>`, and the Server Action refuses a POST without the tick with the
+tick's own sentence. The database has the last word — `made_by_owner` is in no
+grant the application holds, and a trigger stamps it true, because in this
+version there is no other kind of submission.
+
+### The draft row appears at step 3, and nowhere earlier
+
+`tools.summary` carries a 20-character CHECK from `0001`, so before somebody
+has written a summary there is nothing to insert that we did not invent — and
+what we would be inventing is the column search matches against. So steps 1 and
+2 keep the tick and the address in one httpOnly cookie, and from step 3 the
+draft is a real row and every later step is an ordinary authorised write. The
+artboards' "Draft saved, continue anytime" is drawn from step 3 onwards, and
+not before, because before that it would not be true.
+
+### The queue, and what "searchable within a minute" means
+
+Publishing does not embed anything inline. It writes rows to
+`public.embedding_jobs`, which **triggers fill** rather than a server action
+remembering to, and `scripts/embed-worker.mjs` drains as `foundit_embed` on
+a five-second poll. Measured on the development machine: published at
+15:59:47, both problem statements embedded at 15:59:51.5, the summary at
+15:59:51.8, and returned by a search that shares no word with the listing at
+16:00:03 — 4.7 seconds to the vectors and 17 to the page, against a gate of 60.
+
+Triggers rather than a call in the action, for one reason: **"re-queue only
+what changed" written in a server action is a comment, and written as a
+row-level trigger comparing OLD to NEW it is arithmetic.** A maker fixing a
+typo in the name, adding a platform or gaining a like costs no tokens; changing
+the summary re-reads the summary; changing one statement re-reads that
+statement and leaves the others their vectors.
+
+### Statements: eight, typed, and through one door
+
+Up to **eight** per listing (`public.statements_max()`), each at most 200
+characters, each stripped of C0, C1, U+2028 and U+2029 before storage and
+refused by a CHECK if any remain. `public.statements_wanted()` stays at four
+and is a different number: it is how far the GENERATOR fills a thin listing, and
+a maker with eight real sentences about their own tool knows more than it does.
+
+They reach the catalogue through `public.set_owner_statements` and nothing
+else. `0017` took INSERT, UPDATE and DELETE on `tool_problems` away from the
+application entirely, because `source` defaults to `'seed'` — so the first
+version of this flow would have written a stranger's sentence into the
+catalogue recorded as something we wrote by hand, and `0011`'s carefully
+corrected comment on that column would have been wrong again, one row at a time.
+
+### Claiming is one click and only for what we seeded
+
+`claimable and owner_id is null`, under a row lock, is the whole precondition.
+A claim on a listing a person added is refused **at the database**: every
+person-added row carries `made_by_owner = true` and
+`tools_made_by_owner_is_not_claimable` refuses to let such a row be claimable
+at all. The optional evidence link is https-only, stored as text, shown to
+nobody, and never opened by us — it is read by a person, by hand, if two people
+claim the same listing, which is the only thing §3 says it is for.
+
+### What a maker is shown, and the number that decides it
+
+The dashboard shows their own listings, the opens, saves, likes and reviews, and
+**"searches that found you"** — a new `search_event_tools (event_id, tool_id,
+rank)` join with no user column and no way to add one.
+
+**A sentence reaches a maker only when at least five separate searches have
+typed it.** Below that they get the count and the best rank and no words. Five
+is chosen rather than derived: it is the smallest number at which a sentence is
+not obviously one person's, and "describe your problem" is where people type
+what they have not told anybody. The threshold lives in
+`public.maker_query_threshold()` and the CASE inside
+`public.maker_search_demand`, so there is no argument a page could pass to see
+a sentence one person typed once, and no future edit to a component that could
+reveal one.
+
+**It is five EVENTS, not five people**, and that is a real limit rather than a
+quibble: the per-IP search limiter allows sixty searches an hour, so one
+determined person can type the same sentence five times and see it there.
+
+### The limits on publishing
+
+**Three listings per account per day, ten per address per hour**, in the same
+in-memory limiter as everything else (`lib/rate-limit.ts`). Neither is about
+money — `MAX_EMBEDDING_CALLS_PER_DAY` already bounds that — and neither is a
+queue, because §5 says nothing waits for approval. They bound what a script can
+do to the catalogue in an afternoon, which a refund does not undo.
+
+The limit is spent at **Publish** and not at draft creation: a draft costs
+nothing, is invisible to everybody, and refusing one would mean a person loses
+the form they just filled in. The refusal is a page that says which ceiling it
+was and that the draft is still there.
+
+A duplicate address is refused by `tools.url`'s unique constraint, with a
+message naming the existing listing's **public name only** — not who maintains
+it, not whether it has an owner, not its id.
+
+### Nobody takes a listing over, and the one recorded exception
+
+The application role cannot write `owner_id` at all, so a person cannot
+transfer their listing and cannot be handed somebody else's. Two doors write
+that column: `public.claim_tool`, which only opens on a seeded listing with no
+owner, and `public.reassign_tool_owner`, which records who, from whom, to whom
+and why in a new `ownership_changes` table the former owner can read.
+
+**That second door is granted to no login role.** Not `foundit_app`. What is
+left is `foundit_owner`, which means an operator at a psql prompt —
+deliberately inconvenient, because until Phase 8's admin screens exist there is
+no web request that can prove who is asking.
+
+### Where the build differs from the artboards
+
+Each of these is said on the screen rather than left as a gap:
+
+- **"Read the page and fill in what we can"** is now "Check the address".
+  Our server never fetches an address a stranger typed (§12) — not the page,
+  not a favicon, not a HEAD request to see whether it resolves.
+- **The icon and screenshot fields are absent.** Foundit has no file upload
+  anywhere and every tile on the site is drawn from the name.
+- **The live "searches that would find you" aside is absent.** Doing it
+  honestly is a paid model call per keystroke against a half-written sentence;
+  doing it any other way is inventing numbers on the screen where a maker
+  decides whether we are honest.
+- **The preview draws the result card without the fit meter.** The artboard
+  shows 88%; §6 as amended says a percentage appears only from at least 200
+  human-judged pairs, and a fit is against a sentence, which a preview has none
+  of.
+- **Offline and account are single ticks, not three-way radios.**
+  `tools.flags` is an enum array and search's filter is has-it-or-not; a
+  "partly, syncs later" the database cannot hold would be a chip a person ticks
+  and a filter that ignores.
+- **The pricing-plans table on EditListing is absent.** `tools.pricing` is one
+  enum value and §8 tracks the model, not a price list.
