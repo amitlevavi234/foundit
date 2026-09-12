@@ -1957,9 +1957,18 @@ join (values
 join public.profiles u on u.id = l.user_id
 on conflict do nothing;
 
-insert into public.collections (owner_id, name, slug, description, is_public) values
-  ('dev_person', 'Trip to Greece', 'trip-to-greece', 'Everything we used in June.', true),
-  ('dev_person', 'Quiet mornings', 'quiet-mornings', null, false)
+-- One shared collection and one private one. `is_public` is no longer a
+-- permission by itself: 0013_accounts.sql made a shared collection readable
+-- only by somebody holding its 128-bit token, and added a CHECK that the flag
+-- and the token agree, so a row that says public and carries no token is now
+-- refused. The literal below is an invented development value in a tracked
+-- file on purpose — it is the address of two made-up collections of real
+-- public tools, in a throwaway database, and /c/<token> needs something to
+-- render.
+insert into public.collections (owner_id, name, slug, description, is_public, share_token) values
+  ('dev_person', 'Trip to Greece', 'trip-to-greece', 'Everything we used in June.', true,
+   '0f1e2d3c4b5a69788796a5b4c3d2e1f0'),
+  ('dev_person', 'Quiet mornings', 'quiet-mornings', null, false, null)
 on conflict do nothing;
 
 insert into public.collection_items (collection_id, tool_id, sort_order)
