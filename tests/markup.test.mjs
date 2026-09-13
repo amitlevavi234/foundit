@@ -662,10 +662,15 @@ test('nothing about a visitor is persisted or logged by the rate limiter', () =>
     'the key is a salted hash of the address',
   );
 
-  // And the page that reads the address never keeps it either.
-  const visitor = read(join(ROOT, 'lib', 'visitor.ts'));
-  assert.doesNotMatch(visitor, /\bconsole\.\w+\(/, 'lib/visitor.ts must not log an address');
-  assert.doesNotMatch(visitor, /from ['"]pg['"]/, 'lib/visitor.ts must not reach a database');
+  // And neither half of the thing that reads the address keeps it either.
+  // Two files since the Phase 9a review: lib/visitor.ts is the bridge to
+  // `headers()` and lib/visitor-policy.ts is the decision, split so that a
+  // test can import the decision rather than grep it.
+  for (const name of ['visitor.ts', 'visitor-policy.ts']) {
+    const visitor = read(join(ROOT, 'lib', name));
+    assert.doesNotMatch(visitor, /\bconsole\.\w+\(/, `lib/${name} must not log an address`);
+    assert.doesNotMatch(visitor, /from ['"]pg['"]/, `lib/${name} must not reach a database`);
+  }
 });
 
 test('the application never reaches for the embedding job’s write', () => {

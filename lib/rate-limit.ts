@@ -82,20 +82,30 @@ import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
  * `scripts/output-tokens.mjs` measured the reader's per-request distribution —
  * p99 117, max 127 over 396 requests — and three times the p99 is 360 rather
  * than 900; the reranker's own p99, printed by every recording run, put its
- * ceiling at 750 rather than 700. Same caps, same 120 searches, a third less
- * worst case:
+ * ceiling at 750 rather than 700.
  *
- *   reader    2 x 120 = 240 requests/day    $1.74 a month at the ceiling
- *   rerank    1 x 120 = 120 requests/day    $1.46 a month at the ceiling
- *   embedding    2,000 requests/day         $0.02 a month
- *                                   total   $3.23 a month, was $4.68
+ * THE WORST CASE, IN ONE TABLE — the same one `.env.example` carries and the
+ * same one `tests/rate-limit.test.mjs` computes, from the fixture's measured
+ * input and both output ceilings:
  *
- * against a $5 ceiling, and `tests/rate-limit.test.mjs` recomputes all of it
- * from `db/seed/embeddings.fixture.json` and the two ceilings, so a drifting
- * constant or a raised cap fails a test rather than a statement. THE TEST IS
- * THE AUTHORITY AND THIS COMMENT IS NOT: the measured input tokens move by a
- * few percent each time the fixture is re-recorded, and these three lines are
- * the last recomputation rather than a promise.
+ *   reader    2 x 120 = 240 requests/day        $1.74 a month at the ceiling
+ *   rerank    1 x 120 = 120 requests/day        $1.44 a month at the ceiling
+ *   embedding    2,000 requests/day             $0.02 a month  (the web process)
+ *   worker   1,500,000 tokens/day               $0.90 a month
+ *                                       total   $4.10 a month
+ *                                    headroom   $0.90 a month
+ *
+ * FOUR LINES AND NOT THREE, WHICH IS THE PHASE 9a REVIEW'S F18. This comment
+ * carried a three-line table totalling $3.23 — the worker's token ceiling was
+ * missing from it — and then advised spending "$1.77 of headroom" that did not
+ * exist. Taking that advice, by doubling the reader and rerank caps, would have
+ * put the worst case at about $7.30 against a $5 ceiling. The test would have
+ * caught it; the guidance would have caused it.
+ *
+ * THE TEST IS THE AUTHORITY AND THIS COMMENT IS NOT: the measured input tokens
+ * move by a few percent each time the fixture is re-recorded, so the test both
+ * recomputes the arithmetic and reads these lines back, and fails if the two
+ * have drifted apart.
  *
  * **What this is and is not.** It is a bound on what a STRANGER can make us
  * spend in a day, and it is not a traffic limit: a sentence somebody has typed
@@ -104,13 +114,13 @@ import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
  * saying so is better than saying 320 from a model that understated the worst
  * case by four times.
  *
- * **What to change when there is real traffic**, in this order: this number —
- * there is now $1.77 a month of headroom, which is 120 more first-ever
- * searches a day or a second reranker sample if one is ever worth shipping —
+ * **What to change when there is real traffic**, in this order: this number,
  * and then `MAX_MONTHLY_SPEND` in lib/prices.ts, on purpose, with the owner.
- * Not these three one at a time. The output ceilings are no longer the place to
- * look: they are measured now, and `scripts/output-tokens.mjs` is how to
- * measure them again.
+ * Not these three one at a time, and not without recomputing the table above —
+ * $0.90 of headroom is not another 120 first-ever searches a day, it is about
+ * a third of one. The output ceilings are no longer the place to look: they
+ * are measured now, and `scripts/output-tokens.mjs` is how to measure them
+ * again.
  */
 export const DEFAULT_SEARCHES_PER_IP_PER_HOUR = 60;
 export const DEFAULT_EMBEDDING_CALLS_PER_DAY = 2000;
@@ -426,6 +436,20 @@ interface Bucket {
   tokens: number;
   /** When `tokens` was last brought up to date. */
   at: number;
+  /**
+   * THIS bucket's ceiling, and therefore this bucket's refill rate.
+   *
+   * THE PHASE 9a REVIEW'S F26. `sweep` took the `perHour` of whatever call
+   * happened to trigger it and applied that rate to every bucket in the map —
+   * and one map holds five different ceilings (search 60, `open:` 30,
+   * `code-address:` 5, `code-ip:` 20, `publish-address:` 10). A sweep
+   * triggered by a sign-in-code call therefore deleted, and so fully refilled,
+   * every search bucket with five or more tokens left. The class's own comment
+   * said a map needs ONE rate for the sweep to be right, which is true, and
+   * the map had five. Keeping the ceiling on the bucket is the version of that
+   * invariant that holds however many kinds of key share a window.
+   */
+  perWindow: number;
 }
 
 /**
@@ -442,10 +466,16 @@ interface Bucket {
  * per account per day" cannot be `take(key, 3)` on an hourly instance — that is
  * three an hour — and it cannot be a `DailyCap`, because those are global and
  * keyed on nothing. So the window is a constructor argument and every bucket in
- * one instance shares it. Per instance rather than per call because `sweep`
- * decides what to forget from the rate: "this bucket has refilled to full"
- * needs ONE rate for the whole map, and mixing an hourly and a daily bucket in
- * one map would make the sweep discard the daily ones an hour early.
+ * one instance shares it: mixing an hourly and a daily bucket in one map would
+ * make the sweep discard the daily ones an hour early.
+ *
+ * THE CEILING IS PER BUCKET, and that is the Phase 9a review's F26. One
+ * instance's map holds five different hourly ceilings — search 60, `open:` 30,
+ * `code-address:` 5, `code-ip:` 20, `publish-address:` 10 — and `sweep` used
+ * the ceiling of whichever call triggered it, so a sweep set off by a
+ * sign-in-code call deleted, and therefore fully refilled, every search bucket
+ * with five or more tokens left. Each bucket now carries its own `perWindow`
+ * and the sweep reads it, which is the invariant the comment always claimed.
  */
 export class TokenBuckets {
   private readonly buckets = new Map<string, Bucket>();
@@ -489,13 +519,17 @@ export class TokenBuckets {
       // the map is at its ceiling: a hash map of fifty thousand small objects
       // is a few megabytes, and walking it is not something a search should pay
       // for on the ordinary path.
-      if (this.buckets.size >= this.maxKeys) this.sweep(now, ratePerMs, perHour);
-      bucket = { tokens: perHour, at: now };
+      if (this.buckets.size >= this.maxKeys) this.sweep(now);
+      bucket = { tokens: perHour, at: now, perWindow: perHour };
       this.buckets.set(key, bucket);
     } else {
       const refilled = bucket.tokens + (now - bucket.at) * ratePerMs;
       bucket.tokens = Math.min(perHour, refilled);
       bucket.at = now;
+      // The caller's ceiling wins: the environment can move a limit between
+      // two calls, and a bucket that remembered the old one would refill at a
+      // rate nothing in the configuration names.
+      bucket.perWindow = perHour;
     }
 
     if (bucket.tokens >= 1) {
@@ -539,10 +573,17 @@ export class TokenBuckets {
     };
   }
 
-  /** Drop every bucket that has refilled to full — it carries no information. */
-  private sweep(now: number, ratePerMs: number, perHour: number): void {
+  /**
+   * Drop every bucket that has refilled to full — it carries no information.
+   *
+   * PER BUCKET, AT ITS OWN RATE (F26). It used to be handed the `perHour` of
+   * the call that triggered it, which was right only where every key in the
+   * map shared one ceiling, and this map has never done that.
+   */
+  private sweep(now: number): void {
     for (const [key, bucket] of this.buckets) {
-      if (bucket.tokens + (now - bucket.at) * ratePerMs >= perHour) this.buckets.delete(key);
+      const rate = bucket.perWindow / this.windowMs;
+      if (bucket.tokens + (now - bucket.at) * rate >= bucket.perWindow) this.buckets.delete(key);
     }
     // Still full: somebody is spending from fifty thousand addresses at once.
     // Forget all of it rather than run out of memory; the daily caps below are

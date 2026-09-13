@@ -39,7 +39,7 @@ import {
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 const AUTH = readFileSync(join(ROOT, 'lib', 'auth.ts'), 'utf8');
-const VISITOR = readFileSync(join(ROOT, 'lib', 'visitor.ts'), 'utf8');
+const VISITOR = readFileSync(join(ROOT, 'lib', 'visitor-policy.ts'), 'utf8');
 
 /** The scope parameter Google would actually be sent, for some options. */
 async function scopeParameter(options) {
@@ -174,8 +174,16 @@ test('and it is the same header the application’s own limiter counts', () => {
   assert.deepEqual([...AUTH_IP_HEADERS], ['cf-connecting-ip']);
   assert.match(
     VISITOR,
-    /const ADDRESS_HEADERS = \['cf-connecting-ip'/,
-    'lib/visitor.ts must still trust the same header first',
+    /export const TRUSTED_HEADER = 'cf-connecting-ip';/,
+    'lib/visitor-policy.ts must still name the same header',
+  );
+  // AND ONLY THAT ONE. The Phase 9a review's F2: the list used to be three
+  // names deep, so a client that could not forge the first could forge the
+  // second. Better Auth's own limiter is handed one name for the same reason.
+  assert.doesNotMatch(
+    VISITOR,
+    /'x-real-ip'|'x-forwarded-for'/,
+    'lib/visitor-policy.ts must not read a header the client can write',
   );
   assert.match(AUTH, /ipAddress: \{ ipAddressHeaders: \[\.\.\.AUTH_IP_HEADERS\] \}/);
 });

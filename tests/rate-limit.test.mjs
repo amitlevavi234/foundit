@@ -49,6 +49,12 @@ import {
   visitorKey,
 } from '../lib/rate-limit.ts';
 import {
+  SHARED_BUCKET,
+  TRUSTED_HEADER,
+  TRUST_VARIABLE,
+  bucketFor,
+} from '../lib/visitor-policy.ts';
+import {
   READER_MAX_OUTPUT_TOKENS as READER_CEILING_SENT,
   READER_REQUESTS_PER_READING,
 } from '../lib/reader-model.ts';
@@ -187,6 +193,46 @@ test('the bucket map is swept rather than grown without bound', () => {
   clock.advance(2 * HOUR);
   buckets.take('someone-new', 60);
   assert.ok(buckets.size < 10, 'full buckets are forgotten when the map is at its ceiling');
+});
+
+test('a sweep at one ceiling does not refill a bucket at another', () => {
+  // THE PHASE 9a REVIEW'S F26. One map holds five different hourly ceilings —
+  // search 60, `open:` 30, `code-address:` 5, `code-ip:` 20,
+  // `publish-address:` 10 — and `sweep` used the ceiling of whichever call set
+  // it off. A sweep triggered by a sign-in-code call (perHour = 5) therefore
+  // deleted every bucket holding five tokens or more, which is every search
+  // bucket that had been used fewer than fifty-five times in the hour. Deleted
+  // means forgotten means full.
+  const clock = fakeClock();
+  // A small ceiling so a sweep is reachable without fifty thousand keys.
+  const buckets = new TokenBuckets(clock, 4);
+
+  // One searcher, fifty-five of their sixty spent.
+  for (let i = 0; i < 55; i += 1) buckets.take('the-searcher', 60);
+
+  // Two sign-in-code buckets, which have a ceiling of five.
+  buckets.take('code-a', 5);
+  buckets.take('code-b', 5);
+
+  // A quarter of an hour later the code buckets are full again — five an hour
+  // refills four tokens in fifteen minutes — and the searcher is not: sixty an
+  // hour puts them at twenty of sixty.
+  clock.advance(15 * MINUTE);
+
+  // Two more keys, the second of which finds the map at its ceiling and sweeps.
+  // The sweep is set off by a call whose `perHour` is 5.
+  buckets.take('code-c', 5);
+  buckets.take('code-d', 5);
+
+  // The searcher's allowance must be where they left it. Under the old
+  // arithmetic the sweep compared every bucket against the FIVE it had been
+  // handed, so a bucket holding twenty was "full", was deleted, and came back
+  // with a fresh sixty — which this answers as 59.
+  assert.equal(
+    buckets.take('the-searcher', 60).remaining,
+    19,
+    'the search bucket was swept at somebody else’s ceiling and came back full',
+  );
 });
 
 test('a daily cap counts, refuses, and resets after a day', () => {
@@ -999,6 +1045,73 @@ test('PATH 1 of 7 — searching: the one past the ceiling is refused', (t) => {
   });
 });
 
+/* ---------------------------------------------------------------------------
+ * Who a visitor IS — the Phase 9a review's F2
+ * ------------------------------------------------------------------------ */
+
+test('a forged address buys nothing unless something in front overwrites it', (t) => {
+  // THE DEFECT, PINNED. `visitorAddress()` read `cf-connecting-ip`, then
+  // `x-real-ip`, then `x-forwarded-for`, and returned the first that parsed —
+  // with nothing anywhere checking that the request had come through
+  // Cloudflare. The review spent one bucket with sixty searches at a fixed
+  // forged address, then made forty more with a different forged address each
+  // time and was refused none of them. A hundred searches, zero refusals, one
+  // `curl` loop, against a limiter whose own documentation said that traffic
+  // reaching the origin directly would share ONE bucket.
+  const forged = (address) => (name) => (name === TRUSTED_HEADER ? address : null);
+  const OFF = {};
+  const ON = { [TRUST_VARIABLE]: '1' };
+
+  // WITH THE FLAG UNSET — which is this machine, CI, and any origin somebody
+  // reaches directly — every one of them is the same bucket.
+  const rotated = new Set();
+  for (let i = 1; i <= 40; i += 1) rotated.add(bucketFor(forged(`198.51.100.${i}`), OFF));
+  assert.deepEqual([...rotated], [SHARED_BUCKET], 'forty forged addresses must be one bucket');
+  // And so is a client that writes the other two names instead.
+  for (const name of ['x-real-ip', 'x-forwarded-for']) {
+    assert.equal(
+      bucketFor((asked) => (asked === name ? '203.0.113.7' : null), OFF),
+      SHARED_BUCKET,
+      `${name} must never become a bucket key`,
+    );
+    assert.equal(
+      bucketFor((asked) => (asked === name ? '203.0.113.7' : null), ON),
+      SHARED_BUCKET,
+      `${name} must never become a bucket key, flag or no flag`,
+    );
+  }
+
+  // WITH THE FLAG SET — the host, where the tunnel overwrites the header on
+  // every request — they separate again, or the limit would be one bucket for
+  // the whole internet.
+  const separated = new Set();
+  for (let i = 1; i <= 40; i += 1) separated.add(bucketFor(forged(`198.51.100.${i}`), ON));
+  assert.equal(separated.size, 40, 'behind the tunnel each address is its own bucket');
+  assert.equal(bucketFor(forged('203.0.113.7'), ON), '203.0.113.7');
+
+  // Nonsense is still nonsense: a header that is not an address is the shared
+  // bucket rather than a fresh identity per request.
+  for (const junk of ['abc', 'deadbeef', '::::', '', null]) {
+    assert.equal(bucketFor(forged(junk), ON), SHARED_BUCKET, `"${junk}" is not an address`);
+  }
+
+  t.diagnostic(
+    `flag unset: 40 forged addresses -> ${rotated.size} bucket(s); `
+      + `flag set: 40 forged addresses -> ${separated.size} bucket(s)`,
+  );
+});
+
+test('and the limiter counts them that way end to end', () => {
+  // The same thing one layer up, through the function the search calls: forty
+  // forged addresses with the flag unset spend ONE allowance between them.
+  withEnv('MAX_SEARCHES_PER_IP_PER_HOUR', '4', () => {
+    const salted = (i) => bucketFor((name) => (name === TRUSTED_HEADER ? `198.51.100.${i}` : null), {});
+    let allowed = 0;
+    for (let i = 1; i <= 40; i += 1) if (allowSearch(salted(i)).allowed) allowed += 1;
+    assert.equal(allowed, 4, 'four of forty, because all forty are one visitor');
+  });
+});
+
 test('PATH 2 of 7 — adding a tool: the one past the daily ceiling is refused', (t) => {
   withEnv('MAX_TOOLS_PER_ACCOUNT_PER_DAY', '3', () => {
     const who = `publish-${Math.random()}`;
@@ -1122,6 +1235,61 @@ test('every limit in .env.example’s table has a limiter, and every limiter is 
       unique.includes(name),
       `limits() has ${key} (${name}) and .env.example’s table does not name it`,
     );
+  }
+});
+
+test('there is ONE cost table written down, and it is the one this file computes', () => {
+  // THE PHASE 9a REVIEW'S F18. `.env.example` carried two worst-case tables —
+  // one totalling $3.23 and one totalling $4.10 — and `lib/rate-limit.ts`
+  // carried the smaller one again. The smaller omitted the worker's token
+  // ceiling, and the advice printed beside it ("$1.77 a month of headroom,
+  // which is 120 more first-ever searches a day") would, if taken, have put
+  // the worst case at roughly $7.30 against a $5 ceiling.
+  //
+  // So the prose is read back and compared with the arithmetic. A figure that
+  // drifts when the fixture is re-recorded fails here, with both numbers, in
+  // the file that has to be edited.
+  const fixture = JSON.parse(
+    readFileSync(new URL('../db/seed/embeddings.fixture.json', import.meta.url), 'utf8'),
+  );
+  const { readingTokens: rd, rerankTokens: rr, queryTokens: qt } = fixture;
+  const worst = worstCaseMonthly(limits(), {
+    readerIn: rd.in / (rd.sentences * READER_REQUESTS_PER_READING),
+    readerOut: READER_MAX_OUTPUT_TOKENS,
+    rerankIn: rr.in / (rr.judgements * RERANK_REQUESTS_PER_JUDGEMENT),
+    rerankOut: RERANK_MAX_OUTPUT_TOKENS,
+    embeddingIn: qt.in / qt.sentences,
+  });
+
+  const money = (n) => `$${n.toFixed(2)}`;
+  const expected = {
+    reader: money(worst.reader),
+    rerank: money(worst.rerank),
+    embedding: money(worst.embedding),
+    worker: money(worst.worker),
+    total: money(worst.total),
+    headroom: money(MAX_MONTHLY_SPEND - worst.total),
+  };
+
+  for (const file of ['.env.example', 'lib/rate-limit.ts']) {
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    // Every figure of the one table is present…
+    for (const [line, figure] of Object.entries(expected)) {
+      assert.ok(
+        source.includes(`${figure} a month`),
+        `${file} does not quote the ${line} line of the worst case as ${figure} a month`,
+      );
+    }
+    // …and no stale figure is quoted AS a monthly cost. Both files still name
+    // $3.23 while explaining why it was wrong, which is the right way to
+    // record a correction; what must not come back is `$3.23 a month` beside
+    // a cap, which is what a reader takes a decision from.
+    for (const stale of ['$3.23', '$1.77', '$1.46', '$4.68']) {
+      assert.ok(
+        !source.includes(`${stale} a month`),
+        `${file} still quotes ${stale} a month, from the table that omitted the worker`,
+      );
+    }
   }
 });
 
