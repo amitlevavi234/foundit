@@ -3665,7 +3665,7 @@ descriptions of defects rather than of decisions:
   production builds and timings in this section were taken in a copy of the
   tree at `%TEMP%`, against the same database.
 
-## Phase 9a — hardening, provable here — **built; reviewed; all twenty-seven findings closed**
+## Phase 9a — hardening, provable here — **built; reviewed; all twenty-seven findings closed, plus one the fix found**
 
 Nine of the ten gate items. No agent touched the live server, `main`, the
 tunnel, Cloudflare's account, R2 or Sentry's account, and nothing in this
@@ -3832,17 +3832,6 @@ And two gaps that are not "not applicable" and must not be read as ticked:
   run with no trace is now **dropped whole** rather than having its `score: 0`
   averaged in beside another run's metrics, and a page with fewer than two
   recorded traces is **not reported at all**.
-* **Two of `--baseline`'s six gate lines expire after a day.** "negatives
-  answered with nothing" and "held-out answered with nothing" are counted from
-  cached model REFUSALS, and `0009_reading_refusals_expire.sql` makes a refusal
-  stale after twenty-four hours on purpose. Keyless, nothing can re-ask, so
-  both lines drift down by the clock and read `REGRESSION` on any machine whose
-  fixtures are more than a day old — which is every machine, a day after they
-  were recorded. nDCG@10 is unaffected and is the line the gate is really
-  about. Whoever next re-records `eval/baselines.md` with a key should either
-  re-read the refusals in the same run or record those two figures with the age
-  of the fixtures beside them, because as it stands they are a check that goes
-  red for a reason nobody can act on — which is the shape of the thing F5 was.
 * **The 9b runbook has never been executed.** research/10 §10 item 19 makes the
   same admission about its own deploy script. Every command in it is either one
   that was run here against a stand-in, or one that could not be.
@@ -3869,6 +3858,10 @@ margin note, every one reproduced before it was written down. Nothing touched
 the live server, `main`, the tunnel, Cloudflare, R2 or Sentry. **All
 twenty-eight are closed**, and every one of them has a test that fails against
 the code as it was.
+
+**And a twenty-ninth, F28, found while running the gate for the fix** — a
+production bug that had been in the schema since 0009 and that the review could
+not have seen, because it only shows on a database more than a day old.
 
 The production build could not be run on `:3000` during the review — the
 sandbox refused `Stop-Process` — so the reviewer exercised the image itself
@@ -4229,39 +4222,70 @@ windows, prints a count and ends in `rollback` — and "Deleting rows as the
 owner" in `docs/development.md`, which also says that `infra.ops_events` has no
 row-level security and needs none of this.
 
-#### One thing the fix found, which is nobody's finding and is worth writing down
+#### F28 — a re-stored reading kept its old `created_at`, so an expired refusal stayed expired for ever [HIGH]
 
-**Two lines of `eval/run.mjs --baseline` go red by the clock, and did so during
-this work.** nDCG@10 is 0.8645 with a delta of −0.0000, which is the line the
-gate is about; but:
+Found while running the gate, from a symptom that looked at first like a
+harness nuisance and was a production bug.
+
+**The symptom.** Two of `eval/run.mjs --baseline`'s six lines went red by wall
+clock, on a database nobody had touched:
 
 ```
 negatives answered with nothing: 20 of 31 (64.5%) now, 24 of 31 (77.4%) recorded — REGRESSION
 held-out answered with nothing : 21 of 25 (84.0%) now, 22 of 25 (88.0%) recorded — REGRESSION
-```
-
-**It is not a regression and it is not caused by anything in this phase.** The
-same command at `18cb6c3` — the commit the review read, in a worktree, against
-the same database — prints the same two lines. What changed is the date.
-`db/migrations/0009_reading_refusals_expire.sql` makes a cached REFUSAL expire
-after twenty-four hours, deliberately, so that a refusal older than a day is
-never replayed to somebody; the fixtures were read on 12 September and every
-one of the 28 cached refusals in this database is now over that line:
-
-```
 refusals total=28   refusals EXPIRED (>24h)=28   refusals still live=0
 ```
 
-Keyless, the application cannot re-ask, so a negative whose refusal has expired
-is answered from the rules pass instead of being left empty — which is exactly
-what 0009 intends and exactly what those two gate lines count.
+nDCG@10 was 0.8645 with a delta of −0.0000 throughout, and the same command at
+`18cb6c3` in a worktree printed the same two lines — so it was not this phase's
+code. The first reading of that was that the fixtures had simply aged past
+`0009_reading_refusals_expire.sql`'s twenty-four-hour window and that nothing
+could be done about it without spending money. **That was wrong, and the
+paragraph that said so has been replaced by this one.**
 
-**It was not fixed here, and that is a decision rather than an omission.**
-Refreshing them means twenty-eight readings against a paid model, and this
-phase's ground rules allow no spend; bumping `created_at` on those rows would
-be falsifying a measurement to make a gate green, which is the one thing a gate
-is for stopping. It is recorded here, in "Known weaknesses" below, and left for
-whoever next re-records `eval/baselines.md` with a key.
+**The bug.** `eval/run.mjs` re-warms `public.query_readings` from
+`db/seed/embeddings.fixture.json` through `public.store_query_reading` at the
+start of every run — that is what makes a keyless run measure the model pass at
+all. The re-warm is a fresh store of the recorded reading, so it should reset
+the clock, and 0009's header says it does:
+
+> "the row is REWRITTEN each time the application stores a fresh reading, so
+> `created_at` moves and the clock starts again."
+
+It did not move. `store_query_reading`'s conflict clause was written in 0008,
+before 0009 existed, and sets `reading`, `reading_model` and `last_used_at` —
+and `created_at`'s `default now()` applies to an INSERT and never to the UPDATE
+half of an upsert. So `created_at` recorded when the key was first seen, and
+0009 read it as when the answer was obtained.
+
+**What it costs in production**, which is why this is a migration and not a
+note about a harness. Once a refusal is a day old: `query_reading()` returns
+null; the application asks the model, which is TWO reader requests because
+`lib/reader-model.ts` samples twice and votes; it gets the same refusal and
+stores it; `created_at` does not move; the row is still expired; the next
+search of that sentence starts again. **Every subsequent search of that
+sentence pays two paid calls, for ever.** Nothing looks wrong — the page is
+correct and the cache "has" the row — and the only symptom is a reader bill
+that does not fall as the cache warms. `MAX_READER_CALLS_PER_DAY` is 240
+requests, so a handful of popular unanswerable sentences is enough to spend a
+day's budget answering questions the database already had.
+
+**CI could not have seen it.** CI creates its database fresh on every run, so
+nothing there is ever a day old. That is the shape of defect that reaches
+production precisely because the pipeline cannot see it.
+
+*Closed.* `db/migrations/0021_reading_created_at.sql` replaces
+`store_query_reading` with `created_at = now()` in the conflict clause, which
+is what the column means: a store is a fresh answer from the model. Nothing
+else changes — same ceiling, same sweep, same raises. 0009's sentence is true
+now. *Test:* `db/test/reader_test.sql` §10, in both directions — a re-store
+moves `created_at` forward, and a refusal aged twenty-five hours back is not
+served until the same refusal is stored again, at which point it is. Against
+0008's clause, put back inside one transaction, the second check raises.
+
+And the keyless baseline is green again, which is the other half of the point:
+a re-warmed fixture now measures **the readings as recorded**, where before it
+was measuring an expiry policy.
 
 #### What the review reproduced and could not fault
 

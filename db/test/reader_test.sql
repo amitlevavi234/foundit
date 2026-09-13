@@ -458,7 +458,136 @@ $$;
 
 reset role;
 
-select 'READER TEST PASSED — the reading cache refuses what 0008 and 0009 say it refuses'
+-- ===========================================================================
+-- 10. A FRESH READING IS FRESH — `created_at` moves on a re-store (0021).
+--
+--    0009's header says, of a refusal that keeps being re-made: "the row is
+--    REWRITTEN each time the application stores a fresh reading, so
+--    `created_at` moves and the clock starts again." It did not move.
+--    `store_query_reading`'s conflict clause was written in 0008, before 0009
+--    existed, and set `reading`, `reading_model` and `last_used_at` and
+--    nothing else — and a `default now()` applies to an INSERT and never to
+--    the UPDATE half of an upsert.
+--
+--    WHAT THAT COST, and it is why this section exists rather than a comment:
+--    once a refusal was a day old, `query_reading()` returned null, the
+--    application asked the model (two requests — it samples twice and votes),
+--    got the same refusal, stored it, `created_at` did not move, and the row
+--    was still expired. Every subsequent search of that sentence paid two
+--    reader calls, for ever, with nothing anywhere looking wrong.
+--
+--    Two checks, and the second is the one that pins the loop shut.
+-- ===========================================================================
+set local role foundit_app;
+
+do $$
+declare
+  v_before timestamptz;
+  v_after  timestamptz;
+begin
+  perform public.store_query_reading('a tool to split a bill', pg_temp.reading(), public.reading_model());
+end
+$$;
+
+reset role;
+
+-- Read `created_at` as the owner: foundit_app holds no grant on the table, and
+-- that refusal is the point of §3. The window is 0020 §2's, opened by hand and
+-- said out loud, exactly as it is above.
+select set_config('foundit.definer', 'on', false);
+
+create temporary table t_created_at as
+  select created_at from public.query_readings where query_norm = 'a tool to split a bill';
+
+select set_config('foundit.definer', 'off', false);
+
+-- (1) Storing a reading for an existing key moves `created_at` FORWARD.
+--
+--     Aged back by an hour first, because `now()` is the transaction's clock:
+--     inside one transaction `now()` does not advance, so a re-store a
+--     microsecond later would be indistinguishable from one that changed
+--     nothing. An hour back and forward again to `now()` is unambiguous in
+--     either direction.
+select set_config('foundit.definer', 'on', false);
+update public.query_readings
+   set created_at = now() - interval '1 hour'
+ where query_norm = 'a tool to split a bill';
+select set_config('foundit.definer', 'off', false);
+
+set local role foundit_app;
+do $$
+begin
+  perform public.store_query_reading('a tool to split a bill', pg_temp.reading(), public.reading_model());
+end
+$$;
+reset role;
+
+select set_config('foundit.definer', 'on', false);
+do $$
+declare v_now timestamptz;
+begin
+  select created_at into v_now
+    from public.query_readings where query_norm = 'a tool to split a bill';
+  if v_now is null then
+    perform pg_temp.fail('the re-store lost the row');
+  end if;
+  if v_now <= now() - interval '1 minute' then
+    perform pg_temp.fail(
+      'store_query_reading did not move created_at on a re-store: a re-obtained '
+      || 'refusal stays expired for ever and every search of it pays two reader calls');
+  end if;
+end
+$$;
+select set_config('foundit.definer', 'off', false);
+
+-- (2) THE LOOP, END TO END. A refusal aged twenty-five hours back is not
+--     served; storing the same refusal again makes it served. Before 0021 the
+--     second half of that was false, which is the whole defect: the
+--     application re-earned the answer and the database went on ignoring it.
+set local role foundit_app;
+do $$
+declare
+  v_refusal jsonb := pg_temp.reading() || '{"asks_for_software": false}'::jsonb;
+begin
+  perform public.store_query_reading('someone to rewire the house', v_refusal, public.reading_model());
+end
+$$;
+reset role;
+
+select set_config('foundit.definer', 'on', false);
+update public.query_readings
+   set created_at = now() - interval '25 hours'
+ where query_norm = 'someone to rewire the house';
+select set_config('foundit.definer', 'off', false);
+
+set local role foundit_app;
+do $$
+declare
+  v_refusal jsonb := pg_temp.reading() || '{"asks_for_software": false}'::jsonb;
+begin
+  -- Expired: a miss, which is what makes the application pay for the model.
+  if public.query_reading('someone to rewire the house') is not null then
+    perform pg_temp.fail('a refusal aged 25 hours was still served — 0009 is not working');
+  end if;
+
+  -- And the model answers the same thing, and the application stores it. This
+  -- is the exact call site that was spending two reader requests per search.
+  perform public.store_query_reading('someone to rewire the house', v_refusal, public.reading_model());
+
+  if public.query_reading('someone to rewire the house') is null then
+    perform pg_temp.fail(
+      'a refusal that was just re-obtained from the model is STILL expired: '
+      || 'created_at did not move, so every later search of this sentence pays '
+      || 'two reader calls again, for ever (0021)');
+  end if;
+end
+$$;
+reset role;
+
+drop table t_created_at;
+
+select 'READER TEST PASSED — the reading cache refuses what 0008 and 0009 say it refuses, '
+       'and a re-stored reading is fresh (0021)'
        as result;
 
 rollback;
