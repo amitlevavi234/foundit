@@ -3832,6 +3832,17 @@ And two gaps that are not "not applicable" and must not be read as ticked:
   run with no trace is now **dropped whole** rather than having its `score: 0`
   averaged in beside another run's metrics, and a page with fewer than two
   recorded traces is **not reported at all**.
+* **Two of `--baseline`'s six gate lines expire after a day.** "negatives
+  answered with nothing" and "held-out answered with nothing" are counted from
+  cached model REFUSALS, and `0009_reading_refusals_expire.sql` makes a refusal
+  stale after twenty-four hours on purpose. Keyless, nothing can re-ask, so
+  both lines drift down by the clock and read `REGRESSION` on any machine whose
+  fixtures are more than a day old — which is every machine, a day after they
+  were recorded. nDCG@10 is unaffected and is the line the gate is really
+  about. Whoever next re-records `eval/baselines.md` with a key should either
+  re-read the refusals in the same run or record those two figures with the age
+  of the fixtures beside them, because as it stands they are a check that goes
+  red for a reason nobody can act on — which is the shape of the thing F5 was.
 * **The 9b runbook has never been executed.** research/10 §10 item 19 makes the
   same admission about its own deploy script. Every command in it is either one
   that was run here against a stand-in, or one that could not be.
@@ -4217,6 +4228,40 @@ window.
 windows, prints a count and ends in `rollback` — and "Deleting rows as the
 owner" in `docs/development.md`, which also says that `infra.ops_events` has no
 row-level security and needs none of this.
+
+#### One thing the fix found, which is nobody's finding and is worth writing down
+
+**Two lines of `eval/run.mjs --baseline` go red by the clock, and did so during
+this work.** nDCG@10 is 0.8645 with a delta of −0.0000, which is the line the
+gate is about; but:
+
+```
+negatives answered with nothing: 20 of 31 (64.5%) now, 24 of 31 (77.4%) recorded — REGRESSION
+held-out answered with nothing : 21 of 25 (84.0%) now, 22 of 25 (88.0%) recorded — REGRESSION
+```
+
+**It is not a regression and it is not caused by anything in this phase.** The
+same command at `18cb6c3` — the commit the review read, in a worktree, against
+the same database — prints the same two lines. What changed is the date.
+`db/migrations/0009_reading_refusals_expire.sql` makes a cached REFUSAL expire
+after twenty-four hours, deliberately, so that a refusal older than a day is
+never replayed to somebody; the fixtures were read on 12 September and every
+one of the 28 cached refusals in this database is now over that line:
+
+```
+refusals total=28   refusals EXPIRED (>24h)=28   refusals still live=0
+```
+
+Keyless, the application cannot re-ask, so a negative whose refusal has expired
+is answered from the rules pass instead of being left empty — which is exactly
+what 0009 intends and exactly what those two gate lines count.
+
+**It was not fixed here, and that is a decision rather than an omission.**
+Refreshing them means twenty-eight readings against a paid model, and this
+phase's ground rules allow no spend; bumping `created_at` on those rows would
+be falsifying a measurement to make a gate green, which is the one thing a gate
+is for stopping. It is recorded here, in "Known weaknesses" below, and left for
+whoever next re-records `eval/baselines.md` with a key.
 
 #### What the review reproduced and could not fault
 

@@ -715,7 +715,22 @@ Run **from a machine that is not the server**. The commands are
       arrives, it is six digits, and it is not in Spam. If it is, the DNS
       records in `docs/development.md` are wrong.
 - [ ] **5h.** One search, with a sentence nobody has typed before, and read the
-      reasons.
+      reasons. **And then check the vector leg actually ran**, which is the
+      Phase 9a review's F13: `lib/embeddings.ts` reads `EMBEDDINGS_API_KEY` and
+      has no fallback, and when it finds no key nothing breaks — every
+      first-ever sentence quietly falls back to text-only search, for ever.
+      A search for a sentence nobody has typed writes a row to
+      `public.query_embeddings` if and only if the web process had a key:
+
+      ```bash
+      sudo docker exec -u postgres foundit-dev-db psql -d foundit -tAc \
+        "select count(*), max(created_at) from public.query_embeddings"
+      ```
+
+      **SEE:** the count one higher than before the search, with a timestamp
+      from the last minute. If it did not move, `EMBEDDINGS_API_KEY` is missing
+      from `/root/.foundit/app.env` — step 1e — and the site is running on the
+      Phase 2 search without saying so.
 - [ ] **5i.** One save, into a collection.
 - [ ] **5j.** One tool added through `/submit`, and found by a search within a
       minute. That is the embed worker's whole job.
