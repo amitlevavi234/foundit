@@ -81,6 +81,23 @@ export async function openBrowser({ timeoutMs = 30_000 } = {}) {
   /** Every event the page has raised since the last `drain()`. */
   let events = [];
 
+  // A LISTENER THAT DOES NOTHING, AND IS NOT DECORATION. Chrome is killed at
+  // the end of every run, and a WebSocket whose far end goes away raises an
+  // `error` event; with no listener attached that surfaces as an unhandled
+  // rejection AFTER the tests have finished, which the runner reports as a
+  // failure of the whole FILE, with no message and no failing assertion in it.
+  // The connection is EXPECTED to break — that is what `close()` does to it —
+  // so the event is caught and dropped.
+  socket.addEventListener('error', () => {});
+  socket.addEventListener('close', () => {
+    // Anything still waiting will never be answered. Reject it now, with a
+    // sentence, rather than leaving it to time out thirty seconds later.
+    for (const [id, waiter] of pending) {
+      pending.delete(id);
+      waiter.reject(new Error(`the browser went away before ${waiter.method} answered`));
+    }
+  });
+
   socket.addEventListener('message', (message) => {
     const frame = JSON.parse(message.data);
     if (frame.id !== undefined) {
