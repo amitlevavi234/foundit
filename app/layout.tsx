@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { headers } from 'next/headers';
 import type { ReactNode } from 'react';
 
+import { AnalyticsBeacon, SentryDsnMeta } from '@/components/AnalyticsBeacon';
 import { fontClassNames } from '@/lib/fonts';
 
 import '@/styles/tokens.css';
@@ -29,53 +30,36 @@ export const viewport: Viewport = {
 };
 
 /* ---------------------------------------------------------------------------
- * Cloudflare Web Analytics, and why it is rendered here rather than injected.
+ * Cloudflare Web Analytics, and the browser's Sentry DSN.
+ *
+ * BOTH ARE READ AT REQUEST TIME, FROM THE CONTAINER'S ENVIRONMENT, and
+ * components/AnalyticsBeacon.tsx is where the reasoning lives — this layout is
+ * a Server Component, which is what makes that possible, and the Phase 9a
+ * review's F6 is what made it necessary: both used to be `NEXT_PUBLIC_`
+ * variables, which Next inlines at BUILD time, so neither could ever have a
+ * value on this host.
  *
  * THE FIELD MEASUREMENT OF CORE WEB VITALS IS CLOUDFLARE'S, NOT SENTRY'S, and
  * docs/product-decisions.md §13 says why in full. In one line: it is cookieless
  * and stores no client-side state at all (research/11 §5.2 quotes Cloudflare
  * saying so), which is the only kind of measurement this product can take
  * without a consent banner it has spent two phases avoiding needing.
- *
- * A PROXIED ZONE CAN INJECT THE BEACON AT THE EDGE, AND WE TURN THAT OFF. An
- * edge-injected `<script src>` arrives after the response has left this
- * process, so it cannot carry the request's nonce, and `'strict-dynamic'` in
- * middleware.ts blocks it — silently, which is the worst of both. Rendering it
- * here with the nonce is the same beacon, from the same host, under a policy
- * that is actually enforced. server/cloudflare/README.md carries the matching
- * instruction not to enable automatic injection.
- *
- * NO TOKEN, NO TAG. `NEXT_PUBLIC_CF_BEACON_TOKEN` is created by the owner in
- * 9b and is absent here and in CI, so nothing is rendered, nothing is loaded
- * and no request leaves the page. It is `NEXT_PUBLIC_` because the token is a
- * site identifier that appears in the page source of every site using it — it
- * is not a secret, and scripts/scan-secrets.sh is not asked to treat it as one.
  * ------------------------------------------------------------------------ */
-function beaconToken(): string {
-  return (process.env.NEXT_PUBLIC_CF_BEACON_TOKEN ?? '').trim();
-}
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const token = beaconToken();
   // Set by middleware.ts on every request. Absent only where middleware does
   // not run, and there is no such route that renders this layout.
-  const nonce = token === '' ? '' : ((await headers()).get('x-nonce') ?? '');
+  const nonce = (await headers()).get('x-nonce') ?? '';
 
   return (
     <html lang="en" className={fontClassNames}>
       <body>
+        <SentryDsnMeta />
         <a className="skip-link" href="#main">
           Skip to content
         </a>
         {children}
-        {token !== '' && nonce !== '' ? (
-          <script
-            nonce={nonce}
-            defer
-            src="https://static.cloudflareinsights.com/beacon.min.js"
-            data-cf-beacon={JSON.stringify({ token })}
-          />
-        ) : null}
+        <AnalyticsBeacon nonce={nonce} />
       </body>
     </html>
   );

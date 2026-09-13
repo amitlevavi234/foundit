@@ -418,10 +418,16 @@ export const SHARED_SENTRY_OPTIONS = {
  * is in one place and testable.
  *
  * READ FROM THE ENVIRONMENT AND NOWHERE ELSE. Not a constant, not a config
- * file, not a fallback: `SENTRY_DSN` on the server and
- * `NEXT_PUBLIC_SENTRY_DSN` in the browser, both absent here and in CI.
+ * file, not a fallback: `SENTRY_DSN`, absent here and in CI.
+ *
+ * ONE NAME AND NOT TWO SINCE THE PHASE 9a REVIEW (F6). There used to be a
+ * `NEXT_PUBLIC_SENTRY_DSN` fallback for the browser, which could not work:
+ * `NEXT_PUBLIC_` is inlined at build time and `process.env` does not exist in
+ * a browser. The browser's DSN now comes from a meta tag the server renders
+ * with this value (components/AnalyticsBeacon.tsx), so there is one variable,
+ * on the server, read per request.
  */
 export function sentryDsn(env: Record<string, string | undefined>): string | undefined {
-  const raw = (env.SENTRY_DSN ?? env.NEXT_PUBLIC_SENTRY_DSN ?? '').trim();
+  const raw = (env.SENTRY_DSN ?? '').trim();
   return raw === '' ? undefined : raw;
 }

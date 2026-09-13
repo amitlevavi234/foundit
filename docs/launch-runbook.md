@@ -96,62 +96,155 @@ The DSN is not a secret — it appears in the page source of every site using on
   research/11 §4.4 calls it non-negotiable: it is the only control that
   survives a bug in our own code.
 
-## 1d. Type them into the host
+## 1d. The age key pair for the off-site dumps
+
+**Do this before 1e, because the recipient goes into `backup.env`.**
+
+`server/backup/pg-dump-offsite.sh` tars `pg_dumpall --globals-only` — every
+role and every grant — together with the whole database and puts it in R2.
+Unencrypted, that is the production database and its role list sitting in
+somebody else's object store. The script **refuses to upload an unencrypted
+dump anywhere but a local directory** and exits 78, so a missed step here is a
+failed backup rather than a quiet one; this is the step that stops it failing.
+
+**On the laptop, not on the server:**
+
+```bash
+age-keygen -o foundit-backup.key
+```
+
+It prints the public half (`# public key: age1…`) and writes the private half
+to the file.
+
+- [ ] The **private** half goes into the password manager **and on paper**, off
+      every machine. It is never on the server: the server encrypts, and only
+      the owner decrypts. research/08 §5.3's warning about the pgBackRest
+      passphrase applies word for word — lose it and the repository is
+      cryptographically worthless, with no recovery path.
+- [ ] `shred -u foundit-backup.key` (or delete it and empty the bin) once both
+      copies exist.
+- [ ] The **public** half is `DUMP_AGE_RECIPIENT` in `backup.env`, below. It is
+      not a secret; it can only encrypt.
+- [ ] `sudo apt-get install -y age` on the server, so the script has the binary.
+
+This is checklist item 41, and the evidence is the line the dump script prints
+in 2d: `encrypted to a recipient whose private half is not on this machine`.
+
+## 1e. Type them into the host
+
+**NOT WITH A HEREDOC, AND THE REASON IS SHELL HISTORY.** In an interactive
+bash, the *whole* command is written to `~/.bash_history`, heredoc body
+included — so `sudo tee /root/.foundit/app.env <<'EOF'` puts every production
+secret into a 0600 file in `founditops`' home, which is not a root-only file
+and is not one of the three places step 1's own rule allows. This step used to
+do exactly that, and the Phase 9a review's F14 is why it does not any more.
+
+So: create each file empty, root-only, and open it in an editor.
 
 ```bash
 ssh founditops@<host>
 sudo install -d -m 700 /root/.foundit
 
-# The three the application needs. Written with `sudo tee` and 0600.
-sudo tee /root/.foundit/app.env >/dev/null <<'EOF'
-APP_ENV=production
-DATABASE_URL=postgresql://foundit_app:<FOUNDIT_APP_PASSWORD>@foundit-dev-db:5432/foundit
-DATABASE_URL_AUTH=postgresql://foundit_auth:<FOUNDIT_AUTH_PASSWORD>@foundit-dev-db:5432/foundit
-BETTER_AUTH_SECRET=<openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32>
-BETTER_AUTH_URL=https://foundit.tools
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-RESEND_API_KEY=
-EMAIL_FROM=Foundit <no-reply@mail.foundit.tools>
-OPENAI_API_KEY=
-EMBEDDINGS_MODEL=text-embedding-3-small
-SENTRY_DSN=
-NEXT_PUBLIC_SENTRY_DSN=
-NEXT_PUBLIC_SENTRY_ENVIRONMENT=production
-NEXT_PUBLIC_CF_BEACON_TOKEN=
-EOF
-sudo chmod 600 /root/.foundit/app.env
-
-sudo tee /root/.foundit/embed.env >/dev/null <<'EOF'
-DATABASE_URL_EMBED=postgresql://foundit_embed:<FOUNDIT_EMBED_PASSWORD>@foundit-dev-db:5432/foundit
-EMBEDDINGS_API_KEY=
-EMBEDDINGS_MODEL=text-embedding-3-small
-EOF
-sudo chmod 600 /root/.foundit/embed.env
-
-sudo tee /root/.foundit/migrate.env >/dev/null <<'EOF'
-DATABASE_URL_OWNER=postgresql://foundit_owner:<POSTGRES_PASSWORD>@foundit-dev-db:5432/foundit
-EOF
-sudo chmod 600 /root/.foundit/migrate.env
-
-# and the backup settings, from server/backup/backup.env.example
-sudo cp /srv/foundit/app/server/backup/backup.env.example /root/.foundit/backup.env
-sudo chmod 600 /root/.foundit/backup.env
-sudo nano /root/.foundit/backup.env      # fill in the R2 values from 1a
+sudo install -m 600 /dev/null /root/.foundit/app.env
+sudo install -m 600 /dev/null /root/.foundit/embed.env
+sudo install -m 600 /dev/null /root/.foundit/migrate.env
 ```
 
-**AUTH_DEV_CODE_TO_LOG IS NOT IN `app.env` AND MUST NEVER BE.** `lib/email.ts`
-refuses to honour it when `NODE_ENV` is `production`, so a deployment that set
-it by mistake would still send and still print nothing — but the variable does
-not belong on this machine at all.
+**The session secret, generated on the host and pasted into the editor.** Run
+this on its own and copy the one line it prints — it is a command with no
+secret in it, so it may be in history:
 
-**The three passwords come from `/root/.foundit/db.env`**, which
+```bash
+openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32
+```
+
+The previous version of this step had that pipeline written *inside* a quoted
+heredoc (`<<'EOF'`), which expands nothing: an operator who pasted the block as
+written would have signed every session cookie with the literal 62-character
+string `<openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32>`, which is in a
+public git repository. That is the second half of F14.
+
+**The three database passwords come from `/root/.foundit/db.env`**, which
 `server/setup/09-postgres-service.sh` generated on this box and which has never
 been typed anywhere. Read one back with:
 
 ```bash
 sudo grep '^FOUNDIT_APP_PASSWORD=' /root/.foundit/db.env | cut -d= -f2
 ```
+
+Now `sudo nano /root/.foundit/app.env` and type:
+
+```
+APP_ENV=production
+DATABASE_URL=postgresql://foundit_app:<FOUNDIT_APP_PASSWORD>@foundit-dev-db:5432/foundit
+DATABASE_URL_AUTH=postgresql://foundit_auth:<FOUNDIT_AUTH_PASSWORD>@foundit-dev-db:5432/foundit
+BETTER_AUTH_SECRET=<the line openssl printed above>
+BETTER_AUTH_URL=https://foundit.tools
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+RESEND_API_KEY=
+EMAIL_FROM=Foundit <no-reply@mail.foundit.tools>
+OPENAI_API_KEY=
+EMBEDDINGS_API_KEY=
+EMBEDDINGS_MODEL=text-embedding-3-small
+SENTRY_DSN=
+SENTRY_ENVIRONMENT=production
+CF_BEACON_TOKEN=
+TRUST_CLOUDFLARE_HEADERS=1
+```
+
+**`EMBEDDINGS_API_KEY` IS IN THIS FILE AND USED NOT TO BE**, which is the Phase
+9a review's F13. `lib/reader-model.ts` reads `OPENAI_API_KEY` and falls back to
+`EMBEDDINGS_API_KEY`; `lib/embeddings.ts` reads **only** `EMBEDDINGS_API_KEY`
+and has no fallback. Without it in `app.env` the web process finds no key, and
+— by its own design — nothing breaks: every first-ever sentence silently falls
+back to text-only search, for ever. Set both names to the production key from
+1c. (`embed.env`, for the worker, has always had it.)
+
+**`TRUST_CLOUDFLARE_HEADERS=1` IS SET HERE AND NOWHERE ELSE.** It is what tells
+`lib/visitor-policy.ts` that something in front of this process overwrites
+`cf-connecting-ip` on every request — which on this host is the tunnel, and
+only on this host. Unset, every visitor shares one rate-limit bucket; set
+anywhere the header is not overwritten, one client can mint a fresh identity
+per request, which is the Phase 9a review's F2.
+
+**There is no `NEXT_PUBLIC_` anything.** There used to be three, and none of
+them ever did anything: `NEXT_PUBLIC_*` is inlined by the bundler at `next
+build` time, the image is built in CI, and setting one in this file is setting
+it after the build (F6). `CF_BEACON_TOKEN` and `SENTRY_DSN` are read by the
+server on every request and rendered into the page, so this file is now where
+they are decided.
+
+Then `sudo nano /root/.foundit/embed.env`:
+
+```
+DATABASE_URL_EMBED=postgresql://foundit_embed:<FOUNDIT_EMBED_PASSWORD>@foundit-dev-db:5432/foundit
+EMBEDDINGS_API_KEY=
+EMBEDDINGS_MODEL=text-embedding-3-small
+```
+
+And `sudo nano /root/.foundit/migrate.env`:
+
+```
+DATABASE_URL_OWNER=postgresql://foundit_owner:<POSTGRES_PASSWORD>@foundit-dev-db:5432/foundit
+```
+
+And the backup settings:
+
+```bash
+sudo install -m 600 /dev/null /root/.foundit/backup.env
+sudo cp /srv/foundit/app/server/backup/backup.env.example /root/.foundit/backup.env
+sudo chmod 600 /root/.foundit/backup.env
+sudo nano /root/.foundit/backup.env
+```
+
+Fill in the R2 values from 1a **and `DUMP_AGE_RECIPIENT` from 1d**. The script
+exits 78 without it when the repository is a bucket.
+
+**AUTH_DEV_CODE_TO_LOG IS NOT IN `app.env` AND MUST NEVER BE.** `lib/email.ts`
+refuses to honour it when `NODE_ENV` is `production`, so a deployment that set
+it by mistake would still send and still print nothing — but the variable does
+not belong on this machine at all.
 
 **SEE:** four files, each `-rw------- root root`.
 
@@ -426,8 +519,28 @@ sudo systemctl status cloudflared --no-pager | head -5
 `server/cloudflare/README.md`, in order: the four Cache Rules (bypass first),
 the one rate-limiting rule, SSL/TLS **Full (strict)**, Web Analytics with
 **automatic injection off**. Put the site token into `/root/.foundit/app.env`
-as `NEXT_PUBLIC_CF_BEACON_TOKEN` and redeploy so the beacon renders with a
-nonce.
+as **`CF_BEACON_TOKEN`** — no prefix — and restart the container so the beacon
+renders with the request's nonce.
+
+```bash
+cd /srv/foundit/app
+sudo docker compose --project-directory server -f server/compose.prod.yml up -d app
+curl -s https://foundit.tools/ | grep -o 'beacon.min.js[^>]*' | head -1
+```
+
+**SEE:** a `<script>` for `static.cloudflareinsights.com/beacon.min.js` in the
+page source, carrying a `nonce=` attribute and the site token in
+`data-cf-beacon`.
+
+**THE NAME HAS NO `NEXT_PUBLIC_` PREFIX AND THIS STEP USED TO SAY IT DID.**
+That was the Phase 9a review's F6: `NEXT_PUBLIC_*` is inlined by the bundler at
+`next build` time, the image is built in CI where the token does not exist, and
+setting the name in `app.env` sets it in the container's environment — after
+the build, to no effect. The beacon could not render on any image ever built,
+and Cloudflare Web Analytics is this product's only field measurement of Core
+Web Vitals. `components/AnalyticsBeacon.tsx` reads `CF_BEACON_TOKEN` on every
+request instead, so the value in `app.env` is now the one that decides and one
+image still runs anywhere.
 
 ```
 Evidence — the deploy transcript, the healthz curl, the ingress block,

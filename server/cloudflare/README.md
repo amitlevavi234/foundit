@@ -179,7 +179,12 @@ sees an `http://` request.
 ## 4. Web Analytics
 
 **Analytics & Logs → Web Analytics.** Add `foundit.tools`, copy the site token,
-and put it in `/root/.foundit/app.env` as `NEXT_PUBLIC_CF_BEACON_TOKEN`.
+and put it in `/root/.foundit/app.env` as `CF_BEACON_TOKEN` — **no
+`NEXT_PUBLIC_` prefix**. The Phase 9a review's F6: a `NEXT_PUBLIC_` name is
+inlined by the bundler at `next build` time, the image is built in CI where no
+token exists, and setting one in `app.env` sets it after the build and does
+nothing at all. `components/AnalyticsBeacon.tsx` reads this name on every
+request, so the env file is what decides and one image still runs anywhere.
 
 **Then turn OFF automatic injection for the hostname.** This is the one
 instruction in this file that goes against Cloudflare's own default, and the

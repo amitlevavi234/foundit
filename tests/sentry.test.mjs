@@ -532,10 +532,15 @@ test('keyless it is inert, and the DSN is read from the environment only', () =>
   assert.equal(sentryDsn({}), undefined, 'no DSN must mean no client');
   assert.equal(sentryDsn({ SENTRY_DSN: '   ' }), undefined, 'a blank DSN must mean no client');
   assert.equal(sentryDsn({ SENTRY_DSN: 'https://k@o1.ingest.sentry.io/2' }), 'https://k@o1.ingest.sentry.io/2');
+  // ONE NAME, AND NOT TWO. `NEXT_PUBLIC_SENTRY_DSN` was a second name for the
+  // browser's half and could never have carried a value: `NEXT_PUBLIC_` is
+  // inlined at build time and `process.env` does not exist in a browser
+  // (F6). The browser reads a meta tag the server renders, so this function
+  // has one variable and the server is the only caller.
   assert.equal(
     sentryDsn({ NEXT_PUBLIC_SENTRY_DSN: 'https://k@o1.ingest.sentry.io/3' }),
-    'https://k@o1.ingest.sentry.io/3',
-    'the browser reads its own variable',
+    undefined,
+    'a NEXT_PUBLIC_ name must not be a way in: it is a build-time value',
   );
 
   // And this is the state every test in this repository and every CI run is
@@ -571,7 +576,17 @@ test('no traces, no replay, no PII — in one object, spread by all three config
     assert.match(source, /\.\.\.SHARED_SENTRY_OPTIONS/, `${file} must spread the shared options`);
     assert.match(source, /beforeSend:/, `${file} must set beforeSend`);
     assert.match(source, /beforeBreadcrumb:/, `${file} must set beforeBreadcrumb`);
-    assert.match(source, /sentryDsn\(/, `${file} must read the DSN through sentryDsn`);
+    // WHERE THE DSN COMES FROM DIFFERS FOR THE BROWSER, AND ONLY THERE. The
+    // two server-side configs read the environment through `sentryDsn`; the
+    // browser cannot, so it reads the meta tag `components/AnalyticsBeacon.tsx`
+    // renders with the value `sentryDsn` returned on the server. Before F6 it
+    // called `sentryDsn(process.env)` in a browser, which is an object that
+    // does not exist there, and was therefore inert on every deployment.
+    assert.match(
+      source,
+      file === 'instrumentation-client.ts' ? /meta\[name="sentry-dsn"\]/ : /sentryDsn\(/,
+      `${file} must read the DSN from the one place its runtime can see it`,
+    );
     // And none of them may quietly re-enable what the shared object turned off.
     assert.doesNotMatch(source, /tracesSampleRate/, `${file} must not set tracesSampleRate itself`);
     assert.doesNotMatch(source, /sendDefaultPii/, `${file} must not set sendDefaultPii itself`);

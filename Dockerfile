@@ -26,13 +26,20 @@
 #      and a stack trace in Sentry names minified frames. That is the trade,
 #      and 9b may revisit it with the owner's token.
 #
-#   4. NO `NEXT_PUBLIC_*` BUILD ARG for the site's own address. research/10
-#      §2.5 bakes one in and notes it forces separate images per environment.
-#      Nothing in this application reads its own URL from the client bundle:
-#      `BETTER_AUTH_URL` is read on the server at request time, so ONE image
-#      runs anywhere. The one `NEXT_PUBLIC_` variable that exists — the
-#      Cloudflare Web Analytics site token — is an optional build arg below,
-#      and it is a public site identifier rather than a secret.
+#   4. NO `NEXT_PUBLIC_*` ANYTHING, AND NO BUILD ARG AT ALL. research/10 §2.5
+#      bakes the site's own address in and notes that it forces separate images
+#      per environment. Nothing in this application reads anything from the
+#      client bundle that was decided at build time: `BETTER_AUTH_URL`, the
+#      Cloudflare Web Analytics site token and the browser's Sentry DSN are all
+#      read on the SERVER at request time, so ONE image runs anywhere.
+#
+#      This used to carry `ARG NEXT_PUBLIC_CF_BEACON_TOKEN`, and the Phase 9a
+#      review's F6 is what it cost: `.github/workflows/release.yml` passed no
+#      `--build-arg`, so the name was eliminated to `''` in every image ever
+#      built, and `docs/launch-runbook.md` step 4d then told the operator to
+#      set it in the container's environment — which is after the build and did
+#      nothing. The beacon could not render and there was no field measurement
+#      of Core Web Vitals at all. components/AnalyticsBeacon.tsx is the fix.
 #
 # NOTHING SECRET ENTERS ANY LAYER. No `.env` is copied (.dockerignore refuses
 # it), no ARG carries a key, and the runtime reads every credential from the
@@ -55,8 +62,6 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
-ARG NEXT_PUBLIC_CF_BEACON_TOKEN=""
-ENV NEXT_PUBLIC_CF_BEACON_TOKEN=$NEXT_PUBLIC_CF_BEACON_TOKEN
 # `next build` writes .next/standalone; the repo's own postbuild step packages
 # .next/static and public/ into it (scripts/postbuild-standalone.mjs).
 RUN npm run build

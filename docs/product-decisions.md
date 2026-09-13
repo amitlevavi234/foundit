@@ -629,10 +629,48 @@ on a proxied zone, automatically. An edge-injected tag arrives after the
 response has left this process, so it cannot carry that request's nonce, and
 `'strict-dynamic'` blocks it — silently. So automatic injection stays **off**
 (`server/cloudflare/README.md` §4) and `app/layout.tsx` renders the same script
-from the same host with the nonce, only when `NEXT_PUBLIC_CF_BEACON_TOKEN` is
-set. The token is a public site identifier that appears in the page source of
-every site using one; it is not a secret and `scripts/scan-secrets.sh` is not
-asked to treat it as one.
+from the same host with the nonce, only when the token is set.
+
+### The token and the browser's DSN are server-only names, read per request (amended 13 September 2026)
+
+The Phase 9a review's F6. Both values were `NEXT_PUBLIC_` variables, and **both
+were inert on every image this project has ever built.**
+
+`NEXT_PUBLIC_*` is inlined by the bundler at `next build` time. The image is
+built by `.github/workflows/release.yml`, which passes no `--build-arg`, so the
+name was dead-code-eliminated to `''` in the bundle — the review grepped
+`/app/.next` inside the image and the string is not there. `docs/launch-runbook.md`
+step 4d then told the operator to put the token into `/root/.foundit/app.env`
+and redeploy, which sets it in the container's environment: after the build, to
+no effect. The review ran the image with both variables set at container start
+and got no beacon script and no DSN in the page. And `process.env` does not
+exist in a browser at all, so `sentryDsn(process.env)` in
+`instrumentation-client.ts` could only ever return `undefined` — the browser
+half of Sentry, including everything `app/global-error.tsx` would have
+reported, was permanently switched off.
+
+So there is **no `NEXT_PUBLIC_` anything in this repository**, and the two
+values are named and read like this:
+
+* **`CF_BEACON_TOKEN`** — read by `components/AnalyticsBeacon.tsx`, a Server
+  Component, on every request. It is a public site identifier that appears in
+  the page source of every site using one; it is not a secret and
+  `scripts/scan-secrets.sh` is not asked to treat it as one.
+* **`SENTRY_DSN`** — the same variable the server and edge clients already
+  read. The server renders it into `<meta name="sentry-dsn">` and
+  `instrumentation-client.ts` reads it from there. **A DSN is public by
+  design** — Sentry's own documentation says so, it is in the page source of
+  every site that uses one, and it permits exactly one thing: sending an event
+  to that project. It cannot read one. Saying that here is the point of this
+  paragraph: the next person to see a key-shaped string in the HTML should find
+  the reason it is allowed rather than have to decide.
+
+The alternative was passing a build arg from a repository variable, which works
+and costs one image per environment. Reading at request time costs nothing and
+keeps the property the Dockerfile already argued for: one image runs anywhere.
+
+`tests/beacon.test.mjs` renders both tags with the variables set for the length
+of one call, which is a test only a request-time read can pass.
 
 ## 14. The site chrome tells the truth about what is built (decided 11 September 2026)
 
