@@ -1,3 +1,5 @@
+import { withSentryConfig } from '@sentry/nextjs/config';
+
 /**
  * Foundit runs as an ordinary Node server on a 4 GB Hetzner box behind
  * Cloudflare. Nothing here may assume a serverless platform, an image CDN, or
@@ -32,4 +34,42 @@ const nextConfig = {
   poweredByHeader: false,
 };
 
-export default nextConfig;
+/* ===========================================================================
+ * Sentry (Phase 9a, research/10 §7.2)
+ *
+ * `withSentryConfig` is what wires the three `Sentry.init` calls into the
+ * build: it registers `instrumentation-client.ts` for the browser and leaves
+ * `instrumentation.ts` to load the server and edge configs by runtime.
+ *
+ * FOUR OPTIONS, AND EACH ONE IS A DECISION:
+ *
+ *   `silent`              no build chatter unless something is wrong.
+ *
+ *   `sourcemaps.disable`  NO SOURCE MAPS ARE GENERATED OR UPLOADED. Uploading
+ *                         them needs a `SENTRY_AUTH_TOKEN` at build time, and
+ *                         the build happens in CI: that is a credential on a
+ *                         public runner in exchange for un-minified frame
+ *                         names. The Dockerfile carries the same note.
+ *
+ *   `webpack.treeshake`   drops Sentry's own debug logging from the bundle.
+ *                         (The old `disableLogger` spelling is deprecated.)
+ *
+ *   `telemetry: false`    the plugin reports build metadata to Sentry by
+ *                         default. Nothing about this repository's build is
+ *                         theirs, and with no DSN configured here it would be
+ *                         the only request the build makes.
+ *
+ * THERE IS NO `tunnelRoute`. research/10 §7.2 suggests one so that ad
+ * blockers do not drop events; it works by having the BROWSER post events to a
+ * path on this origin, which the SERVER then forwards to Sentry — that is the
+ * server making an outbound request to an address derived from something a
+ * visitor sent, which is the one thing tests/markup.test.mjs exists to stop.
+ * The trade is that some events are blocked in some browsers. That is the
+ * right way round.
+ * ======================================================================== */
+export default withSentryConfig(nextConfig, {
+  silent: true,
+  telemetry: false,
+  webpack: { treeshake: { removeDebugLogging: true } },
+  sourcemaps: { disable: true },
+});

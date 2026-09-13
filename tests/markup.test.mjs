@@ -198,6 +198,79 @@ test('each request goes to one hardcoded address and can go nowhere else', () =>
   }
 });
 
+/* ===========================================================================
+ * THE FOURTH ENTRY, AND IT IS NOT A FILE IN THIS TREE.
+ *
+ * Phase 9a adds Sentry, which means that when a `SENTRY_DSN` is configured the
+ * process makes a request nothing in `app/`, `components/` or `lib/` contains:
+ * `@sentry/nextjs`'s own transport, to the ingest host inside the DSN. The
+ * list above walks OUR files and would never see it, so it would be an
+ * outbound call this suite had no opinion about — which is exactly the shape
+ * of omission the list exists to prevent.
+ *
+ * So it is named here, with the same four things asserted about it that are
+ * asserted about the other three, adapted to a call made by a library:
+ *
+ *   WHERE IT GOES     the host in the DSN, and nowhere else. The DSN is read
+ *                     from the environment, is not written down in any tracked
+ *                     file, and is the only thing that decides the address.
+ *   WHEN IT HAPPENS   only when a DSN is set. Keyless the client is disabled
+ *                     and no transport is created at all, which is the state
+ *                     of this machine, of CI and of every test run.
+ *   WHAT IT CARRIES   whatever `beforeSend` returns, and lib/sentry-scrub.ts
+ *                     is that function. tests/sentry.test.mjs drives it with a
+ *                     real search, a real session cookie and a real address.
+ *   WHO CAN STEER IT  nobody. There is no `tunnelRoute`, so the server never
+ *                     forwards an event for a visitor, and no address in this
+ *                     codebase is built from anything a stranger sent.
+ *
+ * AND STILL NO FILE OF OURS OPENS A SOCKET FOR IT. The test above is unchanged
+ * and still lists exactly three files plus the same-origin beacon: the Sentry
+ * config files call `Sentry.init`, not `fetch`.
+ * ======================================================================== */
+const SENTRY_FILES = [
+  'sentry.server.config.ts',
+  'sentry.edge.config.ts',
+  'instrumentation-client.ts',
+  'instrumentation.ts',
+];
+
+test('the fourth outbound call is Sentry’s transport, and it is named here', () => {
+  // None of the four is in app/, components/ or lib/, so none of them is in
+  // SOURCES and the allow-list above is genuinely unchanged. They are checked
+  // by name instead.
+  for (const file of SENTRY_FILES) {
+    const source = read(join(ROOT, file));
+    assert.doesNotMatch(
+      source,
+      /(^|[^.\w])fetch\s*\(/,
+      `${file} must not open a socket itself — the SDK's transport is the only caller`,
+    );
+    // No address written down. The DSN decides where the transport goes, and
+    // the DSN comes from the environment.
+    const urls = [...source.matchAll(/https?:\/\/[^\s'"`)]+/g)].map((m) => m[0])
+      // Documentation links in comments are not addresses this code opens.
+      .filter((url) => !url.includes('docs.sentry.io') && !url.includes('nextjs.org'));
+    assert.deepEqual(urls, [], `${file} names an address: ${urls.join(', ')}`);
+  }
+
+  // The scrubber is the thing that decides what travels, so it must be wired
+  // into every one of the three clients — a client without it is a client that
+  // sends the sentence.
+  for (const file of SENTRY_FILES.slice(0, 3)) {
+    const source = read(join(ROOT, file));
+    assert.match(source, /beforeSend:/, `${file} must scrub what it sends`);
+    assert.match(source, /beforeBreadcrumb:/, `${file} must scrub its breadcrumbs`);
+  }
+
+  // And lib/sentry-scrub.ts is in SOURCES, so the allow-list above already
+  // proves it opens nothing. This says why that matters: it is a PURE module,
+  // which is what lets tests/sentry.test.mjs drive it with no SDK and no DSN.
+  const scrub = read(join(ROOT, 'lib', 'sentry-scrub.ts'));
+  assert.doesNotMatch(scrub, /^import /m, 'lib/sentry-scrub.ts must import nothing at all');
+  assert.doesNotMatch(scrub, /process\.env\./, 'it must be handed an environment, not read one');
+});
+
 test('the reader sends the sentence and six settings — nothing else', () => {
   // UPDATED DELIBERATELY IN PHASE 5, and the reason matters more than the diff.
   //
