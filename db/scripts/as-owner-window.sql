@@ -1,0 +1,104 @@
+-- ===========================================================================
+-- Deleting or editing rows as foundit_owner, without reaching for a superuser.
+--
+--   docker exec -i foundit-dev-db psql -v ON_ERROR_STOP=1 -U foundit_owner \
+--     -d foundit -f - < db/scripts/as-owner-window.sql
+--
+-- ...after editing the one statement at the bottom. It is a TEMPLATE, not a
+-- command: there is no safe generic "delete rows" script, and a file that took
+-- a table name as a parameter would be one.
+--
+-- ---------------------------------------------------------------------------
+-- WHY THIS FILE EXISTS
+--
+-- Every table in `public` carries ROW LEVEL SECURITY, enabled and FORCED, and
+-- `foundit_owner` is `NOSUPERUSER NOBYPASSRLS` — so the owner is subject to
+-- its own policies, which is the whole point of the arrangement
+-- (db/dev-roles.sql, and research/08 §9.3). What that means in practice is the
+-- thing that catches everybody:
+--
+--     delete from public.search_events where id > 1245;
+--     DELETE 0
+--
+-- Zero rows, no error, no warning. The policy simply did not match, so there
+-- was nothing to delete as far as the database was concerned. The Phase 9a
+-- adversarial review hit exactly this while tidying up after itself, decided
+-- the DELETE had not worked, and finished the job as the superuser — which is
+-- the Phase 8 review's F1 failure mode met for a third time, and the reason
+-- this file is in the repository rather than in somebody's shell history.
+--
+-- ---------------------------------------------------------------------------
+-- WHAT THE WINDOW IS
+--
+-- 0020 §2 gives every table in `public` a policy called `<table>_definer`,
+-- scoped `TO foundit_owner` and gated on a SETTING rather than on `true`:
+--
+--     using      (pg_catalog.current_setting('foundit.definer', true) = 'on')
+--     with check (pg_catalog.current_setting('foundit.definer', true) = 'on')
+--
+-- The SECURITY DEFINER functions that need it carry `SET "foundit.definer" =
+-- 'on'` in their catalogue entry, so PostgreSQL opens the window on entry and
+-- restores it on exit — including on an exception, which is why it cannot be
+-- left open by a function that throws.
+--
+-- By hand, the equivalent is `set_config(..., true)`: the third argument is
+-- `is_local`, which means THIS TRANSACTION AND NO LONGER. A `COMMIT` or a
+-- `ROLLBACK` closes it either way, and a session that is not in a transaction
+-- cannot leave it open.
+--
+-- 0014's `foundit.counters` is the same mechanism, older and narrower: it
+-- covers the counter columns on `public.tools` that `public.record_tool_open`
+-- and its two siblings move. Open both and every policy that has an owner
+-- window is open.
+--
+-- ---------------------------------------------------------------------------
+-- WHAT THIS IS NOT
+--
+-- It is NOT a way round row-level security, and it grants nothing the owner did
+-- not already have: a custom parameter is PGC_USERSET, so any role could always
+-- `set_config` one inside a transaction. The window is `TO foundit_owner`, and
+-- no application role is a member of that role or may `SET ROLE` to it — which
+-- is the same argument 0020 §2 makes at length about why a setting is safe
+-- where `true` would not be.
+--
+-- IT DOES NOT COVER `infra.ops_events`. That table has no row-level security at
+-- all and does not need this: 0019 explains why (one writer, one reader, and
+-- the GRANT is the boundary), and `delete from infra.ops_events where …` works
+-- as the owner with no window at all. It is named here because the two are
+-- easy to confuse when a cleanup touches both.
+--
+-- IT IS NOT FOR THE APPLICATION. Nothing in `lib/` or `app/` may run this:
+-- those connect as `foundit_app`, which is not `foundit_owner` and for which
+-- these policies do not exist. This is a file for a person with psql open.
+-- ===========================================================================
+
+begin;
+
+-- 0020 §2's window, for every table in `public`.
+select pg_catalog.set_config('foundit.definer', 'on', true);
+
+-- 0014's window, for the counter columns on public.tools.
+select pg_catalog.set_config('foundit.counters', 'on', true);
+
+-- --- YOUR STATEMENT GOES HERE ----------------------------------------------
+--
+-- Two examples, both commented out, both from real cleanups:
+--
+--   the rows a walk or a probe left in the search log
+-- delete from public.search_events where id > 1245;
+--
+--   one listing's cached statements, after a bad import
+-- delete from public.tool_problems where tool_id = 0;
+--
+-- COUNT FIRST. A `select count(*)` with the same `where` clause, inside this
+-- same transaction, is the difference between "the policy is open and this is
+-- what I am about to remove" and "the policy is closed and DELETE 0 means
+-- nothing". Without the window the count is zero too, and that is the tell.
+select count(*) as rows_visible_with_the_window_open from public.search_events;
+
+-- --- AND THE END ------------------------------------------------------------
+--
+-- `rollback` by default, deliberately. Read the count, change this to `commit`,
+-- and run it again. A template that ends in `commit` is a template somebody
+-- runs by accident.
+rollback;

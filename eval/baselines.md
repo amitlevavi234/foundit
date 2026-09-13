@@ -1697,10 +1697,20 @@ which is the device worth optimising for and the one a developer's laptop
 flatters you out of. Median of three runs per page.
 
 **What a number here is.** A LAB measurement on one machine: useful as a
-comparison against this row, and close to meaningless as an absolute. Two runs
-on the same build differ by a few per cent; the first run after a browser
-launches is often unusable, which is why the script throws one away before it
-starts. A change of thirty per cent is a change.
+comparison against this row, and close to meaningless as an absolute.
+
+**AND THE SPREAD IS NOT "A FEW PER CENT", WHICH THIS PARAGRAPH USED TO SAY.**
+That claim is the Phase 9a review's F25, and the review disproved it with the
+instrument itself: the same bundle, on this machine, gave 3886 ms for `/` where
+row 1 says 1546 ms. On a laptop sharing a CPU with a browser, a language server
+and whatever else, **treat a change under about half as noise, compare the
+ORDER of the pages rather than the figures, and do not conclude anything from
+one run.** The script now refuses to report a page that recorded fewer than two
+traces, and prints how many of the runs recorded one.
+
+The first run after a browser launches is often unusable, which is why the
+script throws one away before it starts — and `NO_NAVSTART` is not confined to
+that first run either: see row 2.
 
 **INP is absent and cannot be here.** Interaction to Next Paint needs a person
 interacting. Total Blocking Time is the lab proxy for it and is what the table
@@ -1708,10 +1718,19 @@ carries. The field measurement of all three is Cloudflare Web Analytics, which
 is cookieless and starts in 9b — `docs/product-decisions.md` §13 has the
 decision and why it is not Sentry.
 
-## Row 1 — Phase 9a, 13 September 2026
+## Row 1 — Phase 9a, 13 September 2026 — **superseded; read row 2 first**
 
 Commit `b688efb`, Next 15.5.25, Node 26.7.0, Chrome headless, Windows 11.
 Median of 3 runs per page.
+
+> **This row did not reproduce and its conclusions are withdrawn.** The Phase
+> 9a review re-measured it on the same machine against the same bundle — the JS
+> column within 1 kB — and got a different table and a different ordering, and
+> the script that produced it was mixing a failed run's `score: 0` with a good
+> run's metrics and taking the larger of the middle pair rather than a median
+> (F25). It is kept, struck through in prose rather than deleted, because a
+> withdrawn measurement is part of the record and because row 2 is only
+> meaningful beside it.
 
 | page | score | LCP ms | CLS | TBT ms | Speed Index | TTFB ms | JS kB |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -1789,3 +1808,89 @@ comes from.
   search, not to the page.
 * Sentry adds to the shared bundle. The row above is measured WITH it, which is
   the honest measurement because it is what will ship.
+
+## Row 2 — after the Phase 9a review, 13 September 2026
+
+Commit `b762299`, same machine, same browser, same Next and Node. `npm run
+build` then `npm start` on `:3000`, `scripts/vitals.mjs --runs=3 --json`, with
+the fixed median and the fixed drop rule. `runs` is how many of the three
+recorded a trace at all.
+
+| page | runs | score | LCP ms | CLS | TBT ms | Speed Index | TTFB ms | JS kB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `/` | 3/3 | 77 | 2254 | 0.000 | **1056** | 2058 | 53 | 178 |
+| `/results?q=…` | 3/3 | 68 | **3939** | 0.000 | **812** | 2040 | 38 | 181 |
+| `/browse` | 3/3 | 77 | **2567** | 0.000 | **893** | 1876 | 48 | 178 |
+| `/tools/receiptly` | 3/3 | 74 | **3107** | 0.000 | **719** | 1637 | 63 | 181 |
+| `/top` | 2/3 | 73 | **3100** | 0.000 | **839.5** | 1715 | 57.5 | 178 |
+
+### What this row says, and only that
+
+**CLS is 0.000 on every page.** This is the third measurement in a row to say
+so, and the one claim of row 1 that survived the review's re-measurement
+unchanged. Nothing shifts after it paints: fonts through `next/font`, every
+card dimensioned before its content, and no advertisement, banner or
+late-injected anything.
+
+**TBT is over the threshold on every page, at 719–1056 ms.** That is what the
+instrument measured and it is all this row claims. Row 1 went on to say "and
+the cause is the size of the JavaScript, not the amount of it that runs", and
+**that sentence is withdrawn**: TBT *is* the amount that runs — it is time the
+main thread spent blocked — and nothing in `scripts/vitals.mjs` separates
+parsing and compiling from execution. The JS column is a fact (178–181 kB
+compressed, almost none of it ours); the causal link between the two was not
+measured by anything here and should not have been written as though it were.
+
+**LCP is over the threshold on four of five, and `/` is the only one under.**
+Row 1's ordering did not survive: it named `/browse` and `/tools/[slug]` as
+"the two worst LCPs after `/results`", and here `/browse` is the *fastest* of
+the four at 2567 ms while `/top` and `/tools/receiptly` are level at about
+3100 ms. The review's own re-measurement produced a third ordering again. **The
+only ordering claim two measurements agree on is that `/results` is the
+slowest**, which is unsurprising: it is the one page of the five that is
+dynamic because the work is dynamic.
+
+**What that does NOT withdraw** is the `force-dynamic` argument under row 1.
+`/browse` and `/tools/[slug]` really are the two pages whose HTML is identical
+for every signed-out visitor, and they really are sent `private, no-store`, so
+Cache Rule 3 caches neither and every visit is a round trip. That is read off
+the code and the response headers rather than off this table, and it holds
+whichever of them happens to paint first on a laptop. What is withdrawn is
+using the LCP ordering as evidence for it.
+
+**TTFB is 38–63 ms**, the loopback, as before.
+
+### `NO_NAVSTART`, measured rather than guessed
+
+Row 1's write-up said this happens "reproducibly on the two routes in this
+application that stream (`/` and `/results`, the two with a `loading.tsx`)".
+That is withdrawn too. The review hit it on `/browse` and `/top`; the first
+attempt at this row — taken with 35 stray headless Chrome processes still alive
+from the browser tests — could not report three of the five pages at all:
+
+```
+page              runs  score
+/                 3/3   76
+/results?q=…      1/3   not reported
+/browse           1/3   not reported
+/tools/receiptly  0/3   not reported
+/top              3/3   69
+```
+
+Killing those and re-running gave the table above, 3/3 on four pages. So it is
+a **recording failure under machine load** rather than a property of a route —
+and the honest response is the one the script now takes: drop the run whole,
+say how many were recorded, and refuse to report a page with fewer than two.
+
+### Weaknesses of this row, stated
+
+Everything under row 1 still applies — one machine, `localhost` TTFB, a warm
+`/results` sentence, Sentry in the bundle — plus:
+
+* **`/top` is a median of two, not three.** Two is enough to report and thin
+  enough to say so; its TBT and TTFB are means of a pair, which is why they
+  carry a decimal.
+* **The JS column moved 174 → 178–181 kB** between the rows. `/results` and
+  `/tools/receiptly` carry a little more than the other three. Nothing in the
+  review's fixes set out to change bundle size, and this is inside the noise
+  the script now warns about; it is recorded rather than explained.

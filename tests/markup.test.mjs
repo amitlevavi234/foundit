@@ -18,6 +18,7 @@
 // ===========================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -671,6 +672,31 @@ test('nothing about a visitor is persisted or logged by the rate limiter', () =>
     assert.doesNotMatch(visitor, /\bconsole\.\w+\(/, `lib/${name} must not log an address`);
     assert.doesNotMatch(visitor, /from ['"]pg['"]/, `lib/${name} must not reach a database`);
   }
+});
+
+test('the checklist’s header counts its own rows correctly', (t) => {
+  // THE PHASE 9a REVIEW'S F17. docs/launch-checklist.md said "24 evidenced
+  // here in 9a, 10 tagged 9b, owner, 6 not applicable" under its own rule that
+  // no item is ticked by assertion, and tallying the rows by their own markers
+  // gave 34 / 11 / 7 — because rows carried two tags at once and the
+  // arithmetic was done by hand. The two lists of "the ten that are 9b's"
+  // disagreed with each other as well.
+  //
+  // The counting is a script rather than a regular expression in here, because
+  // it is a thing a person needs to RUN while editing that file. This asserts
+  // it exits 0 and prints its findings when it does not.
+  let out = '';
+  let status = 0;
+  try {
+    out = execFileSync(process.execPath, [join(ROOT, 'scripts', 'checklist-counts.mjs')],
+      { cwd: ROOT, encoding: 'utf8' });
+  } catch (error) {
+    status = error.status ?? 1;
+    out = `${error.stdout ?? ''}${error.stderr ?? ''}`;
+  }
+  assert.equal(status, 0, `docs/launch-checklist.md disagrees with itself:\n${out}`);
+  assert.match(out, /The header matches the table/);
+  t.diagnostic(out.split('\n').filter((line) => line.includes('table')).join('; ').trim());
 });
 
 test('the application never reaches for the embedding job’s write', () => {

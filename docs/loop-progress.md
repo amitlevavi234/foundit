@@ -3665,7 +3665,7 @@ descriptions of defects rather than of decisions:
   production builds and timings in this section were taken in a copy of the
   tree at `%TEMP%`, against the same database.
 
-## Phase 9a — hardening, provable here — **built; item 10, the adversarial review, is the supervisor's**
+## Phase 9a — hardening, provable here — **built; reviewed; all twenty-seven findings closed**
 
 Nine of the ten gate items. No agent touched the live server, `main`, the
 tunnel, Cloudflare's account, R2 or Sentry's account, and nothing in this
@@ -3674,60 +3674,71 @@ is the server's value, so the whole chain — build, deploy, roll back, back up,
 restore, verify — was exercised here, against the development database, a local
 registry and a filesystem repository standing in for R2.
 
+**The table below is what landed, AFTER the review.** Item 10's adversarial
+review found twenty-seven defects and one margin note, and four of the rows in
+it were overclaims before that — each is corrected in place and accounted for
+in "Review" at the foot of this section.
+
 | | What landed | Where |
 | --- | --- | --- |
 | The image | `node:26-alpine`, multi-stage, `USER foundit` at uid 1001, exec-form `CMD` so node is PID 1 and gets SIGTERM. 369 MB. One `COPY` of the standalone directory rather than three, because `scripts/postbuild-standalone.mjs` already packages the browser assets at `next build` time | `Dockerfile`, `.dockerignore` |
 | Two services and no third | app and the embed worker: same image, different command, **different env file**. PostgreSQL is already a service on that host, and a second one here is the commonest way a Dockerised database is lost. No Caddy — see the addendum in §13 | `server/compose.prod.yml` |
 | `/healthz` | one `select 1` on the app's own pool, raced against a two-second timer that covers checking a connection OUT as well as the query. 503 and not 200-with-a-false. No session, no cookie, no limiter, no breadcrumb, no write | `app/healthz/route.ts`, `lib/db.ts` |
-| A deploy that undoes itself | idempotent (the same tag, already healthy, is not a deploy), `pg_dump` **before** the migrations and `pg_restore -l` to prove it readable, migrations as `foundit_owner` out of the image being deployed, and the previous tag back when health never comes. Refuses root, refuses any tag that is not `sha-<hex>`, and opens no env file — so it cannot print one | `server/deploy.sh`, `server/rollback.sh`, `server/common.sh` |
+| A deploy that undoes itself | idempotent (the same tag, already healthy, is not a deploy), **one at a time** behind a lock, `pg_dump` **before** the migrations and `pg_restore -l` to prove it readable, migrations as `foundit_owner` out of the image being deployed, and the previous tag back when health never comes. Refuses root; refuses any tag that is not `sha-<hex>`, whole-string and not line by line; refuses an env file that is not mode 0600; and opens no env file — so it cannot print one. A worker that never comes up is exit 76 with the site left running | `server/deploy.sh`, `server/rollback.sh`, `server/common.sh` |
 | A workflow that cannot reach the server | builds and pushes on a tag, `packages: write` and nothing else, no SSH key at all. research/10 §2.5's own workflow holds one; this reverses the direction and the host pulls | `.github/workflows/release.yml` |
 | The image is built on every change | and its history and filesystem greped for a credential, its compose file validated, and a container from it asked `/` and `/healthz` — in CI, not only on a laptop | `.github/workflows/ci.yml` |
-| Backups, proved by restoring | a nightly `pg_dump` that proves its own archive readable before filing it, and a verification that takes the **newest artefact out of the repository**, rebuilds it into `foundit_verify`, compares every table's row count against the source, runs a real `<=>` query and a real full-text query, and writes one row through `infra.record_ops_event` — on failure as well as on success | `server/backup/` |
-| Errors reach somebody, with the sentence taken out | `lib/sentry-scrub.ts`: a pure module with no imports that removes the user, rebuilds the request from the method and the path, drops cookies and `Authorization`, redacts addresses by regex, and removes any value whose KEY is one of the names the typed sentence travels under | `lib/sentry-scrub.ts`, three `Sentry.init` call sites, `app/global-error.tsx` |
-| A policy a browser enforces | a nonce per request, `'strict-dynamic'`, no `unsafe-inline` in `script-src`, plus the four headers of item 38 and two more | `middleware.ts` |
+| Backups, proved by restoring | a nightly `pg_dump` taken in an exported snapshot, which proves its own archive readable before filing it and puts every table's row count **as of that snapshot** in the archive beside it; and a verification that takes the **newest artefact out of the repository**, rebuilds it into `foundit_verify`, compares every table against those counts, runs a real `<=>` query and a real full-text query, and writes one row through `infra.record_ops_event` — on failure as well as on success, from both scripts. It refuses to upload an unencrypted dump to a bucket | `server/backup/` |
+| Errors reach somebody, with the sentence taken out | `lib/sentry-scrub.ts`: a pure module with no imports that removes the user, rebuilds the request from the method and the path **with every dynamic segment replaced**, drops the whole event for `/api/auth`, `/c/` and `/healthz`, drops cookies and `Authorization` from headers wherever they appear, redacts addresses by regex, and removes any value whose KEY is one of the names the typed sentence travels under | `lib/sentry-scrub.ts`, three `Sentry.init` call sites, `app/global-error.tsx` |
+| A policy a browser enforces | a nonce per request, `'strict-dynamic'`, no `unsafe-inline` in `script-src`, plus the four headers of item 38 and two more — on the pages AND on the immutable assets, which middleware deliberately does not cover | `middleware.ts`, `next.config.mjs` |
 | Every limit in one table | and the two write paths that had none — reviewing and saving | `.env.example`, `lib/rate-limit.ts` |
 | The edge, click by click | four Cache Rules with the bypass first, one rate-limiting rule, Full (strict), and Web Analytics with automatic injection **off** | `server/cloudflare/` |
-| Forty items, one at a time | 24 evidenced here, 10 tagged 9b, 6 genuinely not applicable; none dropped and none ticked by assertion | `docs/launch-checklist.md` |
+| Forty items, one at a time | forty-one now: 25 evidenced here, 13 tagged 9b, 3 genuinely not applicable, one tag per row, none dropped and none ticked by assertion. `node scripts/checklist-counts.mjs` computes those three figures from the table and fails when the header disagrees | `docs/launch-checklist.md` |
 | The runbook | six steps with evidence boxes, and the line about step 4 | `docs/launch-runbook.md` |
 
-### The vitals table
+### The vitals table — re-measured after the review
 
-Lighthouse, mobile preset (4x CPU, simulated slow 4G), against a production
-build, median of three runs per page. The full row and its weaknesses are in
-`eval/baselines.md`.
+Lighthouse, mobile preset (4x CPU, simulated slow 4G), against `npm run build`
+and `npm start` on `:3000`, median of up to three runs per page. `runs` is how
+many of the three recorded a trace at all. `eval/baselines.md` row 2 has the
+full account; **row 1 is superseded and its conclusions are withdrawn.**
 
 ```
-page              score  LCP ms  CLS     TBT ms  SpeedIdx  TTFB ms  JS kB
-----------------  -----  ------  ------  ------  --------  -------  -----
-/                 79     1546    0.000   816!    1855      42       174
-/results?q=…      65     4015!   0.000   1014!   1725      41       176
-/browse           71     3266!   0.000   1114!   1560      55       174
-/tools/receiptly  71     3213!   0.000   1018!   1385      53       176
-/top              79     2463    0.000   750!    2037      54       174
+page              runs  score  LCP ms  CLS     TBT ms  SpeedIdx  TTFB ms  JS kB
+----------------  ----  -----  ------  ------  ------  --------  -------  -----
+/                 3/3   77     2254    0.000   1056!   2058      53       178
+/results?q=…      3/3   68     3939!   0.000   812!    2040      38       181
+/browse           3/3   77     2567!   0.000   893!    1876      48       178
+/tools/receiptly  3/3   74     3107!   0.000   719!    1637      63       181
+/top              2/3   73     3100!   0.000   839.5!  1715      57.5     178
 ```
 
-**CLS is 0.000 everywhere**, which is the one unambiguously good number here:
-nothing shifts after it paints. **TBT is over on every page**, and the cause is
-the size of the JavaScript rather than the amount of it that runs — 174 kB
-compressed is the App Router's client runtime plus React, and almost none of it
-is ours. On a 4x-slowed CPU that is 750–1100 ms of blocking; a four-times-faster
-phone sees a quarter of it.
+**CLS is 0.000 everywhere.** Three measurements agree on it and it is the one
+claim of the first table that the review's re-measurement left standing:
+nothing shifts after it paints.
 
-**The two that regressed from Phase 6's "every page is dynamic": `/browse` and
-`/tools/[slug]`.** These are the two pages whose HTML is identical for every
-signed-out visitor and which would otherwise be cacheable at the edge for a
-minute — and they are the two worst LCPs after `/results`, at 3266 ms and
-3213 ms. Because they are `force-dynamic`, Next sends `private, no-store`, and
-Cache Rule 3 respects the origin on purpose, so it caches neither. Every visit
-to a tool page is a round trip even when the bytes have not changed in a week.
-`/results` is not on that list: it is dynamic because a search is dynamic, and
-caching it would mean caching what somebody typed.
+**TBT is over on every page, at 719–1056 ms.** That is what was measured and it
+is all this says. The first write-up added "and the cause is the size of the
+JavaScript rather than the amount of it that runs", and **that is withdrawn**:
+TBT *is* the amount that runs, and nothing in `scripts/vitals.mjs` separates
+parsing from execution. 178–181 kB compressed on every page is a fact; the
+causal link was not.
 
-Fixing it means rendering the session-dependent part of the header inside a
-`<Suspense>` boundary — a public shell with a personal island — which is a
-change to the chrome on every screen in the product. Not a hardening phase's
-work; written down so the next person measuring these knows where the ceiling
-comes from.
+**LCP is over on four of five, and the ORDERING did not survive.** The first
+write-up named `/browse` and `/tools/[slug]` as "the two worst LCPs after
+`/results`" and drew a conclusion from it; here `/browse` is the fastest of the
+four. Across three measurements of the same bundle the only ordering claim that
+holds is that `/results` is slowest — which is not a finding, it is what a
+dynamic page does.
+
+**The `force-dynamic` cost is still real and is now argued from the right
+thing.** `/browse` and `/tools/[slug]` are the two pages whose HTML is identical
+for every signed-out visitor, and Next sends `private, no-store` on both, so
+Cache Rule 3 caches neither and every visit is a round trip even when the bytes
+have not changed in a week. That is read off the code and the response headers,
+not off this table. Fixing it means a `<Suspense>` boundary around the
+session-dependent part of the header — a public shell with a personal island —
+which is a change to the chrome on every screen and not a hardening phase's
+work.
 
 ### Six things this phase found by running rather than by reading
 
@@ -3766,14 +3777,23 @@ comes from.
    `tests/headers.test.mjs` reads the one expression that becomes the header
    instead, which is both narrower and correct.
 
-### What is deferred to 9b — ten items, plus two gaps
+### What is deferred to 9b — thirteen items, plus two gaps
 
-`docs/launch-checklist.md` carries the list with its evidence column. In one
-line each: the model provider's hard monthly cap; the four root-only env files;
-the server's region; the Cloudflare rate-limiting rule; the R2 bucket's access
-policy and lifecycle rule; GitHub secret scanning and push protection; **the
-privacy notice, which is a launch blocker**; the five DPAs; the incident note
-template; and Dependabot.
+`docs/launch-checklist.md` carries the list with its evidence column, and
+**this list and that one are the same list** — `node scripts/checklist-counts.mjs`
+fails when they are not. They disagreed before the review: this one named
+Dependabot and omitted item 33, and the checklist did the opposite (F17).
+
+In one line each: the model provider's hard monthly cap (10); the four
+root-only env files (11); the server's region (12); the Cloudflare
+rate-limiting rule and Managed Challenge (15); the R2 bucket's access policy
+and lifecycle rule (20); GitHub secret scanning and push protection (23);
+**the privacy notice, which is a launch blocker** (24); **a data-export
+endpoint, which is a real gap** (33); **the host re-initialised so
+`foundit_owner` is not a superuser** (34, and runbook step 1f — new since the
+review, see F8); the five DPAs (35); Dependabot or a weekly scheduled audit
+(39); the incident note template (40); and **the age key pair and an encrypted
+off-site dump** (41, new since the review, see F7).
 
 And two gaps that are not "not applicable" and must not be read as ticked:
 
@@ -3797,12 +3817,21 @@ And two gaps that are not "not applicable" and must not be read as ticked:
   field; this one is closed by the application never building such a message —
   asserted over the files the sentence passes through — and by a 300-code-point
   cap. It is written as a test rather than as a comment so that it cannot
-  quietly stop being true.
-* **`NO_NAVSTART`.** Lighthouse's first navigation in a freshly-launched
-  browser reliably comes back with no trace at all. `scripts/vitals.mjs` throws
-  one measurement away and retries up to three times; a row of dashes in that
-  table is a recording failure rather than a broken page, and the script says
-  which it was.
+  quietly stop being true. **The assertion was weaker than that sentence
+  claimed** (F21): it matched only `${…}` interpolation, knew six identifier
+  names and not `q`, stopped reading at the first close paren, and covered
+  eight files and not eleven. It now matches concatenation too, knows fifteen
+  names, scans to the matching paren, and has its own test of the spellings it
+  used to miss.
+* **`NO_NAVSTART`, and it is worse than this bullet used to say.** Lighthouse
+  comes back with no trace at all, on which route is not predictable — this
+  said "reproducibly on the two routes that stream (`/` and `/results`)" and
+  the review watched it hit `/browse` and `/top` and neither of those (F25c);
+  the re-measure below had it on three pages of five. `scripts/vitals.mjs`
+  throws one warm-up measurement away and retries up to three times per run, a
+  run with no trace is now **dropped whole** rather than having its `score: 0`
+  averaged in beside another run's metrics, and a page with fewer than two
+  recorded traces is **not reported at all**.
 * **The 9b runbook has never been executed.** research/10 §10 item 19 makes the
   same admission about its own deploy script. Every command in it is either one
   that was run here against a stand-in, or one that could not be.
@@ -3810,9 +3839,398 @@ And two gaps that are not "not applicable" and must not be read as ticked:
   STOP.** The rename was not performed against a real database, deliberately:
   it renames the live database aside, and doing that to prove it works on the
   machine the development database lives on is not a proof worth having.
-* **Off the tunnel, every visitor shares one limiter bucket.** Unchanged from
-  Phase 3 and still true. The arrangement that makes the origin unreachable is
-  the tunnel, and verifying that is step 5b of the runbook — which is 9b's.
+* **Off the tunnel, every visitor shares one limiter bucket.** TRUE NOW, AND
+  IT WAS FALSE WHEN THIS BULLET FIRST SAID IT — false in the dangerous
+  direction, which is the review's F2. `lib/visitor.ts` trusted
+  `cf-connecting-ip` unconditionally and first, so off the tunnel every visitor
+  got a FRESH bucket per request: the review spent one bucket with sixty
+  searches and then made forty more from forty forged addresses, refused none.
+  The header is now believed only behind `TRUST_CLOUDFLARE_HEADERS=1`, which
+  the runbook sets on the host and nothing else sets anywhere, and
+  `x-real-ip` and `x-forwarded-for` are not read at all. The arrangement that
+  makes the origin unreachable is still the tunnel, and verifying that is step
+  5b of the runbook — which is 9b's.
+
+### Review — item 10, run 13 September 2026
+
+Read-only on the repository, `c76c712..18cb6c3`. Twenty-seven findings and one
+margin note, every one reproduced before it was written down. Nothing touched
+the live server, `main`, the tunnel, Cloudflare, R2 or Sentry. **All
+twenty-eight are closed**, and every one of them has a test that fails against
+the code as it was.
+
+The production build could not be run on `:3000` during the review — the
+sandbox refused `Stop-Process` — so the reviewer exercised the image itself
+under the compose file's own hardening on `:3300`, and a port-shifted copy of
+`server/compose.prod.yml` for the deploy exercise. The fix ran against a real
+`npm run build` and `npm start` on `:3000`; the `Stop-Process` worked this time.
+
+#### The two that could have cost something
+
+**F1 — the share token, which IS the permission, was sent to Sentry in
+`request.url` and `transaction`** [CRITICAL]. `scrubUrl` removed the query
+string and deliberately kept the path, and the module header called the path
+"what makes a report useful, and none of it is about a person". `/c/<token>` is
+about a person: `app/c/[token]/page.tsx` has no owner check and no `is_public`
+flag behind it, so the token in the address is the whole authorisation. Any
+throw on that route shipped it to a third party, timestamped. Nothing left the
+machine yet only because no DSN is configured; runbook step 1b creates one.
+
+*Closed two ways.* `/c/` joins `/api/auth` and `/healthz` in `DROPPED_PATHS`,
+because the token is in every breadcrumb of that navigation too; and every
+dynamic segment of every route — `/c/`, `/u/`, `/tools/`, `/maker/`, `/saved/`
+— is replaced with `[redacted]` in both fields. Most of those are public; the
+point is a rule that can be said in one sentence. *Tests:* three in
+`tests/sentry.test.mjs`, including one that reads `app/` and fails when a
+dynamic segment appears under a parent the module does not know about.
+
+**F2 — the per-visitor rate limiter was defeated by a header the client
+writes, and the documented fallback was false** [HIGH]. `visitorAddress()` read
+`cf-connecting-ip`, then `x-real-ip`, then `x-forwarded-for`, with nothing
+checking the request had come through Cloudflare. The reviewer spent one bucket
+with sixty searches at a forged address and then made forty more from forty
+different forged addresses, refused none: a hundred searches, zero refusals,
+one `curl` loop. Three places said the opposite — `.env.example`, §13's
+addendum and this file's own "known weaknesses" — and the claim was wrong in
+the dangerous direction.
+
+*Closed.* `TRUST_CLOUDFLARE_HEADERS=1` gates it, the runbook sets it on the
+host and nowhere else, and the other two names are never read. The decision
+moved into `lib/visitor-policy.ts`, which has neither `server-only` nor
+`next/headers` in it — which is why no test could look at it before. *Tests:*
+two in `tests/rate-limit.test.mjs`: forty forged addresses are one bucket with
+the flag unset and forty with it set, and four of forty searches are allowed
+end to end.
+
+#### The server scripts
+
+**F3 — two deploys at once left `current_tag` naming an image that was not
+running** [HIGH]. Two runs of two good tags: one succeeded and recorded itself,
+the other's `up -d --wait` saw the container the first had just recreated,
+called it a failed deploy and rolled back to a tag from two deploys ago that
+nobody had asked for. Two pre-migration dumps a second apart, and the next
+`rollback.sh` a no-op that reported success. There was no locking primitive
+anywhere in `server/`.
+
+*Closed.* One lock, taken before anything is read or written, in both scripts —
+`flock` where the machine has one, atomic `mkdir` where it does not, and the
+file says which machine gets which. The loser exits 75 having done nothing.
+*Test:* `tests/deploy.test.mjs`, which holds the lock itself and asserts the
+second run took no dump, wrote no `current_tag` and no `deploy.log`.
+
+**F4 — `deploy.sh` reported "the embed worker is running" while the worker was
+crash-looped and about to be dead for ever** [HIGH]. `sleep 3` and
+`.State.Running`, and at t+3s a container in `restarting` reports true. The
+reviewer watched the green line print eleven seconds before the container was
+dead, with `restart: on-failure:3` guaranteeing nothing would try again. It is
+the exact failure the line was written for — found-by-running #1 below.
+
+*Closed.* `.State.Status` and `.RestartCount`, a 20-second settle and polling
+to 60, and a worker that never comes up is a **failed deploy of a running
+site**: exit 76, the app left serving, the worker's last twenty lines printed.
+`on-failure:3` became `unless-stopped`. *Test:* `tests/deploy.test.mjs`, on the
+script and on the compose file.
+
+**F5 — `verify-restore.sh` compared the backup against the LIVE source, so one
+ordinary search made it fail — for ever, in production** [HIGH]. `search_events`
+gets a row on every search and the artefact may be thirty hours old. The
+reviewer ran it clean, made one search, ran it again against the same artefact,
+and watched it fail. On the host it is scheduled weekly, so it would have
+failed every week from the first search onwards — writing the red row the
+dashboard says outranks everything else, and never pinging the dead man's
+switch.
+
+*Closed.* `pg-dump-offsite.sh` opens a `repeatable read` transaction, exports
+its snapshot, dumps with `--snapshot=` and writes every table's count from
+inside that same snapshot into `counts-<stamp>.txt` in the archive; the
+verifier compares against that file and never asks the live database about
+rows. *Test:* `tests/deploy.test.mjs` on the shape, and the sequence run end to
+end below — a search between dump and verify no longer fails it, a dump
+truncated to 60% still does.
+
+**F7 — nothing in the launch path made the off-site dumps encrypted, and both
+backup files cited the wrong checklist item** [HIGH]. With
+`DUMP_AGE_RECIPIENT` unset the script wrote a plaintext tar holding
+`pg_dumpall --globals-only` — every role and grant — and the whole database,
+and uploaded it. Both files pointed at "checklist item 24" for enforcement;
+item 24 is a privacy notice, and no item in the forty was about backups.
+`age-keygen` appeared nowhere in `docs/` or `server/`, and step 2d asserted the
+outcome anyway.
+
+*Closed.* The script **refuses** and exits 78 rather than warning; plaintext is
+reachable only when the repository is a directory on this same disk. Runbook
+step 1d generates the key pair, and there is a checklist **item 41** that is
+about this. *Test:* `tests/deploy.test.mjs`; the refusal run is below.
+
+**F8 — on the host `foundit_owner` IS the bootstrap superuser** [HIGH].
+`09-postgres-service.sh` started the container with `POSTGRES_USER:
+foundit_owner`, the image makes that the initdb superuser, and PostgreSQL will
+not take SUPERUSER away from it. So runbook step 3a was a stop condition the
+host would hit on its first run, and checklist item 34 was ticked from laptop
+evidence about a different topology.
+
+*Closed.* The script bootstraps as `postgres` and creates the owner as an
+ordinary role owning the databases, exactly like CI; runbook **step 1f**, before
+step 2, re-initialises the host after making the operator confirm `foundit` is
+empty with a row count; step 3a is blocking with that remedy written into it;
+item 34 is 9b-evidenced. *Test:* `tests/deploy.test.mjs` holds the three copies
+of that arrangement — the setup script, `db/dev-roles.sql` and `ci.yml` — to the
+same clauses.
+
+**F9 — `pg-dump-offsite.sh` recorded nothing when it failed, and the dashboard
+said it did** [MEDIUM]. `record_ops_event` was the last line and ran only on
+success, while `app/admin/page.tsx` told the operator both writers record
+either way. Two failed backups left no row: the Backups panel went on showing
+the last successful date, quietly ageing.
+
+*Closed.* Every exit goes through one `fail` that records a short, path-free
+sentence, plus an ERR trap for the failures nobody wrote a branch for, and the
+row goes to the database the dashboard reads rather than the one the dump was
+pointed at. *Test:* `tests/deploy.test.mjs`, including that no recorded
+sentence carries a path; the two failing runs are below.
+
+**F10 — the tag validator accepted any multi-line string containing one valid
+line** [MEDIUM]. `grep` matches line by line. The reviewer got
+`$'../../../etc/passwd\nsha-aaaaaa1'` past it, watched the script print the
+attacker-controlled string and reach `docker compose pull`, and was stopped by
+Docker's own reference parser.
+
+*Closed.* One `case`-based `foundit_tag_ok` in `common.sh`, shared by both
+scripts, whole-string with a measured length. *Test:* `tests/deploy.test.mjs`,
+with the multi-line tags built inside bash — Windows does not pass a newline
+through argv, so an argv-based test would have passed for the wrong reason.
+
+**F11 — `deploy.sh` said it checked the env files' mode and did not**
+[MEDIUM]. Four full deploy runs in the review used all three files at 0644
+without a word, and `migrate.env` holds the only copy of the owner's
+credentials outside the database.
+
+*Closed.* `stat -c %a` through `$SUDO`, refusing anything that is not 600 with
+exit 78. The one escape hatch proves itself — it writes a probe file, chmods it
+600 and reads the mode back — so it can only open where the filesystem has no
+modes, which is Git Bash here and nothing on the host. *Test:*
+`tests/deploy.test.mjs`.
+
+**F22 — `rollback.sh` waited on the worker and never updated `previous_tag`**
+[MEDIUM]. `deploy.sh` passes `app` to `up -d --wait` and explains at length why;
+`rollback.sh` passed no service, so a worker in `restarting` would make it
+report failure while a healthy site served. And it wrote `current_tag` without
+`previous_tag`, so after one rollback both named the same tag and there was no
+recorded way back.
+
+*Closed.* Both, and it prints which tag is now the previous one. *Test:*
+`tests/deploy.test.mjs`.
+
+**F23 — housekeeping could delete the image the rollback needs** [LOW].
+`docker image prune -af --filter until=336h` takes every unreferenced image
+older than a fortnight, which after two weeks of one tag running is exactly the
+one `previous_tag` names — and `pull_policy: missing` then sends the rollback
+to GHCR through the tunnel that is probably having the bad day.
+
+*Closed.* Dangling layers only (`-f`, not `-af`), plus this repository's own
+old tags by name, never the two the state directory holds, and nothing else on
+the machine. *Test:* `tests/deploy.test.mjs`.
+
+#### The application
+
+**F6 — every `NEXT_PUBLIC_*` the runbook set at runtime was inert** [HIGH].
+`NEXT_PUBLIC_*` is inlined at `next build` time, the image is built in CI with
+no `--build-arg`, and step 4d told the operator to set the beacon token in
+`app.env` — which is the container's environment, after the build. The reviewer
+started the image with both variables set and got no beacon script tag and no
+DSN in the page, and found the name absent from `/app/.next` altogether. And
+`process.env` does not exist in a browser, so browser Sentry was inert
+whatever the env file held. Cloudflare Web Analytics is this product's only
+field measurement of Core Web Vitals.
+
+*Closed.* No `NEXT_PUBLIC_` anything anywhere. `components/AnalyticsBeacon.tsx`
+is a Server Component reading `CF_BEACON_TOKEN` per request and rendering the
+beacon with the request's nonce, and rendering `SENTRY_DSN` into a
+`<meta name="sentry-dsn">` that `instrumentation-client.ts` reads. A DSN is
+public by design and the file says so where somebody will find it.
+§13 carries the decision, dated. *Test:* `tests/beacon.test.mjs`, which renders
+both tags with the variables set for the length of one call — a test a
+build-time value cannot pass.
+
+**F12 — the review limiter's refusal was invisible on the ordinary journey, and
+the typed review was lost** [MEDIUM]. `postReview` redirected to
+`${back}?review=too-many#reviews`, and `back` already carries `?q=` whenever
+the visitor arrived from a search. A URL has one query string, so `review`
+became the tail of the value of `q`: the notice never rendered, the "All
+results" link was rebuilt from a corrupted query, and the visitor pressed Save
+and was told nothing. Separately, two files claimed "the review they typed is
+still in the form" and nothing made it so.
+
+*Closed.* `lib/review-draft.ts`: `URL`/`URLSearchParams` for the notice, and a
+five-minute httpOnly cookie scoped to the one listing for the draft, deleted
+the moment a review is written. Its own module because `'use server'` exports
+cannot be imported by a test, which is why the first defect shipped. *Test:*
+`tests/review-draft.test.mjs`, seven of them.
+
+**F16 — `X-Robots-Tag: index, follow` was sent on the private pages, including
+the share link the product promises is `noindex`** [MEDIUM]. Set once in
+`middleware.ts` for every route the matcher covers, over the top of a page that
+sets `robots: { index: false, follow: false }` and explains why.
+
+*Closed.* Dropped. Page metadata decides, which is the only thing that can tell
+a private page from a public one. *Test:* `tests/headers.test.mjs`, on the
+source and on the wire for `/`, `/admin`, `/saved` and `/c/`.
+
+**F18 — the cost model was quoted at $3.23 with "$1.77 of headroom"; the number
+the test computes is $4.10 with $0.90** [MEDIUM]. Two tables in one file,
+disagreeing by 27% because the smaller omitted the worker's token ceiling — and
+the advice printed beside the smaller one would have taken the worst case to
+about $7.30 against a $5 ceiling.
+
+*Closed.* One table, in both files, and the advice rewritten from it. *Test:*
+`tests/rate-limit.test.mjs` reads the prose back and fails when it drifts from
+the arithmetic.
+
+**F20 — the scrubber's header claims were broader than the code in three
+places** [MEDIUM]. `DROPPED_HEADERS` was applied to `event.request.headers` and
+nowhere else, so a breadcrumb's `response_headers` carrying a live session
+cookie went through untouched; only three body key names were dropped from a
+breadcrumb.
+
+*Closed.* Any breadcrumb field whose name ends in `headers` goes through the
+header rule, and the body goes under every name an integration gives it.
+*Test:* `tests/sentry.test.mjs`, with the exact shapes the review's probe used.
+
+**F21 — the free-text guard caught one spelling** [MEDIUM]. Three holes: only
+`${…}` interpolation, so `new Error('bad query: ' + q)` passed; six identifier
+names and not `q`; and `([^)]*)` stopped at the first close paren. The carrier
+list was eight files and three more see typed input.
+
+*Closed.* Concatenation as well as interpolation, fifteen names, a scan to the
+matching paren, eleven files. *Test:* `tests/sentry.test.mjs`, which now also
+tests the guard itself against eight spellings it used to miss and four
+innocent lines it must not fire on.
+
+**F24 — static assets were served with no security headers at all, and no test
+looked** [LOW]. The matcher excludes `_next/static` for a good reason, and the
+consequence was a chunk with a `Cache-Control` and nothing else —
+`server/cloudflare/README.md` forbids putting them back with a Transform Rule.
+
+*Closed.* `next.config.mjs` `headers()` covers exactly those paths with exactly
+the headers middleware sets, minus the two that vary per request. *Test:*
+`tests/headers.test.mjs` reads both lists, fails when they drift, and asks a
+real chunk off a running server.
+
+**F26 — `TokenBuckets` mixed five hourly ceilings in one map, against its own
+stated invariant** [LOW]. `sweep` used the `perHour` of whichever call set it
+off, so a sweep triggered by a sign-in-code call (5) deleted — and therefore
+fully refilled — every search bucket with five or more tokens left.
+
+*Closed.* The ceiling lives on the bucket. *Test:*
+`tests/rate-limit.test.mjs`, which answers 59 against the old arithmetic and 19
+against the new.
+
+#### The tooling and the documents
+
+**F13 — the runbook's `app.env` omitted `EMBEDDINGS_API_KEY`** [MEDIUM].
+`lib/reader-model.ts` falls back to it; `lib/embeddings.ts` reads only that name
+and has no fallback. Following the runbook literally gave a web process where
+every first-ever sentence silently fell back to text-only search, for ever.
+
+*Closed.* It is in the step 1e template, and step 5h now asks for evidence that
+the vector leg ran on a sentence nobody has typed.
+
+**F14 — step 1d put every production secret into `founditops`' shell history,
+and wrote `BETTER_AUTH_SECRET` as a literal placeholder** [MEDIUM]. In
+interactive bash the whole command including a heredoc body goes to
+`~/.bash_history`, which is a 0600 file in a home directory and not one of the
+three places step 1's own rule allows. And `<<'EOF'` expands nothing, so an
+operator pasting the block as written would have signed every session cookie
+with a 62-character string out of a public repository.
+
+*Closed.* `sudo install -m 600 /dev/null` then `sudo nano`, with the secret
+generated by a command of its own whose output the operator pastes in. Step 1d
+became 1d (the age key pair) and 1e (the files).
+
+**F15 — the gate command in this file's own arrangement failed five tests,
+reproducibly** [MEDIUM]. `BETTER_AUTH_URL` is `http://localhost:3000`, which is
+the `next dev` server this project runs all day, and the browser tests walked it
+until `Page.navigate` exceeded a 30-second CDP timeout. `docs/launch-checklist.md`
+G2 pasted the passing result with no note that it needs a production build.
+
+*Closed.* `tests/browser.mjs` tells the two apart by the build's own chunk
+names, and `tests/csp.test.mjs` and `tests/links.test.mjs` **refuse in one
+sentence** rather than timing out — a skip is honest about a missing server and
+dishonest about the wrong one. G2 now names the server its evidence came from.
+
+**F17 — the checklist's counts did not match its own table, and the two lists
+of "the ten 9b items" disagreed** [MEDIUM]. The header said 24/10/6 and the
+rows tallied 34/11/7, because rows carried two tags at once. This file named
+Dependabot and omitted item 33; the checklist did the opposite.
+
+*Closed.* One tag per row, the first thing in the Evidence cell, and a
+sub-part that belongs to the other phase spelled out in prose instead. 25/13/3
+now, **computed** by `node scripts/checklist-counts.mjs`, which also checks the
+closing list against the tags. *Test:* `tests/markup.test.mjs` runs it.
+
+**F19 — the Dockerfile claimed digest pinning it did not do, and no workflow
+action was pinned** [MEDIUM]. Three bare `FROM node:26-alpine` lines under a
+paragraph arguing the case at length, and every `uses:` on a mutable major tag
+in a job holding `packages: write`.
+
+*Closed.* One digest for the three stages, a commit SHA for each action with
+its tag in a comment, and the cost said out loud: a pin receives no update until
+somebody makes it. *Test:* `tests/deploy.test.mjs` fails on anything unpinned.
+
+**F25 — `scripts/vitals.mjs`: the median mixed a failed run's score with a good
+run's metrics, and the recorded table did not reproduce** [LOW]. `median()`
+filtered `null` but not `0`, and returned the larger of the middle pair rather
+than their mean. The re-measure moved `/` from 1546 ms to 3886 ms on the same
+bundle, against a script claiming "two runs on the same build differ by a few
+per cent", and the write-up's conclusion about which pages are worst depended
+on an ordering that did not hold. The script recorded nothing about what it had
+measured.
+
+*Closed.* A failed run is dropped whole, the median is a real one, a page with
+fewer than two recorded traces is not reported, and the JSON and the table both
+carry the base URL, the server kind (detected by hashed chunk names), the date,
+the runs requested and the traces recorded per page. The script now refuses a
+development server outright. The table below is a fresh measurement and the
+paragraph under it is written from it.
+
+**F27 — `scan-control-bytes.mjs` did not sweep the file types this phase
+added** [LOW]. `Dockerfile`, `.dockerignore`, `.env.example`, the compose file,
+two workflows, `pgbackrest.conf` and the two Cloudflare rule files — and a rule
+file is pasted verbatim into an expression editor.
+
+*Closed.* 316 files instead of 299, with two regulator PDFs-as-text excluded by
+name and the reason given rather than the rule loosened. *Test:*
+`tests/scan-secrets.test.mjs` runs the sweep and plants a form feed in a `.txt`
+and a backspace in a `Dockerfile`.
+
+#### The margin note
+
+**`foundit_owner` under FORCE RLS cannot delete from `public.search_events`
+without the 0014/0020 window** — the reviewer hit it cleaning up, read
+`DELETE 0` as "already gone", and finished the job as the superuser. That is
+the Phase 8 review's F1 failure mode arriving a third time, and it is a trap
+rather than a mistake: a `select count(*)` with the same `where` clause answers
+`0` as well, so the two readings cannot be told apart without knowing about the
+window.
+
+*Closed.* `db/scripts/as-owner-window.sql` — a template that opens both
+windows, prints a count and ends in `rollback` — and "Deleting rows as the
+owner" in `docs/development.md`, which also says that `infra.ops_events` has no
+row-level security and needs none of this.
+
+#### What the review reproduced and could not fault
+
+Worth recording, because it is most of the phase: the image (369 MB, uid 1001,
+no env file, no `.git`, no source map, nothing credential-shaped in
+`/app/.next/static`), the two-service compose file and its hardening, `/healthz`
+answering 503 rather than 200-with-a-false, the single-deploy rollback, the
+"opens no env file so it cannot print one" property over four runs with canary
+values, `release.yml`'s inability to reach the server, the backup verification
+against every kind of corruption, the scrubber's four structural removals, the
+CSP walk over 42 routes with a per-response nonce and `connect-src` and
+`img-src` really enforced, all 38 rate-limit tests and all 14 numbers in the
+table, `mem_limit: 900m` with 113 MB used after a full walk, and every
+found-by-running note except the first, whose safeguard did not work (F4).
 
 ## Blocked on Amit
 

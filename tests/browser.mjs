@@ -27,6 +27,68 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+/* ---------------------------------------------------------------------------
+ * WHICH SERVER IS ANSWERING — the Phase 9a review's F15
+ *
+ * `tests/csp.test.mjs` and `tests/links.test.mjs` resolve their base URL from
+ * `FOUNDIT_BASE_URL ?? BETTER_AUTH_URL`, and `.env.local`'s BETTER_AUTH_URL is
+ * `http://localhost:3000` — which is the `next dev` server this project runs
+ * all day. Neither file checked what kind of server that was. They walked it,
+ * `Page.navigate` exceeded the 30-second CDP timeout on a cold compile, and
+ * the gate command in docs/loop-progress.md's own arrangement failed five
+ * tests, reproducibly, in eight and a half minutes. `docs/launch-checklist.md`
+ * G2 then pasted the PASSING result with no note that it needs
+ * `npm run build && npm start` first.
+ *
+ * A DEV SERVER IS NOT A SLOW PRODUCTION SERVER, which is why raising the
+ * timeout would have been the wrong fix. `next dev` compiles a route on first
+ * request, ships an unminified bundle with the React refresh runtime in it, and
+ * has a script inventory that is not the one that ships — so a CSP walk over it
+ * proves something about a build nobody will ever run. The tests refuse, in one
+ * sentence, and say what to do.
+ *
+ * HOW IT TELLS. Production emits content-hashed chunk names
+ * (`/_next/static/chunks/main-app-8815dcbdb4d85f07.js`); development emits
+ * unhashed ones with a cache-busting query (`…/main-app.js?v=1757…`). Reading
+ * the HTML the server actually sent is the only signal that is about the BUILD
+ * rather than about the machine.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * `production`, `development`, or `unknown` when nothing answered.
+ *
+ * Never throws: a helper that takes a test file down while deciding whether to
+ * run it is worse than the thing it is checking for.
+ */
+export async function serverKind(origin) {
+  let html;
+  try {
+    const response = await fetch(origin, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
+    });
+    html = await response.text();
+  } catch {
+    return 'unknown';
+  }
+
+  const chunks = [...html.matchAll(/\/_next\/static\/chunks\/[^"'\s]+/g)].map((m) => m[0]);
+  if (chunks.length === 0) return 'unknown';
+  // A cache-busting query on a chunk is `next dev` and nothing else.
+  if (chunks.some((src) => src.includes('?v='))) return 'development';
+  if (chunks.some((src) => /-[0-9a-f]{8,}\.js/.test(src))) return 'production';
+  return 'development';
+}
+
+/** The one sentence a browser test refuses with. */
+export function refusalFor(origin, kind) {
+  return `${origin} is a ${kind === 'development' ? '`next dev`' : 'unrecognised'} server. `
+    + 'These tests only mean something against a production build — `next dev` compiles a route '
+    + 'on its first request and ships a script inventory that is not the one that ships — so '
+    + 'they refuse rather than time out. Run `npm run build && npm start`, or point '
+    + 'FOUNDIT_BASE_URL at a server that is one.';
+}
+
 /** Is there a Chrome on this machine at all? */
 export async function chromeAvailable() {
   try {

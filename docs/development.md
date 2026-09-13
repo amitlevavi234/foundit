@@ -127,6 +127,46 @@ the owner loading 224 listings that belong to nobody; a handful of fixtures in
 `db/test/`, each carrying a comment saying why no function could plant that
 row; and the admin-flag statement below.
 
+### Deleting rows as the owner
+
+This is the one that catches everybody, and it caught the Phase 9a adversarial
+review while it was tidying up after itself — which is why there is now a file
+for it, `db/scripts/as-owner-window.sql`, rather than a paragraph somebody has
+to remember.
+
+```
+foundit=> delete from public.search_events where id > 1245;
+DELETE 0
+```
+
+**Zero rows, no error, no warning.** The policy did not match, so as far as the
+database is concerned there was nothing there to delete. The natural reading is
+"the rows are already gone" or "my `where` clause is wrong", and the next move
+is to try it as the superuser — which works, and which is the Phase 8 review's
+F1 failure mode arriving for a third time. A `select count(*)` with the same
+`where` clause answers `0` too, so the two readings cannot be told apart
+without knowing about the window.
+
+So: count and delete inside the window, in one transaction.
+
+```bash
+docker exec -i foundit-dev-db psql -v ON_ERROR_STOP=1 -U foundit_owner -d foundit -f - \
+  < db/scripts/as-owner-window.sql
+```
+
+That file is a **template**: it opens both windows — 0020's `foundit.definer`
+and 0014's `foundit.counters` — prints a count, and ends in `rollback`. Edit
+the statement, read the count, change the last line to `commit`, run it again.
+It deliberately takes no table name as an argument: there is no safe generic
+"delete some rows" script, and a file that looked like one would be worse than
+this.
+
+**`infra.ops_events` is not one of these.** It has no row-level security at
+all — 0019 says why: one writer, one reader, and the GRANT is the boundary — so
+`delete from infra.ops_events where …` works as the owner with no window.
+Worth saying because a cleanup after a backup exercise touches both tables and
+only one of them needs anything.
+
 ### If `db/apply.mjs --fresh` refuses to create `vector`
 
 `--fresh` drops schema `public`, and the three extensions live in it.
@@ -796,6 +836,41 @@ keeps its own. `tests/admin.test.mjs` fails if `app/loading.tsx` or
 `app/admin/loading.tsx` reappears, and `tests/links.test.mjs` fails against a
 production build if the status goes back to 200.
 
+## Four settings that only the server sets
+
+Every other variable in `.env.example` is something a laptop can have. These
+four are deliberately unset here and set on the host, and each of them exists
+because of a Phase 9a review finding.
+
+**`TRUST_CLOUDFLARE_HEADERS=1`** — F2. `lib/visitor-policy.ts` believes
+`cf-connecting-ip` only when this says something in front of the process
+overwrites it, which on the host is the tunnel and here is nothing. Unset,
+every visitor shares one rate-limit bucket; that is the conservative direction
+and it is what `.env.example` has always claimed. `x-real-ip` and
+`x-forwarded-for` are never read at all. Set it on a machine where the header
+is not overwritten and one client can mint a fresh identity per request by
+typing one — which is what the review did, sixty times and then forty more.
+
+**`CF_BEACON_TOKEN`** — F6, and note there is **no `NEXT_PUBLIC_` prefix**.
+`components/AnalyticsBeacon.tsx` is a Server Component and reads it on every
+request, so one image runs anywhere. The old `NEXT_PUBLIC_CF_BEACON_TOKEN` was
+inlined by the bundler at build time and could never have a value on a host
+that sets it at run time. Unset here, so the beacon renders nothing and no
+request leaves the page.
+
+**`SENTRY_DSN`** — the same variable the server and edge clients read, and
+since F6 also what the browser gets: the server renders it into
+`<meta name="sentry-dsn">` and `instrumentation-client.ts` reads it from there,
+because `process.env` does not exist in a browser. A DSN is public by design
+and may appear in a page; there is no `NEXT_PUBLIC_SENTRY_DSN` any more.
+
+**`FOUNDIT_RECORD_DB`** — F9, and it is an override rather than a setting.
+`server/backup/pg-dump-offsite.sh` writes its `infra.ops_events` row to
+`foundit` regardless of which database it was told to dump, because a failed
+backup has to record itself and the review's own reproduction pointed the dump
+at a database that does not exist. Set this only where the application's
+database is not called `foundit`.
+
 ## What the owner must create
 
 Two accounts, neither of which an agent can make for you, and both of which the
@@ -902,11 +977,23 @@ here and there is four environment variables and no edited file.
 docker build -t ghcr.io/amitlevavi234/foundit:sha-$(git rev-parse --short=7 HEAD) .
 ```
 
-Three minutes cold, under one warm. It is `node:26-alpine`, multi-stage, and
-what comes out is about 370 MB running as uid 1001 with no shell script in
-front of it. `.dockerignore` is what keeps `.env.local` out of the build
-context, and `COPY . .` is why that file is load-bearing rather than tidiness:
-a layer cannot be un-published.
+Three minutes cold, under one warm. It is `node:26-alpine` **pinned to a
+digest**, multi-stage, and what comes out is about 370 MB running as uid 1001
+with no shell script in front of it. `.dockerignore` is what keeps `.env.local`
+out of the build context, and `COPY . .` is why that file is load-bearing
+rather than tidiness: a layer cannot be un-published.
+
+**Moving the base image is one command and one commit** (the Phase 9a review's
+F19 — the file argued for digest pinning and did not do it):
+
+```bash
+docker buildx imagetools inspect node:26-alpine --format '{{.Manifest.Digest}}'
+```
+
+Put that in all three `FROM` lines. Every `uses:` in both workflows is pinned
+the same way, to a commit SHA with the tag in a comment; `gh api
+repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha` is how to move one.
+`tests/deploy.test.mjs` fails on anything unpinned.
 
 ### The compose file
 
@@ -951,6 +1038,28 @@ FOUNDIT_BASE=/some/throwaway/dir/srv bash server/deploy.sh sha-abc1234
 
 `FOUNDIT_BASE` is where it writes `state/current_tag`, `state/deploy.log` and
 the pre-migration dumps; on the host it is `/srv/foundit`.
+
+**One deploy at a time, and the second one says so.** Since the Phase 9a
+review's F3 both scripts take a lock in `$FOUNDIT_BASE/state` before they read
+or write anything, and the loser exits **75** with `a deploy is already
+running` having taken no dump, run no migration and made no `docker` call.
+`flock` where the machine has one — the host does — and an atomic `mkdir`
+where it does not, which is Git Bash here. A run killed outright on the `mkdir`
+path leaves the directory behind; the refusal says to remove it.
+
+**The exit codes now say which half failed.** 64 a bad tag, 70 the pull, 71 the
+dump, 72 a migration, 75 health never came (or another deploy holds the lock),
+**76 the app is up and the worker is not**, 77 run as root, 78 an env file is
+missing or is not mode 0600. 76 is the one that is new: a crash-looping worker
+fails the deploy and the site is deliberately **left running**, because putting
+the previous image back would take a healthy site down for a queue.
+
+**The 0600 check is skipped here and nowhere else.** `server/deploy.sh` refuses
+an env file that is not mode 0600 — F11, which found the comment claiming that
+check and the code not making it. Git Bash maps every file to 0644 whatever
+`chmod` is told, so the script writes a probe file, chmods it, reads the mode
+back, and says out loud that it is not checking when the filesystem cannot
+answer. On ext4 it answers 600 and the check is made.
 
 **To prove the rollback rather than trusting it**, build an image that starts
 and answers 503:

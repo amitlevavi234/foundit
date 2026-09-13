@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { chromeAvailable, openBrowser } from './browser.mjs';
+import { chromeAvailable, openBrowser, refusalFor, serverKind } from './browser.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 
@@ -117,6 +117,31 @@ async function reachable(origin) {
   }
 }
 
+/**
+ * No server, skip. A server that is not a production build, REFUSE.
+ *
+ * THE PHASE 9a REVIEW'S F15, and the difference between the two answers is the
+ * point. "Nothing is answering" is a fact about the machine and a skip is
+ * honest; "a `next dev` server is answering" is a fact about what is being
+ * measured, and walking it produced five reproducible failures and eight and a
+ * half minutes of CDP timeouts that read as a broken CSP rather than as the
+ * wrong server. tests/browser.mjs has the full account.
+ *
+ * Returns true when the caller should go on.
+ */
+async function usable(t, origin) {
+  if (!origin || !(await reachable(origin))) {
+    t.skip(
+      `no server answering at ${origin ?? '(no BETTER_AUTH_URL)'}. Start one with `
+        + '`npm run build && npm start` and run this again.',
+    );
+    return false;
+  }
+  const kind = await serverKind(origin);
+  if (kind !== 'production') assert.fail(refusalFor(origin, kind));
+  return true;
+}
+
 test('the route tree has routes in it at all', () => {
   const paths = routePaths();
   assert.ok(paths.length >= 30, `only ${paths.length} routes found under app/ — the walk is broken`);
@@ -127,14 +152,7 @@ test('the route tree has routes in it at all', () => {
 
 test('every route loads with the CSP enforced, and nothing is refused', async (t) => {
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) {
-    t.skip(
-      `no server answering at ${origin ?? '(no BETTER_AUTH_URL)'}. Start one with `
-        + '`npm run build && npm start` and run this again — under `next dev` the CSP is real '
-        + 'but the script inventory is not the one that ships.',
-    );
-    return;
-  }
+  if (!(await usable(t, origin))) return;
   if (!(await chromeAvailable())) {
     t.skip(
       'no Chrome on this machine, so the policy could not be enforced by anything. '
@@ -182,7 +200,7 @@ test('the page actually hydrated, so "no violations" is not "no scripts"', async
   // with real client components on it and ask the page whether React is
   // running.
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) { t.skip('no server answering.'); return; }
+  if (!(await usable(t, origin))) return;
   if (!(await chromeAvailable())) { t.skip('no Chrome on this machine.'); return; }
 
   const browser = await openBrowser();
@@ -228,7 +246,7 @@ test('the browser is really enforcing it: a call to another origin is refused', 
   // The address is `example.com`, which is reserved by the IANA for exactly
   // this and is never reached: the browser refuses before a socket is opened.
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) { t.skip('no server answering.'); return; }
+  if (!(await usable(t, origin))) return;
   if (!(await chromeAvailable())) { t.skip('no Chrome on this machine.'); return; }
 
   const browser = await openBrowser();
@@ -267,7 +285,7 @@ test('the browser is really enforcing it: a call to another origin is refused', 
   }
 });
 
-test('every script tag the server renders carries the nonce, and the nonce is per request', async () => {
+test('every script tag the server renders carries the nonce, and the nonce is per request', async (t) => {
   // THE OTHER HALF OF THE CONTROL, and it needs no browser.
   //
   // Under `'strict-dynamic'` a PARSER-INSERTED script — one that came down in
@@ -279,7 +297,7 @@ test('every script tag the server renders carries the nonce, and the nonce is pe
   // browser walk would only catch it on the page that renders it, and this
   // catches it in the served bytes of every page it is on.
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) return; // the walk above already said so
+  if (!(await usable(t, origin))) return;
 
   const nonces = [];
   for (const path of ['/', '/about', '/tools/receiptly']) {

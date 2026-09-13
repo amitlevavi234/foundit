@@ -44,6 +44,7 @@ import { join } from 'node:path';
 
 import { hashSignInCode } from '../lib/auth-options.ts';
 import { SET_IDENTITY_SQL, identityParams } from '../lib/identity.ts';
+import { refusalFor, serverKind } from './browser.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 
@@ -264,8 +265,8 @@ function baseUrl() {
 
 async function reachable(origin) {
   try {
-    // Thirty seconds, because `next dev` COMPILES a route on its first
-    // request: four seconds was enough for a warm server and not for a cold
+    // Thirty seconds, because a cold server can take a while to answer its
+    // first request: four seconds was enough for a warm one and not for a cold
     // one, which is a skip that looks exactly like a missing server.
     const response = await fetch(origin, {
       redirect: 'manual',
@@ -275,6 +276,32 @@ async function reachable(origin) {
   } catch {
     return false;
   }
+}
+
+/**
+ * No server, skip. A server that is not a production build, REFUSE.
+ *
+ * THE PHASE 9a REVIEW'S F15. `BETTER_AUTH_URL` in `.env.local` is
+ * `http://localhost:3000`, which is the `next dev` server this project runs all
+ * day, and these walks never asked what kind of server that was. Two of them
+ * timed out at 75 and 67 seconds on cold compiles, and the gate command in
+ * docs/loop-progress.md's own arrangement failed five tests over eight and a
+ * half minutes — failures that read as broken routes rather than as the wrong
+ * server. The distinction matters: "nothing is answering" is a fact about the
+ * machine and a skip is honest, and "a dev server is answering" is a fact about
+ * what is being measured. tests/browser.mjs has the whole account.
+ */
+async function usable(t, origin, what) {
+  if (!origin || !(await reachable(origin))) {
+    t.skip(
+      `no server answering at ${origin ?? '(no BETTER_AUTH_URL)'}, so ${what}. The route table `
+        + 'above was still checked. Start one with `npm run build && npm start`.',
+    );
+    return false;
+  }
+  const kind = await serverKind(origin);
+  if (kind !== 'production') assert.fail(refusalFor(origin, kind));
+  return true;
 }
 
 /** The eleven, as concrete addresses a browser could be pointed at. */
@@ -322,13 +349,7 @@ async function walkRoutes(origin, paths, cookie) {
 
 test('every Phase 7 route answers a stranger without a 500', async (t) => {
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) {
-    t.skip(
-      `no server answering at ${origin ?? '(no BETTER_AUTH_URL)'}, so the routes could not be `
-        + 'walked. The route table above was still checked. Start `npm run dev` to walk them.',
-    );
-    return;
-  }
+  if (!(await usable(t, origin, 'the routes could not be walked'))) return;
 
   const results = await walkRoutes(origin, walkable('receiptly'));
   for (const { path, status, location } of results) {
@@ -395,10 +416,7 @@ test('every Phase 7 route answers a stranger without a 500', async (t) => {
  */
 test('every Phase 7 route answers a signed-in account without a 500', async (t) => {
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) {
-    t.skip('no server answering, so the signed-in walk could not run.');
-    return;
-  }
+  if (!(await usable(t, origin, 'the signed-in walk could not run'))) return;
 
   const supplied = (process.env.FOUNDIT_TEST_SESSION ?? '').trim();
   const cookie = supplied === '' ? (await sharedSession(origin)).cookie : supplied;
@@ -660,10 +678,7 @@ async function assertHeadRefused(origin, path, cookie, who, expect404) {
 
 test('every admin route answers a stranger with the not-found page', async (t) => {
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) {
-    t.skip('no server answering, so the admin routes could not be walked.');
-    return;
-  }
+  if (!(await usable(t, origin, 'the admin routes could not be walked'))) return;
 
   const expect404 = await notFoundIsA404(origin);
   t.diagnostic(
@@ -906,10 +921,7 @@ async function deleteThrowaway({ email, userId, auth }) {
 
 test('every admin route answers a signed-in NON-ADMIN with the not-found page', async (t) => {
   const origin = baseUrl();
-  if (!origin || !(await reachable(origin))) {
-    t.skip('no server answering, so the signed-in admin walk could not run.');
-    return;
-  }
+  if (!(await usable(t, origin, 'the signed-in admin walk could not run'))) return;
 
   // From here on there is no skip. A server is answering, so the half of gate
   // item 3 that says "and with a non-admin session" either runs or fails.
