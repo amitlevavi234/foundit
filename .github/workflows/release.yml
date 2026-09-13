@@ -26,6 +26,18 @@
 # WHAT MAKES A RELEASE: a tag, `v*`. Not a push to a branch. A branch push
 # already runs tests.yml; an image is a thing somebody decided to make, and
 # deciding is what a tag is for.
+#
+# EVERY `uses:` IS PINNED TO A COMMIT SHA, WITH THE TAG IN A COMMENT. The Phase
+# 9a review's F19: they were all on mutable major tags — `@v4`, `@v3`, `@v6` —
+# in a job that holds `packages: write`. An action tag is a pointer its owner
+# can move, and moving one is how a supply-chain compromise of a GitHub Action
+# reaches every workflow that trusts it, silently, between one run and the
+# next. A SHA cannot be moved.
+#
+# The comment is the tag the SHA was, so a reader can see which release this is
+# and `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` is how to move it. Same
+# trade as the Dockerfile's base image: a pin does not receive an update until
+# somebody makes it, and that is the point.
 name: Image
 
 on:
@@ -53,7 +65,7 @@ jobs:
 
     steps:
       - name: Get the code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Work out the tag the host will ask for
         id: tag
@@ -63,10 +75,10 @@ jobs:
         run: echo "image=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to the registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -75,7 +87,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile

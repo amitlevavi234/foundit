@@ -35,8 +35,41 @@ const DEL = 127;
 const LINE_SEPARATOR = 0x2028;
 const PARAGRAPH_SEPARATOR = 0x2029;
 
-/** The extensions swept. Source, schema, prose, data and shell. */
-const EXTENSIONS = ['.ts', '.tsx', '.mjs', '.sql', '.md', '.json', '.sh'];
+/**
+ * The extensions swept. Source, schema, prose, data, shell and configuration.
+ *
+ * THE LAST FOUR ARE THE PHASE 9a REVIEW'S F27. Phase 9a added `Dockerfile`,
+ * `.dockerignore`, `.env.example`, `server/compose.prod.yml`, two GitHub
+ * workflows, `server/backup/pgbackrest.conf` and two Cloudflare rule files —
+ * and not one of them was in this list, so the sweep reported "299 tracked
+ * files, no control bytes" over a tree where nine new files had never been
+ * looked at. `server/cloudflare/cache-rule-*.txt` is the one that would hurt:
+ * it is pasted verbatim into a Cloudflare expression editor, which is exactly
+ * the kind of place a stray control byte is invisible and damaging.
+ */
+const EXTENSIONS = ['.ts', '.tsx', '.mjs', '.sql', '.md', '.json', '.sh',
+  '.yml', '.yaml', '.txt', '.conf'];
+
+/**
+ * And the files with no extension at all, by name.
+ *
+ * `Dockerfile` and `.dockerignore` are both tracked, both hand-written, and
+ * both invisible to a sweep that matches on a suffix. Matched on the BASENAME,
+ * so a `docker/Dockerfile` added later is swept too.
+ */
+const NAMED = ['Dockerfile', '.dockerignore', '.env.example'];
+
+/**
+ * And the tracked text files this sweep deliberately does not read.
+ *
+ * `_edpb.txt` and `_wp194.txt` are regulator PDFs converted to text, and a
+ * PDF-to-text conversion carries the form feed that separated one page from
+ * the next — U+000C, by design, in a file nobody types into. Excluding two
+ * files by name and saying why is honest; loosening the rule until it stopped
+ * firing would not be, and is the trade scripts/scan-secrets.sh's own header
+ * refuses in the same words.
+ */
+const EXCLUDED = ['_edpb.txt', '_wp194.txt'];
 
 const banned = new Set();
 for (let code = 0; code <= 31; code += 1) banned.add(code);
@@ -64,7 +97,9 @@ try {
     .split(String.fromCharCode(LF))
     .map((line) => line.trim())
     .filter((line) => line !== '')
-    .filter((line) => EXTENSIONS.some((ext) => line.endsWith(ext)));
+    .filter((line) => !EXCLUDED.includes(line.split('/').pop()))
+    .filter((line) => EXTENSIONS.some((ext) => line.endsWith(ext))
+      || NAMED.includes(line.split('/').pop()));
 } catch (error) {
   process.stderr.write('could not list tracked files: ' + error.message + String.fromCharCode(LF));
   process.exit(2);
@@ -122,5 +157,6 @@ if (findings.length > 0) {
 }
 
 process.stdout.write(
-  files.length + ' tracked file(s) swept across ' + EXTENSIONS.join(' ') + ': no control bytes.' + newline,
+  files.length + ' tracked file(s) swept across ' + EXTENSIONS.join(' ') + ' and ' +
+    NAMED.join(' ') + ': no control bytes.' + newline,
 );

@@ -19,6 +19,40 @@
 # Two databases on one instance:
 #   foundit      — production. Empty until Phase 9 deploys.
 #   foundit_dev  — development, reached from the laptop over an SSH tunnel.
+#
+# ---------------------------------------------------------------------------
+# THE BOOTSTRAP ROLE IS `postgres` AND THE OWNER IS NOT A SUPERUSER, AND THAT
+# IS THE PHASE 9a REVIEW'S F8.
+#
+# This file used to start the container with `POSTGRES_USER: foundit_owner`.
+# The official PostgreSQL image creates `POSTGRES_USER` as the **initdb
+# superuser**, and PostgreSQL will not let SUPERUSER be taken away from the
+# role initdb bootstrapped with. So on the host `foundit_owner` WAS the
+# superuser, permanently — which is the Phase 8 review's F1 met a second time,
+# the thing `.github/workflows/ci.yml` explains at length and uses
+# `POSTGRES_USER: postgres` to avoid, and a stop condition
+# `docs/launch-runbook.md` step 3a would have hit on its first run:
+#
+#     SEE: `f|f` on every row. If `foundit_owner` shows `t`, stop.
+#
+# A superuser owner bypasses every row-level security policy in the schema, so
+# every SECURITY DEFINER function behaves differently from the way it behaves
+# in CI, in development, and in every test this repository has.
+#
+# THIS IS A DATA-DIRECTORY DECISION AND CANNOT BE UNDONE IN PLACE. `initdb`
+# runs once, on an empty ./data, and the role it creates is a superuser for
+# ever. So a host that already ran the old version of this file has to be
+# re-initialised, which is `docs/launch-runbook.md` step 1f — safe only while
+# `foundit` is empty, which that step makes the operator confirm with a row
+# count before anything is deleted.
+#
+# THE ROLE STATEMENTS BELOW ARE THE THIRD COPY OF ONE ARRANGEMENT.
+# `db/dev-roles.sql` is the first and `.github/workflows/ci.yml` the second,
+# and tests/deploy.test.mjs asserts the three agree about the clauses that
+# matter: NOSUPERUSER, NOBYPASSRLS, CREATEROLE, the three `with inherit false,
+# admin option` grants, and `grant set on parameter "foundit.definer"`. They
+# cannot be one file, because this one has to inject passwords that exist only
+# on this machine and the other two use fixed development ones.
 set -euo pipefail
 
 IMAGE="pgvector/pgvector:pg17-trixie"
@@ -34,7 +68,14 @@ sudo chmod 700 "$SECRETS"
 # written to a 0600 file owned by root. None of them has ever been typed into
 # a chat window, an editor, or a file git can see.
 #
-#   POSTGRES_PASSWORD      foundit_owner. Migrations only.
+#   POSTGRES_PASSWORD      the `postgres` BOOTSTRAP SUPERUSER. It creates the
+#                          roles, hands the schemas to the owner and creates
+#                          the `vector` extension — the three things a
+#                          non-superuser cannot do — and nothing else on this
+#                          machine ever uses it. Not the app, not the
+#                          migrations, not the backups.
+#   FOUNDIT_OWNER_PASSWORD foundit_owner. Migrations only, and NOSUPERUSER
+#                          NOBYPASSRLS since 13 September 2026 (F8).
 #   FOUNDIT_APP_PASSWORD   foundit_app. The web application and the eval.
 #   FOUNDIT_EMBED_PASSWORD foundit_embed. scripts/embed.mjs and nothing else —
 #                          see db/migrations/0005_embed_role.sql for why it is
@@ -47,16 +88,28 @@ sudo chmod 700 "$SECRETS"
 # these roles gets the one new line appended rather than being regenerated:
 # rewriting it would change the owner's password under a running database.
 if [ ! -f "$SECRETS/db.env" ]; then
+  SUPER_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
   OWNER_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
   APP_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
   EMBED_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
   AUTH_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
-  printf 'POSTGRES_PASSWORD=%s\nFOUNDIT_APP_PASSWORD=%s\nFOUNDIT_EMBED_PASSWORD=%s\nFOUNDIT_AUTH_PASSWORD=%s\n' \
-    "$OWNER_PW" "$APP_PW" "$EMBED_PW" "$AUTH_PW" \
+  printf 'POSTGRES_PASSWORD=%s\nFOUNDIT_OWNER_PASSWORD=%s\nFOUNDIT_APP_PASSWORD=%s\nFOUNDIT_EMBED_PASSWORD=%s\nFOUNDIT_AUTH_PASSWORD=%s\n' \
+    "$SUPER_PW" "$OWNER_PW" "$APP_PW" "$EMBED_PW" "$AUTH_PW" \
     | sudo tee "$SECRETS/db.env" >/dev/null
   sudo chmod 600 "$SECRETS/db.env"
   echo "Generated new credentials in $SECRETS/db.env (root only, 0600)."
 else
+  # FOUNDIT_OWNER_PASSWORD is new as of F8: before it, POSTGRES_PASSWORD WAS
+  # the owner's, because the owner was the bootstrap superuser. A db.env that
+  # predates the change gets the one line appended rather than being
+  # regenerated — rewriting it would change the superuser's password under a
+  # running database.
+  if ! sudo grep -q '^FOUNDIT_OWNER_PASSWORD=' "$SECRETS/db.env"; then
+    OWNER_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
+    printf 'FOUNDIT_OWNER_PASSWORD=%s\n' "$OWNER_PW" \
+      | sudo tee -a "$SECRETS/db.env" >/dev/null
+    echo "Added FOUNDIT_OWNER_PASSWORD to $SECRETS/db.env."
+  fi
   if ! sudo grep -q '^FOUNDIT_EMBED_PASSWORD=' "$SECRETS/db.env"; then
     EMBED_PW=$(openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32)
     printf 'FOUNDIT_EMBED_PASSWORD=%s\n' "$EMBED_PW" \
@@ -180,7 +233,13 @@ services:
     restart: unless-stopped
     env_file: ${SECRETS}/db.env
     environment:
-      POSTGRES_USER: foundit_owner
+      # `postgres` AND NOT `foundit_owner`. The image creates POSTGRES_USER as
+      # the initdb superuser and PostgreSQL will not let SUPERUSER be taken
+      # away from it, so bootstrapping as the owner makes the owner a superuser
+      # for the life of the data directory — and a superuser bypasses every
+      # row-level security policy in the schema. The Phase 8 review's F1, the
+      # Phase 9a review's F8, and the reason ci.yml says the same thing.
+      POSTGRES_USER: postgres
       POSTGRES_DB: foundit
       # Deliberate: the image only applies this on first initialisation.
       POSTGRES_INITDB_ARGS: "--data-checksums"
@@ -194,7 +253,7 @@ services:
     shm_size: 256mb
     stop_grace_period: 1m
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U foundit_owner -d foundit"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d foundit"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -207,14 +266,71 @@ COMPOSE
 sudo docker compose -f "$BASE/docker-compose.yml" up -d
 echo "Waiting for the database to accept connections..."
 for i in $(seq 1 40); do
-  if sudo docker exec foundit-dev-db pg_isready -U foundit_owner -d foundit >/dev/null 2>&1; then
+  if sudo docker exec foundit-dev-db pg_isready -U postgres -d foundit >/dev/null 2>&1; then
     echo "  ready after ${i}0s at most"; break
   fi
   sleep 3
 done
 
-sudo docker exec foundit-dev-db psql -v ON_ERROR_STOP=1 -U foundit_owner -d foundit \
+sudo docker exec foundit-dev-db psql -v ON_ERROR_STOP=1 -U postgres -d foundit \
   -c "select 1" >/dev/null
+
+# --- The OWNER, which is not a superuser -----------------------------------
+#
+# THE THIRD COPY OF `db/dev-roles.sql`, and the header says why it cannot be
+# the same file: this one injects passwords that exist only on this machine.
+# tests/deploy.test.mjs holds the three copies to the same clauses.
+#
+# Every statement here runs as the bootstrap superuser `postgres`, because
+# every one of them is a thing a non-superuser cannot do — which is the whole
+# argument for having a superuser that nothing else on the machine uses.
+#
+#   the three extensions   `vector` is not a trusted extension, so only a
+#                          superuser can install it. 0001_init.sql's
+#                          `create extension if not exists vector` then
+#                          succeeds for the owner because it is already there
+#                          and the statement returns before it checks a
+#                          privilege.
+#   the owner role         NOSUPERUSER NOBYPASSRLS, and CREATEROLE because
+#                          0001, 0005 and 0013 create the application roles and
+#                          0003 and 0013 run `alter role … set`.
+#   the database owner     every schema, table, policy and function a migration
+#                          creates has to belong to foundit_owner rather than
+#                          to postgres: a SECURITY DEFINER function owned by a
+#                          superuser is an authorisation bypass wearing a
+#                          helpful hat.
+#   the three memberships  `with inherit false` so the owner may SET ROLE and
+#                          nothing more — with inherit, a policy scoped TO
+#                          foundit_app would start applying to owner sessions,
+#                          which is the opposite of what a non-superuser owner
+#                          is for. `admin option` because 0003 and 0013 alter
+#                          those roles' settings.
+#   the parameter grant    0020 §2 attaches `SET "foundit.definer"` to twenty-
+#                          odd definer functions, and writing a custom
+#                          parameter into a catalogue entry needs either
+#                          superuser or this grant.
+echo "--- the owner role ---"
+OWNER_PW_NOW=$(sudo grep '^FOUNDIT_OWNER_PASSWORD=' "$SECRETS/db.env" | cut -d= -f2-)
+printf '%s\n' \
+  "create extension if not exists citext;" \
+  "create extension if not exists pg_trgm;" \
+  "create extension if not exists vector;" \
+  "do \$owner\$" \
+  "begin" \
+  "  if exists (select 1 from pg_roles where rolname = 'foundit_owner') then" \
+  "    alter role foundit_owner login noinherit nosuperuser nobypassrls createrole password '${OWNER_PW_NOW}';" \
+  "  else" \
+  "    create role foundit_owner login noinherit nosuperuser nobypassrls createrole password '${OWNER_PW_NOW}';" \
+  "  end if;" \
+  "end" \
+  "\$owner\$;" \
+  "do \$own\$ begin execute format('alter database %I owner to foundit_owner', current_database()); end \$own\$;" \
+  "alter schema public owner to foundit_owner;" \
+  "grant set on parameter \"foundit.definer\" to foundit_owner;" \
+  | sudo docker exec -i foundit-dev-db psql -v ON_ERROR_STOP=1 -qX \
+      -U postgres -d foundit >/dev/null
+unset OWNER_PW_NOW
+echo "  foundit_owner owns the database and is NOT a superuser."
 
 # --- The three non-owner roles, and their passwords -------------------------
 #
@@ -236,7 +352,7 @@ set_role_password() { # set_role_password <role> <password>
   printf "do \$\$\nbegin\n  if exists (select 1 from pg_roles where rolname = '%s') then\n    alter role %s login noinherit password '%s';\n  else\n    create role %s login noinherit password '%s';\n  end if;\nend\n\$\$;\n" \
     "$1" "$1" "$2" "$1" "$2" \
     | sudo docker exec -i foundit-dev-db psql -v ON_ERROR_STOP=1 -qX \
-        -U foundit_owner -d foundit >/dev/null
+        -U postgres -d foundit >/dev/null
   echo "  $1 can log in."
 }
 
@@ -249,6 +365,27 @@ set_role_password foundit_embed "$EMBED_PW_NOW"
 set_role_password foundit_auth "$AUTH_PW_NOW"
 unset APP_PW_NOW EMBED_PW_NOW AUTH_PW_NOW
 
+# And the owner's membership of each, which is what lets `db/test.sh` SET ROLE
+# into an application role and watch it be refused. AFTER the three exist.
+printf '%s\n' \
+  "grant foundit_app   to foundit_owner with inherit false, admin option;" \
+  "grant foundit_embed to foundit_owner with inherit false, admin option;" \
+  "grant foundit_auth  to foundit_owner with inherit false, admin option;" \
+  | sudo docker exec -i foundit-dev-db psql -v ON_ERROR_STOP=1 -qX \
+      -U postgres -d foundit >/dev/null
+
+# --- and the check the runbook's step 3a makes ------------------------------
+#
+# HERE RATHER THAN ONLY THERE. `docs/launch-runbook.md` step 3a reads this same
+# table and says "if foundit_owner shows `t`, stop" — a stop condition the host
+# as previously built would have hit on its first run (F8). Printing it at the
+# end of the script that decides it means the answer is visible the moment it
+# is decided rather than two steps later.
+echo "--- no superuser but postgres, and nobody bypasses row-level security ---"
+sudo docker exec foundit-dev-db psql -tAU postgres -d foundit -c \
+  "select rolname || '|' || rolsuper || '|' || rolbypassrls from pg_roles
+    where rolname not like 'pg\_%' order by rolname"
+
 # The connection strings the laptop needs are assembled from db.env by hand and
 # never written down here. To read one back:
 #
@@ -260,25 +397,25 @@ unset APP_PW_NOW EMBED_PW_NOW AUTH_PW_NOW
 # through the tunnel, exactly as DATABASE_URL is for foundit_app.
 
 # --- the development database ----------------------------------------------
-if ! sudo docker exec foundit-dev-db psql -tAU foundit_owner -d foundit \
+if ! sudo docker exec foundit-dev-db psql -tAU postgres -d foundit \
       -c "select 1 from pg_database where datname='foundit_dev'" | grep -q 1; then
-  sudo docker exec foundit-dev-db createdb -U foundit_owner -O foundit_owner foundit_dev
+  sudo docker exec foundit-dev-db createdb -U postgres -O foundit_owner foundit_dev
   echo "Created foundit_dev."
 fi
 
-sudo docker exec foundit-dev-db psql -qAt -U foundit_owner -d foundit \
+sudo docker exec foundit-dev-db psql -qAt -U postgres -d foundit \
   -c "create extension if not exists pg_stat_statements" >/dev/null
 
 echo "--- versions ---"
-sudo docker exec foundit-dev-db psql -tAU foundit_owner -d foundit -c "select version()"
+sudo docker exec foundit-dev-db psql -tAU postgres -d foundit -c "select version()"
 echo "--- settings that matter ---"
-sudo docker exec foundit-dev-db psql -U foundit_owner -d foundit -c \
+sudo docker exec foundit-dev-db psql -U postgres -d foundit -c \
   "select name, setting, unit from pg_settings where name in
    ('shared_buffers','work_mem','max_connections','jit','archive_mode',
     'wal_compression','autovacuum','password_encryption','data_checksums',
     'shared_preload_libraries') order by name"
 echo "--- databases ---"
-sudo docker exec foundit-dev-db psql -tAU foundit_owner -d foundit -c "\l" | cut -d'|' -f1
+sudo docker exec foundit-dev-db psql -tAU postgres -d foundit -c "\l" | cut -d'|' -f1
 echo "--- published ports (must be 127.0.0.1 only) ---"
 sudo docker ps --filter name=foundit-dev-db --format '{{.Names}} {{.Ports}}'
 sudo ss -ltnp 2>/dev/null | grep 5432 || true

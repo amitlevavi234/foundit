@@ -365,6 +365,62 @@ test('the worker is checked for long enough to catch a crash loop', () => {
   assert.match(compose, /restart: unless-stopped/, 'the worker must keep trying');
 });
 
+test('the host bootstraps as postgres and the owner is an ordinary role', () => {
+  // THE PHASE 9a REVIEW'S F8. `server/setup/09-postgres-service.sh` started
+  // the container with `POSTGRES_USER: foundit_owner`. The official image
+  // creates POSTGRES_USER as the initdb superuser and PostgreSQL will not let
+  // SUPERUSER be taken away from the role initdb bootstrapped with — so on the
+  // host the owner WAS the superuser, for the life of the data directory, and
+  // a superuser bypasses every row-level security policy in the schema. CI
+  // knows this and says so at length; this file did not.
+  const setup = read('server/setup/09-postgres-service.sh');
+  const code = setup.replace(/^\s*#.*$/gm, '');
+
+  assert.match(code, /POSTGRES_USER: postgres/, 'the container must bootstrap as postgres');
+  assert.doesNotMatch(code, /POSTGRES_USER: foundit_owner/,
+    'bootstrapping as the owner makes the owner a superuser for ever');
+  assert.match(code, /nosuperuser nobypassrls/, 'and the owner must be created as an ordinary role');
+
+  // THE THREE COPIES OF ONE ARRANGEMENT, held to the same clauses. They cannot
+  // be one file — this one injects passwords that exist only on the host — so
+  // this is what stops them drifting.
+  const dev = read('db/dev-roles.sql');
+  const ci = read('.github/workflows/ci.yml');
+  for (const [name, source] of [['server/setup/09-postgres-service.sh', code],
+    ['db/dev-roles.sql', dev]]) {
+    assert.match(source, /nosuperuser nobypassrls/, `${name}: the owner must not be a superuser`);
+    assert.match(source, /createrole/, `${name}: 0001, 0005 and 0013 need CREATEROLE`);
+    assert.match(source, /alter schema public owner to foundit_owner/,
+      `${name}: a definer function owned by a superuser is an authorisation bypass`);
+    // The shell copy escapes the quotes for `printf`; the SQL copy does not.
+    assert.match(source, /grant set on parameter \\?"foundit\.definer\\?" to foundit_owner/,
+      `${name}: 0020 §2 cannot attach its SET clause without this`);
+    for (const role of ['foundit_app', 'foundit_embed', 'foundit_auth']) {
+      assert.match(
+        source,
+        new RegExp(`grant ${role}\\s+to foundit_owner with inherit false, admin option`),
+        `${name}: ${role} membership must be SET ROLE only, or a policy scoped to it `
+          + 'starts applying to owner sessions',
+      );
+    }
+  }
+  assert.match(ci, /POSTGRES_USER: postgres/, 'ci.yml must still bootstrap as postgres');
+
+  // And the runbook has the step that fixes a host built by the old version,
+  // with the confirmation that makes it safe.
+  const runbook = read('docs/launch-runbook.md');
+  assert.match(runbook, /^# Step 1f —/m, 'the runbook needs a step before 2 that re-initialises');
+  assert.match(runbook, /n_live_tup/, 'and it must make the operator confirm the host is empty');
+  assert.match(runbook, /THIS IS A BLOCKING STEP AND THE REMEDY IS STEP 1f/,
+    'step 3a must be blocking, with a written remedy');
+
+  // Item 34 is no longer ticked from laptop evidence.
+  const checklist = read('docs/launch-checklist.md');
+  const row34 = /^\| 34 \|.*$/m.exec(checklist);
+  assert.ok(row34, 'checklist item 34 has gone');
+  assert.match(row34[0], /\*\*9b, owner\*\*/, 'item 34 must be evidenced on the host, not here');
+});
+
 /* ---------------------------------------------------------------------------
  * The backup pair — the Phase 9a review's F5, F7 and F9
  * ------------------------------------------------------------------------ */
@@ -688,6 +744,44 @@ test('the image runs as a named non-root user and drops every capability', () =>
   assert.doesNotMatch(compose, /privileged/, 'nothing here may be privileged');
   assert.doesNotMatch(compose, /docker\.sock/,
     'research/07 §6.6: mounting the docker socket is root on the host, with no safe version');
+});
+
+test('every base image and every action is pinned to something that cannot move', () => {
+  // THE PHASE 9a REVIEW'S F19. The Dockerfile argued the case at length —
+  // "Pinned by DIGEST as well as by tag, because a tag is a moving target and
+  // research/07 §4.6 is right that a server with perfect unattended upgrades
+  // and a floating base image is not patched, it is unmeasured" — and then
+  // had three bare `FROM node:26-alpine` lines. The workflows were all on
+  // mutable major tags, in a job holding `packages: write`.
+  const dockerfile = read('Dockerfile');
+  const froms = [...dockerfile.matchAll(/^FROM\s+(\S+)/gm)].map((m) => m[1]);
+  assert.ok(froms.length >= 3, 'the Dockerfile has lost a stage');
+  const digests = new Set();
+  for (const image of froms) {
+    assert.match(
+      image,
+      /@sha256:[0-9a-f]{64}$/,
+      `${image} is a moving tag: the image built on Monday and the image built on Friday `
+        + 'can be different bytes with one name',
+    );
+    digests.add(image.split('@')[1]);
+  }
+  assert.equal(digests.size, 1, 'the three stages must be built from ONE base image');
+  // The tag stays beside the digest, or nobody can tell which release it is.
+  for (const image of froms) assert.match(image, /^node:26-alpine@/, `${image} lost its tag`);
+
+  for (const file of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
+    const uses = [...read(file).matchAll(/^\s*uses:\s*(\S+)/gm)].map((m) => m[1]);
+    assert.ok(uses.length > 0, `${file} uses no actions at all — has it been renamed?`);
+    for (const action of uses) {
+      assert.match(
+        action,
+        /@[0-9a-f]{40}$/,
+        `${file} uses ${action}, whose owner can move that tag under a job that holds `
+          + '`packages: write`',
+      );
+    }
+  }
 });
 
 test('the build context refuses every file that could carry a credential', () => {

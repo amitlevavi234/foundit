@@ -164,9 +164,11 @@ written would have signed every session cookie with the literal 62-character
 string `<openssl rand -base64 33 | tr -d '\n/+=' | cut -c1-32>`, which is in a
 public git repository. That is the second half of F14.
 
-**The three database passwords come from `/root/.foundit/db.env`**, which
+**The four database passwords come from `/root/.foundit/db.env`**, which
 `server/setup/09-postgres-service.sh` generated on this box and which has never
-been typed anywhere. Read one back with:
+been typed anywhere. `POSTGRES_PASSWORD` in that file is the **bootstrap
+superuser's**, and nothing in `/root/.foundit/*.env` may ever carry it: the
+owner's is `FOUNDIT_OWNER_PASSWORD`. Read one back with:
 
 ```bash
 sudo grep '^FOUNDIT_APP_PASSWORD=' /root/.foundit/db.env | cut -d= -f2
@@ -226,7 +228,7 @@ EMBEDDINGS_MODEL=text-embedding-3-small
 And `sudo nano /root/.foundit/migrate.env`:
 
 ```
-DATABASE_URL_OWNER=postgresql://foundit_owner:<POSTGRES_PASSWORD>@foundit-dev-db:5432/foundit
+DATABASE_URL_OWNER=postgresql://foundit_owner:<FOUNDIT_OWNER_PASSWORD>@foundit-dev-db:5432/foundit
 ```
 
 And the backup settings:
@@ -254,6 +256,121 @@ sudo ls -l /root/.foundit/
 
 ```
 Evidence — the `ls -l` output. NOT the contents of any of these files.
+
+
+
+
+```
+
+---
+
+# Step 1f — re-initialise PostgreSQL so the owner is not a superuser
+
+**This is a data-directory change and it deletes `/srv/foundit/data`. Do it
+before step 2, and do not do it at all without the row count below.**
+
+## Why
+
+`server/setup/09-postgres-service.sh` used to start the database container with
+`POSTGRES_USER: foundit_owner`. The official image creates `POSTGRES_USER` as
+the **initdb superuser**, and PostgreSQL will not let SUPERUSER be taken away
+from the role initdb bootstrapped with. So on this host `foundit_owner` **is**
+the superuser, permanently — which is the Phase 9a review's F8, the Phase 8
+review's F1 met a second time, and a stop condition step 3a below would hit on
+its first run. A superuser owner bypasses every row-level security policy in
+the schema, so every SECURITY DEFINER function behaves differently here from
+the way it behaves in CI, in development and in every test this repository has.
+
+`initdb` runs once, on an empty data directory. There is no `ALTER ROLE` that
+undoes this. The only fix is to start again.
+
+## 1f-i. Confirm there is nothing to lose
+
+**`foundit` must be empty and `foundit_dev` must be re-creatable.** That is the
+state this host has been in since Phase 0b, and it is what makes this step
+safe — but it is also exactly the assumption that is worth checking rather than
+remembering.
+
+```bash
+sudo docker exec -u postgres foundit-dev-db psql -d foundit -tAc \
+  "select coalesce(sum(n_live_tup), 0) from pg_stat_user_tables"
+sudo docker exec -u postgres foundit-dev-db psql -d foundit -tAc \
+  "select count(*) from information_schema.tables where table_schema not in
+   ('pg_catalog','information_schema')"
+```
+
+**SEE:** `0` and `0`, or a schema that holds nothing but `infra.schema_migrations`
+with no rows in it.
+
+> **STOP if either number is not zero.** Anything else means this host holds
+> data, this step would destroy it, and the decision belongs to the owner with
+> a dump in hand — take one with `server/backup/pg-dump-offsite.sh` first and
+> read it back before going any further.
+
+```
+Evidence — the two counts, pasted.
+
+
+
+```
+
+## 1f-ii. Take the old one down and start again
+
+```bash
+sudo docker compose -f /srv/foundit/docker-compose.yml down
+sudo mv /srv/foundit/data /srv/foundit/data.superuser-owner.$(date -u +%Y%m%dT%H%M%SZ)
+sudo mkdir -p /srv/foundit/data
+```
+
+**RENAMED, NOT DELETED.** The old directory is kept until step 6, for the same
+reason `server/rollback.sh` renames a database rather than dropping it. Remove
+it by hand once the site has been up for a week.
+
+`server/setup/09-postgres-service.sh` writes the compose file with
+`POSTGRES_USER: postgres`, creates `foundit_owner` as an ordinary role and
+hands it the database, exactly as `db/dev-roles.sql` and
+`.github/workflows/ci.yml` do. Re-run it:
+
+```bash
+cd /srv/foundit/app
+bash server/setup/09-postgres-service.sh
+```
+
+It appends `FOUNDIT_OWNER_PASSWORD` to `/root/.foundit/db.env` if it is not
+already there and leaves every existing password alone.
+
+**SEE**, at the end of its output:
+
+```
+--- the owner role ---
+  foundit_owner owns the database and is NOT a superuser.
+--- no superuser but postgres, and nobody bypasses row-level security ---
+foundit_app|f|f
+foundit_auth|f|f
+foundit_embed|f|f
+foundit_owner|f|f
+postgres|t|t
+```
+
+`postgres` is the only `t`, and nothing on this machine uses it again: not the
+application, not the migrations, not the backups. The one thing it exists for
+is the three jobs a non-superuser cannot do — creating the roles, handing over
+the schemas, and installing the `vector` extension.
+
+## 1f-iii. Fix `migrate.env`
+
+`DATABASE_URL_OWNER` in `/root/.foundit/migrate.env` names a password that has
+just changed meaning: `POSTGRES_PASSWORD` is the superuser's now and
+`FOUNDIT_OWNER_PASSWORD` is the owner's.
+
+```bash
+sudo grep '^FOUNDIT_OWNER_PASSWORD=' /root/.foundit/db.env | cut -d= -f2
+sudo nano /root/.foundit/migrate.env
+```
+
+```
+Evidence — the pg_roles table above, and `ls -l /srv/foundit/` showing the
+renamed old data directory.
 
 
 
@@ -426,6 +543,15 @@ sudo docker exec -u postgres foundit-dev-db psql -d foundit -tAc \
 **SEE:** `f|f` on every row. If `foundit_owner` shows `t`, stop: the whole
 Phase 8 review happened because of that, and every SECURITY DEFINER function in
 this schema behaves differently.
+
+**THIS IS A BLOCKING STEP AND THE REMEDY IS STEP 1f.** It is not a reading to
+note and move past. Until the Phase 9a review's F8 it was a check the host as
+built would have failed on its first run, because
+`server/setup/09-postgres-service.sh` bootstrapped the container as
+`foundit_owner` and the image makes `POSTGRES_USER` the initdb superuser. If
+this shows `t` here, the database was initialised by the old version of that
+script: go back to step 1f, which is the only thing that fixes it, and do not
+run step 3b or step 4 in between.
 
 ## 3b. The seeded catalogue, and the vectors
 

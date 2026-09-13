@@ -131,6 +131,63 @@ test('a name ENDING in one of the generic suffixes is a named secret', () => {
   assert.match(SOURCE, /SECRET_NAMES='[^']*\|RESEND_API_KEY\|/, 'RESEND_API_KEY is named in full');
 });
 
+/* ---------------------------------------------------------------------------
+ * The other sweep — scripts/scan-control-bytes.mjs
+ * ------------------------------------------------------------------------ */
+
+test('the control-byte sweep reaches every kind of file this phase added', () => {
+  // THE PHASE 9a REVIEW'S F27. The sweep's extension list was
+  // `.ts .tsx .mjs .sql .md .json .sh`, and Phase 9a added `Dockerfile`,
+  // `.dockerignore`, `.env.example`, `server/compose.prod.yml`, two GitHub
+  // workflows, `server/backup/pgbackrest.conf` and two Cloudflare rule files.
+  // It reported "299 tracked file(s) … no control bytes" over a tree where
+  // nine hand-written files had never been read — and
+  // `server/cloudflare/cache-rule-*.txt` is pasted verbatim into a Cloudflare
+  // expression editor, which is the one place a stray control byte is both
+  // invisible and damaging.
+  const swept = execFileSync(
+    process.execPath,
+    [join(ROOT, 'scripts', 'scan-control-bytes.mjs')],
+    { cwd: ROOT, encoding: 'utf8' },
+  );
+  assert.match(swept, /no control bytes/, 'the sweep must pass on this tree');
+
+  for (const kind of ['.yml', '.yaml', '.txt', '.conf', 'Dockerfile', '.dockerignore',
+    '.env.example']) {
+    assert.ok(swept.includes(kind), `the sweep does not cover ${kind}`);
+  }
+
+  // And the count moved, which is the difference between a list that names
+  // those kinds and a sweep that reads them.
+  const counted = Number(/^(\d+) tracked file/.exec(swept)?.[1] ?? 0);
+  assert.ok(counted > 299, `only ${counted} files swept — the new kinds are not being read`);
+
+  // A control byte in one of the new kinds is FOUND. The byte is built from
+  // its number, exactly as the sweep's own header insists, because writing
+  // `\b` in a JavaScript string is how this class of defect happens.
+  const dir = mkdtempSync(join(tmpdir(), 'foundit-bytes-'));
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    writeFileSync(join(dir, 'rule.txt'), `a${String.fromCharCode(12)}b\n`);
+    writeFileSync(join(dir, 'Dockerfile'), `FROM x${String.fromCharCode(8)}\n`);
+    execFileSync('git', ['add', '-A'], { cwd: dir });
+    let status = 0;
+    let out = '';
+    try {
+      out = execFileSync(process.execPath, [join(ROOT, 'scripts', 'scan-control-bytes.mjs')],
+        { cwd: dir, encoding: 'utf8' });
+    } catch (error) {
+      status = error.status;
+      out = `${error.stdout ?? ''}`;
+    }
+    assert.equal(status, 1, `the sweep passed on a file with a form feed in it:\n${out}`);
+    assert.match(out, /rule\.txt:1:2\s+U\+000C/, 'the .txt finding must name the byte');
+    assert.match(out, /Dockerfile:1:7\s+U\+0008/, 'and so must the Dockerfile one');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('and .env.example, which is nothing but placeholders, still passes', () => {
   // The other half of a useful scanner: it must not cry wolf over the file
   // whose whole job is to show people which names to set.

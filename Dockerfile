@@ -11,6 +11,21 @@
 #      and research/07 §4.6 is right that a server with perfect unattended
 #      upgrades and a floating base image is not patched, it is unmeasured.
 #
+#      IT SAYS THAT AND NOW IT DOES IT. The Phase 9a review's F19: this
+#      paragraph argued the case at length and the three `FROM` lines carried
+#      no `@sha256:` at all, so the image CI built on Monday and the image it
+#      built on Friday could be two different base images with one name. The
+#      digest below is the multi-architecture index for `node:26-alpine` as of
+#      13 September 2026; the tag is kept beside it so a reader can see which
+#      release it is, and `docker buildx imagetools inspect node:26-alpine` is
+#      how to move it.
+#
+#      WHAT PINNING COSTS, said plainly: a pinned base image does not receive
+#      Alpine's security updates until somebody changes this line. That is the
+#      trade research/07 §4.6 asks for — a patched-but-unmeasured base is worse
+#      than an unpatched-and-known one — and the thing that makes it safe is
+#      that moving it is one command and one commit.
+#
 #   2. `npm run build` does its own postbuild. research/10's runner stage
 #      copies `public/` and `.next/static` into the standalone directory by
 #      hand; scripts/postbuild-standalone.mjs already does exactly that, at
@@ -48,7 +63,7 @@
 # ===========================================================================
 
 # --- dependencies ----------------------------------------------------------
-FROM node:26-alpine AS deps
+FROM node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868 AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 # `npm ci --ignore-scripts`: the only packages in this tree with install
@@ -56,7 +71,7 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 
 # --- build -----------------------------------------------------------------
-FROM node:26-alpine AS builder
+FROM node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868 AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -67,7 +82,7 @@ ENV NODE_ENV=production
 RUN npm run build
 
 # --- run -------------------------------------------------------------------
-FROM node:26-alpine AS runner
+FROM node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868 AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production \
