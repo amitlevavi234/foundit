@@ -338,10 +338,23 @@ bash server/backup/pg-dump-offsite.sh
 bash server/backup/verify-restore.sh
 ```
 
-**SEE:** the dump script prints `OK <stamp> size=<bytes>` and does **not**
-print the line about not being encrypted — `DUMP_AGE_RECIPIENT` is set here.
+**SEE:** the dump script prints `encrypted to a recipient whose private half is
+not on this machine` and then `OK <stamp> size=<bytes>`. `DUMP_AGE_RECIPIENT`
+was set in step 1e from the key pair step 1d generated; **without it the script
+refuses to upload and exits 78**, which is checklist item 41 and is the Phase
+9a review's F7. It also prints `N table counts recorded, in the dump's own
+snapshot` — those go into the archive as `counts-<stamp>.txt` and are what the
+verification compares against.
+
 The verification prints `RESTORE TEST PASSED` with the table count, the
 published count and the pgvector version.
+
+**It compares the restored copy against the archive's own counts and never
+against the live database**, which is the Phase 9a review's F5: the old
+comparison was against the running database, so one ordinary search between the
+dump and the verification failed it — and would then have failed every weekly
+run from the first search onwards, writing a red row into `infra.ops_events`
+and never pinging the dead man's switch.
 
 Read the row back:
 

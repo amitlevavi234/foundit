@@ -189,9 +189,34 @@ services:
     # second under this project; the lock stops a second started any other way
     # — by hand, by a systemd unit, by a deploy that overlapped.
     #
-    # `restart: unless-stopped` from the anchor plus exit 4 means a duplicate
-    # would restart for ever, so:
-    restart: on-failure:3
+    # `unless-stopped` FROM THE ANCHOR, AND `on-failure:3` IS GONE. That is the
+    # Phase 9a review's F4, and it is the half `server/deploy.sh` could not fix
+    # on its own.
+    #
+    # `on-failure:3` was chosen because the worker exits 4 when another holds
+    # the advisory lock, and a duplicate that restarted for ever would be a
+    # loop nobody wanted. What it actually bought was a worker that gives up
+    # PERMANENTLY after three seconds of any transient failure — a provider
+    # outage at start-up, a database that is still opening its socket, a key
+    # rotated a minute before the deploy — and then a site that looks perfectly
+    # well and stops making anything new searchable. The review reproduced it:
+    # three restarts, `exited`, and nothing on the machine would ever try
+    # again. The duplicate case it was protecting against cannot happen under
+    # this compose file at all, because `container_name` allows one.
+    #
+    # THE BACKOFF IS DOCKER'S OWN, AND IT IS NOT A FIXED TEN SECONDS. The
+    # daemon waits 100ms after the first failure and doubles, to a ceiling of
+    # one minute; `deploy.restart_policy.delay`, which would let this file name
+    # a figure, is read only by Swarm and ignored by `docker compose up`. The
+    # alternative was a shell wrapper as the container's command, which would
+    # put a shell at PID 1 and take SIGTERM away from node — research/10 §3.1,
+    # and the Dockerfile's `CMD` is exec form for exactly that reason. So the
+    # backoff is Docker's, a transient failure recovers by itself within about
+    # a minute, and a worker that is genuinely broken restarts quietly for ever
+    # rather than dying silently. What makes the second case loud is
+    # `server/deploy.sh` §9, which now fails the deploy with exit 76 when
+    # `RestartCount` is not 0 after a minute.
+    restart: unless-stopped
 
     stop_grace_period: 30s
     stop_signal: SIGTERM

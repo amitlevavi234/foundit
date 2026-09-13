@@ -14,12 +14,39 @@
 # restore that succeeds into an empty database and reports a green tick. So
 # the assertions are:
 #
-#   1. every table in the source has the same number of rows in the copy —
-#      per table, compared, not a total;
+#   1. every table has the same number of rows in the copy as it had AT THE
+#      MOMENT OF THE DUMP — per table, compared, not a total;
 #   2. `select count(*) from tools where status = 'published'` is not zero;
 #   3. the `vector` extension is present AND a real `<=>` query returns rows,
 #      because a catalogue row in pg_extension is not a working index;
 #   4. and the newest artefact is recent enough to be worth restoring.
+#
+# ASSERTION 1 USED TO COMPARE AGAINST THE LIVE DATABASE, AND THAT IS THE PHASE
+# 9a REVIEW'S F5 — the most consequential thing in that review, because it is a
+# check that would have been red for ever from the first week.
+#
+# The source was the running database AT VERIFICATION TIME and the copy is a
+# backup this script's own staleness check allows to be thirty hours old.
+# `public` holds `search_events`, `search_event_tools`, `query_embeddings`,
+# `query_readings`, `query_reranks`, `embedding_jobs`, `tool_likes`,
+# `collection_items` and `reviews`, every one of which grows under ordinary
+# traffic — and `search_events` gets a row on EVERY SEARCH. The review ran the
+# verification clean, made one ordinary search, ran it again against the same
+# artefact, and watched it fail. On the host `docs/launch-runbook.md` step 2e
+# schedules this weekly, so it would have failed every week from the first
+# search onwards: `ok = false` into `infra.ops_events` — the red row
+# `app/admin/page.tsx` says "outranks everything else on this page" — and no
+# ping, so the Healthchecks.io dead man's switch would have alerted as well. A
+# check that is red every week is a check nobody reads, which is the same as
+# not having one.
+#
+# So the counts come out of the ARCHIVE. `pg-dump-offsite.sh` writes
+# `counts-<stamp>.txt` inside the tar, taken in the dump's own snapshot, and
+# this script compares the restored copy against that file and never speaks to
+# the live database about rows at all. The corruption cases the review
+# confirmed are unaffected — a tar truncated to 50% is still not a readable
+# archive, and an inner dump truncated to 60% still restores fewer rows than
+# `counts.txt` says it should.
 #
 # WHAT IT WRITES. One row, through `infra.record_ops_event`, whose `detail` is
 # the count table as text. NEVER a credential, NEVER a hostname, NEVER a path:
@@ -51,11 +78,6 @@ AWSCLI="${FOUNDIT_AWSCLI:-aws}"
 
 STAMP="$(date -u +%FT%TZ)"
 foundit_set_sudo
-
-foundit_file_exists "$ENV_FILE" \
-  || die "no settings file at $ENV_FILE (see server/backup/backup.env.example)"
-# shellcheck disable=SC1090
-set -a; . "$ENV_FILE"; set +a
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/founditverify.XXXXXX")"
 
@@ -92,6 +114,22 @@ fail() { # fail <one short sentence, safe to show a person>
   record false "$*"
   exit 1
 }
+
+# --- the settings, read AFTER `fail` exists --------------------------------
+#
+# The order is not tidiness. A missing settings file is a failed verification
+# and has to be recorded like any other, and `fail` is what records; reading
+# the file first meant the one failure that happens before anything else could
+# only `die`, silently, which is the shape of F9 in the other script.
+if ! foundit_file_exists "$ENV_FILE"; then
+  # The path goes to the operator's terminal and the SENTENCE goes in the row:
+  # 0019's comment on `infra.ops_events.detail` asks for "one short sentence
+  # for a person… never a path with a credential in it".
+  warn "no settings file at $ENV_FILE (see server/backup/backup.env.example)"
+  fail "the backup settings file is missing"
+fi
+# shellcheck disable=SC1090
+set -a; . "$ENV_FILE"; set +a
 
 # --- 1. the newest artefact in the repository ------------------------------
 #
@@ -153,6 +191,9 @@ fi
 tar -C "$WORK" -xf "$ARTEFACT" || fail "the artefact is not a readable archive"
 DUMP="$(ls -1 "$WORK"/foundit-*.dump 2>/dev/null | head -1 || true)"
 [ -n "$DUMP" ] || fail "the archive holds no pg_dump file"
+COUNTS_FILE="$(ls -1 "$WORK"/counts-*.txt 2>/dev/null | head -1 || true)"
+[ -n "$COUNTS_FILE" ] \
+  || fail "the archive holds no counts file, so there is nothing to compare the copy against"
 
 # --- 4. restore into a scratch database ------------------------------------
 say "restoring into ${VERIFY_DB}"
@@ -167,43 +208,33 @@ $SUDO docker exec -i -u postgres "$DB_CONTAINER" \
 
 # --- 5. THE ASSERTIONS -----------------------------------------------------
 #
-# PER TABLE, AGAINST THE SOURCE. A total would hide a table that restored
-# empty while another grew. The list of tables comes from the SOURCE's
-# catalogue, so a table added by a migration tomorrow is compared tomorrow
-# without anybody editing this script.
+# PER TABLE, AGAINST THE ARCHIVE'S OWN COUNTS. A total would hide a table that
+# restored empty while another grew. The list of tables is built from the
+# RESTORED COPY's catalogue with the same query `pg-dump-offsite.sh` used —
+# `table-counts.sql`, one file, read by both — so a table added by a migration
+# tomorrow is compared tomorrow without anybody editing a script.
 #
-# TWO ROUND TRIPS, AND THE FIRST ONE WRITES THE SECOND. `count(*)` cannot be
-# taken over a table named by a variable in plain SQL, and `reltuples` is an
-# ESTIMATE — it is what the last ANALYZE saw, which on a freshly restored
-# database is often -1. So the source's catalogue is asked for a UNION of real
-# counts, and that one statement is then run against both databases. A table
-# added by a migration tomorrow is compared tomorrow, with nobody editing this.
-BUILD="
-  select string_agg(
-           format('select %L::text as t, count(*)::bigint as n from public.%I',
-                  c.relname, c.relname),
-           ' union all ' order by c.relname)
-    from pg_class c
-    join pg_namespace s on s.oid = c.relnamespace
-   where s.nspname = 'public' and c.relkind = 'r'"
-
-COUNTS_SQL="$(psql_as "$DB_NAME" -c "$BUILD")" || fail "could not read the source's table list"
-[ -n "$COUNTS_SQL" ] || fail "the source has no tables in schema public"
+# NOTHING HERE ASKS THE LIVE DATABASE FOR A ROW COUNT, and that is F5. See the
+# header.
+COUNTS_SQL="$(psql_as "$VERIFY_DB" < "$HERE/table-counts.sql")" \
+  || fail "could not read the restored copy's table list"
+[ -n "$COUNTS_SQL" ] || fail "the restored copy has no tables in schema public"
 COUNTS_SQL="select t || '=' || n from ($COUNTS_SQL) x order by t"
 
-SOURCE_COUNTS="$(psql_as "$DB_NAME" -c "$COUNTS_SQL")" || fail "could not count the source"
-COPY_COUNTS="$(psql_as "$VERIFY_DB" -c "$COUNTS_SQL")" \
-  || fail "the restored copy is missing a table the source has"
+DUMPED_COUNTS="$(sort < "$COUNTS_FILE")" || fail "the archive's counts file could not be read"
+[ -n "$DUMPED_COUNTS" ] || fail "the archive's counts file is empty"
+COPY_COUNTS="$(psql_as "$VERIFY_DB" -c "$COUNTS_SQL" | sort)" \
+  || fail "the restored copy could not be counted"
 
-if [ "$SOURCE_COUNTS" != "$COPY_COUNTS" ]; then
+if [ "$DUMPED_COUNTS" != "$COPY_COUNTS" ]; then
   # Name the tables that differ, and nothing else. A diff of two count lists
   # is safe to show a person; the rows are not.
-  DIFF="$(printf '%s\n' "$SOURCE_COUNTS" "$COPY_COUNTS" | sort | uniq -u \
+  DIFF="$(printf '%s\n' "$DUMPED_COUNTS" "$COPY_COUNTS" | sort | uniq -u \
           | cut -d= -f1 | sort -u | tr '\n' ' ')"
-  fail "row counts differ between the source and the restored copy: ${DIFF}"
+  fail "row counts differ between the dump and the restored copy: ${DIFF}"
 fi
-TABLES="$(printf '%s\n' "$SOURCE_COUNTS" | grep -c . || true)"
-say "${TABLES} tables, every one with the same row count as the source"
+TABLES="$(printf '%s\n' "$DUMPED_COUNTS" | grep -c . || true)"
+say "${TABLES} tables, every one with the row count the dump recorded"
 
 PUBLISHED="$(psql_as "$VERIFY_DB" -c "select count(*) from public.tools where status = 'published'")"
 [ "${PUBLISHED:-0}" -ge "$MIN_PUBLISHED" ] \
@@ -236,7 +267,7 @@ FTS="$(psql_as "$VERIFY_DB" -c "
 # figures that matter go first and the per-table list is trimmed to fit.
 DETAIL="$(printf '%s tables, all counts equal; published=%s; vector=%s; knn=%s; fts=%s; from %s' \
   "$TABLES" "$PUBLISHED" "$VECTOR" "$HITS" "$FTS" "$WHEN")"
-TOP="$(printf '%s\n' "$SOURCE_COUNTS" \
+TOP="$(printf '%s\n' "$DUMPED_COUNTS" \
   | grep -E '^(tools|tool_problems|reviews|profiles|collections)=' | tr '\n' ' ')"
 DETAIL="$(printf '%s | %s' "$DETAIL" "$TOP" | cut -c1-480)"
 

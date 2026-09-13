@@ -82,6 +82,18 @@ Counts, so the shape of the answer is visible before the table:
 | 39 | Dependabot or `npm audit` runs weekly, and somebody reads it | `npm audit` is run and pasted below. A weekly schedule is a repository setting | **9a** — pasted below, I1. **9b, owner** for enabling Dependabot |
 | 40 | A one-page incident note template exists | **9b, owner** — it belongs beside the runbook, on paper, off the machine. `docs/launch-runbook.md` step 6 |
 
+## Beyond the forty
+
+research/03 §9 has forty items. This one is not among them and belongs on this
+list anyway: the Phase 9a adversarial review (F7) found that nothing in the
+launch path made the off-site dumps encrypted, while `pg-dump-offsite.sh` and
+`backup.env.example` both pointed at **item 24** — a privacy notice — as the
+place it was checked. No item in the forty was about backups at all.
+
+| # | What it is | Evidence |
+| --- | --- | --- |
+| 41 | The off-site logical dumps are encrypted to a key whose private half is not on the server | **9b, owner** — `docs/launch-runbook.md` step 1d generates the age key pair on the laptop, puts the private half in the password manager and on paper, and writes the public half into `backup.env` as `DUMP_AGE_RECIPIENT`. Paste the line `encrypted to a recipient whose private half is not on this machine` from step 2d. The half that does not need the owner is **9a**: the script now **refuses** to upload an unencrypted dump to a bucket and exits 78, which `tests/deploy.test.mjs` asserts |
+
 ---
 
 ## The evidence, pasted

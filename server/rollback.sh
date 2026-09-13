@@ -54,10 +54,12 @@ for arg in "$@"; do
 done
 
 # Which tag to go back to. An explicit one wins; otherwise the one deploy.sh
-# recorded. Validated with the same pattern deploy.sh validates its argument
-# with, because this is the other place a tag becomes a `docker run`.
+# recorded. Validated by the same function deploy.sh validates its argument
+# with — `foundit_tag_ok` in common.sh — because this is the other place a tag
+# becomes a `docker run` and the two used to hold two copies of one regular
+# expression, both with the Phase 9a review's F10 in them.
 TARGET="${TAG_ARG:-$(cat "$STATE_DIR/previous_tag" 2>/dev/null || echo "")}"
-if ! printf '%s' "$TARGET" | grep -Eq '^sha-[0-9a-f]{7,40}$'; then
+if ! foundit_tag_ok "$TARGET"; then
   echo "refusing: no previous tag recorded and none given." >&2
   echo "usage: server/rollback.sh [sha-1a2b3c4] [--restore-database]" >&2
   echo "       $STATE_DIR/previous_tag is where deploy.sh writes one." >&2
@@ -68,6 +70,25 @@ if ! foundit_file_exists "$ENV_DIR/app.env"; then
   echo "refusing: $ENV_DIR/app.env does not exist." >&2
   exit 78
 fi
+if foundit_modes_enforced; then
+  MODE="$(foundit_file_mode "$ENV_DIR/app.env")"
+  if [ "$MODE" != "600" ]; then
+    echo "refusing: $ENV_DIR/app.env is mode ${MODE:-unreadable}, not 600." >&2
+    echo "   Fix it with: sudo chmod 600 $ENV_DIR/app.env" >&2
+    exit 78
+  fi
+else
+  warn "this filesystem does not enforce file modes, so the 0600 check is NOT being made."
+fi
+
+# --- one at a time, and the same lock a deploy takes -----------------------
+#
+# THE SAME LOCK, not a second one, and that is the point. The Phase 9a review's
+# F3 was two deploys racing; a rollback racing a deploy is the same collision
+# with a worse ending, because the rollback is the thing somebody reaches for
+# when the machine is already having a bad day. common.sh has the account.
+mkdir -p "$STATE_DIR"
+foundit_take_deploy_lock "$STATE_DIR"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 say "$(date -u +%FT%TZ) — rolling back to ${TARGET}"
@@ -146,8 +167,17 @@ STOPHERE
 fi
 
 # --- put the previous image back -------------------------------------------
+#
+# `--wait … app`, AND THEN THE WORKER WITHOUT WAITING — exactly as deploy.sh
+# does, and the Phase 9a review's F22 is that this file did not. It passed no
+# service at all, so `--wait` covered both, and a worker in `restarting` at the
+# moment compose polled would have made the rollback report failure and exit 75
+# while a perfectly healthy site was serving. That is the one outcome deploy.sh
+# goes out of its way to avoid, in the script you reach for when things have
+# already gone wrong.
 say "starting ${TARGET}"
-IMAGE_TAG="$TARGET" "${DC[@]}" up -d --wait --wait-timeout 120 --remove-orphans
+IMAGE_TAG="$TARGET" "${DC[@]}" up -d --wait --wait-timeout 120 --remove-orphans app
+IMAGE_TAG="$TARGET" "${DC[@]}" up -d worker >/dev/null 2>&1 || true
 
 say "waiting for ${HEALTH_URL}"
 ok=""
@@ -163,8 +193,23 @@ if [ -z "$ok" ]; then
   exit 75
 fi
 
-mkdir -p "$STATE_DIR"
+# --- record BOTH tags ------------------------------------------------------
+#
+# THE PHASE 9a REVIEW'S F22, SECOND HALF. This wrote `current_tag` and left
+# `previous_tag` alone, so after one rollback the two files named the same tag:
+# running it again was a no-op that printed "rolled back to sha-aaaaaa1", and
+# there was no longer any recorded way back to the tag that had just been
+# rolled away from — which is the tag somebody may well want once they have
+# read the logs and found the real problem was the database.
+#
+# So the tag being LEFT BEHIND goes into `previous_tag`, exactly as a deploy
+# records the tag it replaced. Unless it is the same one, in which case there
+# is nothing to remember and overwriting would lose the real previous.
+LEAVING="$(cat "$STATE_DIR/current_tag" 2>/dev/null || echo "")"
 printf '%s\n' "$TARGET" > "$STATE_DIR/current_tag"
-printf '%s  ROLLED BACK  -> %s%s\n' "$(date -u +%FT%TZ)" "$TARGET" \
+if [ -n "$LEAVING" ] && [ "$LEAVING" != "$TARGET" ]; then
+  printf '%s\n' "$LEAVING" > "$STATE_DIR/previous_tag"
+fi
+printf '%s  ROLLED BACK  %s -> %s%s\n' "$(date -u +%FT%TZ)" "${LEAVING:-none}" "$TARGET" \
   "${RESTORE_DB:+ (database restored)}" >> "$STATE_DIR/deploy.log"
-say "rolled back to ${TARGET}"
+say "rolled back to ${TARGET} (previous is now ${LEAVING:-unchanged})"
