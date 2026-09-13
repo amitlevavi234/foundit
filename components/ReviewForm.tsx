@@ -1,6 +1,7 @@
 import { postReview, removeMyReview } from '@/app/tools/actions';
 import type { ViewerReview } from '@/lib/account-sql';
 import { MAX_REVIEW_BODY } from '@/lib/accounts';
+import type { ReviewDraft } from '@/lib/review-draft';
 
 import { Button } from './Button';
 import { Icon } from './Icon';
@@ -46,6 +47,22 @@ export interface ReviewFormProps {
   back: string;
   /** Their existing review, if they have one. */
   mine: ViewerReview | null;
+  /**
+   * What they typed on the attempt that was just refused, if there was one.
+   *
+   * THE PHASE 9a REVIEW'S F12. `lib/rate-limit.ts` and `.env.example` both
+   * said of the review limit that "the refusal is a sentence on the page they
+   * are already on and the review they typed is still in the form", and this
+   * component had nothing to restore from: `postReview` redirects, the page
+   * re-renders from the server, and the words were gone every time. The draft
+   * now waits in a five-minute httpOnly cookie scoped to this listing
+   * (lib/review-draft.ts) and the page hands it back here.
+   *
+   * IT OUTRANKS `mine`, and only because it is newer: a person who has a
+   * review and was refused an edit should see the edit they just typed, not
+   * the version they were trying to replace.
+   */
+  draft?: ReviewDraft | null;
   signedIn: boolean;
   google: boolean;
   email: boolean;
@@ -69,8 +86,11 @@ const STAR_WORDS = [
 ];
 
 export function ReviewForm({
-  slug, name, back, mine, signedIn, google, email, notice = null,
+  slug, name, back, mine, signedIn, google, email, notice = null, draft = null,
 }: ReviewFormProps) {
+  // The draft first, then their saved review, then nothing.
+  const rating = draft?.rating ?? mine?.rating ?? null;
+  const body = draft?.body || (mine?.body ?? '');
   if (!signedIn) {
     return (
       <div
@@ -142,7 +162,7 @@ export function ReviewForm({
                 name="rating"
                 value={value}
                 required
-                defaultChecked={mine?.rating === value}
+                defaultChecked={rating === value}
               />
               <label htmlFor={`rating-${slug}-${value}`}>
                 <Icon name="star" size={20} strokeWidth={2} />
@@ -171,7 +191,7 @@ export function ReviewForm({
             name="body"
             rows={4}
             maxLength={MAX_REVIEW_BODY}
-            defaultValue={mine?.body ?? ''}
+            defaultValue={body}
             placeholder="What surprised you, good or bad?"
           />
         </div>

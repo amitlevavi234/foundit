@@ -219,7 +219,12 @@ export const DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR = 30;
  *   happens; a script rewriting one review a second is, and each rewrite is an
  *   UPSERT that bumps `tools.rating_count` and invalidates the catalogue cache
  *   for that listing. The refusal is a sentence on the page they are on and
- *   the review they typed is still in the form.
+ *   the review they typed is still in the form — which is `lib/review-draft.ts`
+ *   and was not true of anything until the Phase 9a review's F12. A
+ *   `redirect()` re-renders the page from the server, `ReviewForm` had no
+ *   draft to restore from, and the notice itself never rendered either,
+ *   because the URL was built by concatenating onto a path that already had a
+ *   query string on it.
  *
  *   SAVES — one hundred and twenty an hour, per account. Deliberately
  *   generous, because saving is the one thing a person genuinely does in

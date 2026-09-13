@@ -208,6 +208,123 @@ test('the matcher covers the pages and not the immutable assets', () => {
   assert.match(matcher, /\(\?!/, 'the matcher must be an exclusion, not a list of routes');
 });
 
+test('no X-Robots-Tag is set for every route, because the private ones are private', () => {
+  // THE PHASE 9a REVIEW'S F16. `middleware.ts` added
+  // `['X-Robots-Tag', 'index, follow']` to every response its matcher covers,
+  // which is every page — so the origin was telling crawlers to index /admin,
+  // /saved, /results?q=<what somebody typed> and /c/<token>, the share link
+  // whose own page sets `robots: { index: false, follow: false }` and whose
+  // header says "a link somebody sent to one person is not a page a search
+  // engine should be able to hand to everybody".
+  //
+  // A header set once for every route cannot know which pages are private.
+  // Page metadata can and does.
+  //
+  // The HEADERS array and not the whole file: middleware.ts explains at length
+  // why this header is not there, and a naive grep finds the word in the
+  // paragraph forbidding it — the same trap `DIRECTIVES` above exists for.
+  assert.ok(
+    !MIDDLEWARE_HEADERS.some(([name]) => /^x-robots-tag$/i.test(name)),
+    'middleware.ts must not set X-Robots-Tag: it cannot tell a private page from a public one',
+  );
+  const layout = readFileSync(join(ROOT, 'app', 'layout.tsx'), 'utf8');
+  assert.match(
+    layout,
+    /robots: \{ index: true, follow: true \}/,
+    'the default must be metadata on the root layout, which a page can override',
+  );
+  const share = readFileSync(join(ROOT, 'app', 'c', '[token]', 'page.tsx'), 'utf8');
+  assert.match(
+    share,
+    /robots: \{ index: false, follow: false \}/,
+    'the share page must still say noindex, which is what F16 was about',
+  );
+});
+
+/* ---------------------------------------------------------------------------
+ * The paths middleware skips — the Phase 9a review's F24
+ * ------------------------------------------------------------------------ */
+
+const CONFIG = readFileSync(join(ROOT, 'next.config.mjs'), 'utf8');
+
+/** The `HEADERS` array in middleware.ts, as pairs. */
+const MIDDLEWARE_HEADERS = (() => {
+  const block = /const HEADERS: ReadonlyArray<readonly \[string, string\]> = \[([\s\S]*?)\n\];/
+    .exec(MIDDLEWARE);
+  assert.ok(block, 'middleware.ts no longer declares HEADERS as one array');
+  return [...block[1].matchAll(/\['([^']+)', '([^']+)'\]/g)].map((m) => [m[1], m[2]]);
+})();
+
+/** The `headers()` block, as pairs. */
+const STATIC_HEADERS = (() => {
+  const block = /async headers\(\)[\s\S]*?\n  \},/.exec(CONFIG);
+  assert.ok(block, 'next.config.mjs no longer has a headers() block — F24 has been undone');
+  return [...block[0].matchAll(/key: '([^']+)',\s+value: '([^']+)'/g)].map((m) => [m[1], m[2]]);
+})();
+
+test('the static paths get every header that does not vary per request', () => {
+  // Not a hand-written list. The middleware's own array is the authority, and
+  // the two that vary — the nonce and the policy that carries it — are the
+  // two that must NOT be here, which is why `headers()` in next.config.mjs
+  // could never have held the CSP.
+  assert.ok(MIDDLEWARE_HEADERS.length >= 6, 'middleware.ts has lost a header');
+  assert.deepEqual(
+    STATIC_HEADERS,
+    MIDDLEWARE_HEADERS,
+    'next.config.mjs and middleware.ts disagree about the headers a response carries — '
+      + 'a chunk and a page must not be protected differently',
+  );
+
+  // And the nonce-bearing pair is absent, or every asset response would vary.
+  const block = /async headers\(\)[\s\S]*?\n  \},/.exec(CONFIG)[0];
+  assert.doesNotMatch(block, /Content-Security-Policy/i, 'the CSP carries a nonce and cannot be static');
+  assert.doesNotMatch(block, /x-nonce/i, 'the nonce is per request');
+
+  // The source it covers is the middleware matcher's exclusion list, or one
+  // of them is protected by neither.
+  const matcher = /matcher:\s*\[([^\]]*)\]/.exec(MIDDLEWARE)?.[1] ?? '';
+  for (const path of ['_next/static', '_next/image', 'favicon.ico', 'icon.svg', 'apple-icon.png']) {
+    assert.ok(matcher.includes(path), `the matcher no longer excludes ${path}`);
+    assert.ok(
+      block.includes(path),
+      `${path} is excluded from middleware and not covered by next.config.mjs headers()`,
+    );
+  }
+});
+
+test('a real chunk comes back with them, off a running server', async (t) => {
+  // THE HALF THAT PROVES THE SOURCE. `curl -sI` on a chunk used to return a
+  // `Cache-Control` and nothing else, and no test looked: the live half of
+  // this file checked `/`, `/healthz` and `/o` only.
+  const origin = baseUrl();
+  const page = origin ? await head(origin, '/') : null;
+  if (!page) { t.skip('no server answering.'); return; }
+
+  const html = await page.text();
+  const chunk = /\/_next\/static\/[^"']+\.js/.exec(html)?.[0];
+  assert.ok(chunk, 'the home page references no chunk under /_next/static — cannot test F24');
+
+  const asset = await head(origin, chunk);
+  assert.ok(asset, `${chunk} did not answer`);
+  assert.equal(asset.status, 200, `${chunk} answered ${asset.status}`);
+
+  for (const [name, value] of STATIC_HEADERS) {
+    assert.equal(
+      asset.headers.get(name.toLowerCase()),
+      value,
+      `${chunk} came back without ${name} — the static paths are unprotected again`,
+    );
+  }
+  // And it is still cacheable for ever, which is the reason the matcher skips
+  // it in the first place.
+  assert.match(
+    asset.headers.get('cache-control') ?? '',
+    /immutable/,
+    'the chunk stopped being immutable, which is a cache regression',
+  );
+  t.diagnostic(`${chunk}: ${STATIC_HEADERS.length} header(s) present, still immutable`);
+});
+
 /* ---------------------------------------------------------------------------
  * The live half
  * ------------------------------------------------------------------------ */
@@ -288,6 +405,20 @@ test('a running server sends every one of them, on a page and on a route handler
 
   // Version and stack are free reconnaissance (next.config.mjs says so).
   assert.equal(response.headers.get('x-powered-by'), null, 'X-Powered-By is being sent');
+
+  // And no X-Robots-Tag on the wire either, on a public page or a private one
+  // (F16). `/c/<token>` is the one that mattered: its page sets `noindex` and
+  // the header said `index, follow` over the top of it.
+  for (const path of ['/', '/admin', '/saved', '/c/not-a-real-share-token']) {
+    const other = await head(origin, path);
+    assert.ok(other, `${path} did not answer`);
+    assert.equal(
+      other.headers.get('x-robots-tag'),
+      null,
+      `${path} is telling crawlers what to do from a header that cannot tell it apart from /about`,
+    );
+  }
+
   t.diagnostic(`checked against ${origin}`);
 });
 

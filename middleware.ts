@@ -123,6 +123,25 @@ function policy(nonce: string): string {
  * `X-Frame-Options` is deliberately absent: `frame-ancestors 'none'` above is
  * its successor and says the same thing to every browser that matters. It is
  * not "missing"; it is covered.
+ *
+ * `X-Robots-Tag` IS DELIBERATELY ABSENT TOO, AND USED NOT TO BE. This list
+ * carried `['X-Robots-Tag', 'index, follow']` and the matcher covers every
+ * page, so the origin was affirmatively telling crawlers to index `/admin`,
+ * `/saved`, `/results?q=<what somebody typed>` and — worst — `/c/<token>`, the
+ * share link whose own page sets `robots: { index: false, follow: false }`
+ * because "a link somebody sent to one person is not a page a search engine
+ * should be able to hand to everybody". Google resolves that conflict in
+ * favour of the more restrictive directive; nothing obliges another crawler
+ * to. A header set in one place for every route cannot know which pages are
+ * private, and page metadata already does: `app/layout.tsx` sets `index,
+ * follow` as the default and each page overrides it. That is the Phase 9a
+ * review's F16.
+ *
+ * THE SAME LIST, MINUS THE CSP, IS IN `next.config.mjs`. See `config.matcher`
+ * at the foot of this file: the immutable assets are excluded from middleware
+ * on purpose, and until F24 that meant they were served with no security
+ * headers at all. `next.config.mjs`'s `headers()` puts the non-nonce ones back
+ * on those paths, and tests/headers.test.mjs asserts the two lists agree.
  */
 const HEADERS: ReadonlyArray<readonly [string, string]> = [
   ['Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload'],
@@ -131,7 +150,6 @@ const HEADERS: ReadonlyArray<readonly [string, string]> = [
   ['Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()'],
   ['Cross-Origin-Opener-Policy', 'same-origin'],
   ['Cross-Origin-Resource-Policy', 'same-origin'],
-  ['X-Robots-Tag', 'index, follow'],
 ];
 
 export function middleware(request: NextRequest): NextResponse {
@@ -161,6 +179,14 @@ export function middleware(request: NextRequest): NextResponse {
  * and make every asset response vary, which is exactly what Cloudflare's cache
  * rule 2 (server/cloudflare/README.md) is trying not to do. `favicon.ico` and
  * the icon routes are the same kind of thing.
+ *
+ * THE EXCLUSION IS RIGHT AND ITS CONSEQUENCE WAS NOT (F24). Skipping
+ * middleware skipped `nosniff`, `Referrer-Policy`, HSTS, COOP and CORP as
+ * well as the nonce, so every chunk came back with nothing but a
+ * `Cache-Control` — and `server/cloudflare/README.md` forbids putting them
+ * back with a Transform Rule at the edge. `next.config.mjs`'s `headers()`
+ * covers exactly these paths with exactly the headers above, none of which
+ * varies per request.
  */
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon.ico|icon.svg|apple-icon.png).*)'],

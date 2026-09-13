@@ -32,6 +32,49 @@ const nextConfig = {
 
   // Version and stack are free reconnaissance.
   poweredByHeader: false,
+
+  /* -------------------------------------------------------------------------
+   * The security headers on the paths `middleware.ts` deliberately skips.
+   *
+   * THE PHASE 9a REVIEW'S F24. `middleware.ts`'s matcher excludes
+   * `_next/static`, `_next/image`, `favicon.ico`, `icon.svg` and
+   * `apple-icon.png`, and the reason is sound: those responses have no HTML
+   * and no script to nonce, and minting a nonce per chunk would make every
+   * asset response vary, which is precisely what Cloudflare cache rule 2
+   * (server/cloudflare/README.md) is arranged to avoid.
+   *
+   * The consequence was not intended. Every chunk came back with a
+   * `Cache-Control` and nothing else — no `nosniff`, no `Referrer-Policy`, no
+   * HSTS, no COOP, no CORP — and `server/cloudflare/README.md` explicitly
+   * forbids adding a Transform Rule to put them back at the edge, so there was
+   * nowhere else for them to come from. `nosniff` is the one that matters most
+   * on a path serving JavaScript.
+   *
+   * THESE ARE THE SAME HEADERS `middleware.ts` SETS, MINUS THE TWO THAT VARY
+   * PER REQUEST: no `Content-Security-Policy` (it carries the nonce) and no
+   * `x-nonce`. `headers()` in this file is static, which is exactly why the
+   * policy could not live here in the first place — and exactly why these can.
+   * tests/headers.test.mjs reads both lists and fails if they drift apart, and
+   * asks a real chunk for them off a running server.
+   * ---------------------------------------------------------------------- */
+  async headers() {
+    return [
+      {
+        source: '/:path(_next/static/.*|_next/image|favicon.ico|icon.svg|apple-icon.png)',
+        headers: [
+          { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          {
+            key: 'Permissions-Policy',
+            value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()',
+          },
+          { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+          { key: 'Cross-Origin-Resource-Policy', value: 'same-origin' },
+        ],
+      },
+    ];
+  },
 };
 
 /* ===========================================================================

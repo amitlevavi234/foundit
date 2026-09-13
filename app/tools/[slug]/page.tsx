@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { cookies } from 'next/headers';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { cache, type ReactNode } from 'react';
@@ -13,7 +14,7 @@ import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { Stars } from '@/components/Stars';
 import { ToolTile } from '@/components/ToolTile';
-import { getToolViewerState } from '@/lib/accounts';
+import { MAX_REVIEW_BODY, getToolViewerState } from '@/lib/accounts';
 import { emailCodeConfigured, googleConfigured } from '@/lib/auth';
 import {
   flagLabel,
@@ -22,6 +23,7 @@ import {
   pricingLabel,
 } from '@/lib/constraints';
 import { getToolPage } from '@/lib/db';
+import { DRAFT_COOKIE, parseDraft } from '@/lib/review-draft';
 import type { ToolFlag, ToolPageData } from '@/lib/types';
 
 /* ===========================================================================
@@ -150,6 +152,16 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
      for the search limiter too), so the action redirects here with a marker
      and this turns it into a sentence. */
   const reviewNotice = (Array.isArray(search.review) ? search.review[0] : search.review) ?? null;
+
+  /* And the words they typed, if the last attempt came back refused. It is a
+     five-minute httpOnly cookie scoped to this listing's own path
+     (lib/review-draft.ts): `redirect()` re-renders this page from the server,
+     so there is nowhere else for a draft to survive — which is why the two
+     files that promised "the review they typed is still in the form" were
+     wrong until the Phase 9a review said so. */
+  const draft = reviewNotice
+    ? parseDraft((await cookies()).get(DRAFT_COOKIE)?.value, MAX_REVIEW_BODY)
+    : null;
 
   const primary = tool.categories.find((c) => c.isPrimary) ?? tool.categories[0];
   const good = tool.flags.filter((flag) => GOOD_FOR[flag]);
@@ -536,6 +548,7 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
               name={tool.name}
               back={here}
               mine={mine?.review ?? null}
+              draft={draft}
               signedIn={mine !== null}
               google={signIn.google}
               email={signIn.email}

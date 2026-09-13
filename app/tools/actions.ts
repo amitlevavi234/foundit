@@ -2,10 +2,17 @@
 
 import { revalidatePath } from 'next/cache';
 import { revalidateTag } from 'next/cache';
+import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
 import { currentUserId, deleteOwnReview, setLiked, writeReview } from '@/lib/accounts';
 import { allowReview } from '@/lib/rate-limit';
+import {
+  DRAFT_COOKIE,
+  DRAFT_MAX_AGE_SECONDS,
+  draftPath,
+  reviewNoticeUrl,
+} from '@/lib/review-draft';
 
 /* ===========================================================================
  * Liking a tool, and reviewing one.
@@ -26,6 +33,42 @@ function safeBack(raw: string, slug: string): string {
   const value = String(raw ?? '');
   if (!value.startsWith('/') || value.startsWith('//')) return `/tools/${slug}`;
   return value;
+}
+
+/* ---------------------------------------------------------------------------
+ * Coming back to the page with something to say — the Phase 9a review's F12.
+ *
+ * Both halves of it are in lib/review-draft.ts, with the reasoning: the URL is
+ * built with `URL` rather than by concatenation (the old spelling put
+ * `?review=` inside the value of `?q=` on every visitor who arrived from a
+ * search, so the notice never rendered), and the review they typed waits in a
+ * five-minute httpOnly cookie scoped to the one listing, because the two
+ * places that promised "the review they typed is still in the form" had
+ * nothing behind them.
+ * ------------------------------------------------------------------------ */
+
+/** Write the draft where the page will find it, for one listing, briefly. */
+async function keepDraft(slug: string, rating: number, body: string): Promise<void> {
+  const jar = await cookies();
+  jar.set(DRAFT_COOKIE, JSON.stringify({ rating, body }), {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: draftPath(slug),
+    maxAge: DRAFT_MAX_AGE_SECONDS,
+  });
+}
+
+/** And take it away again the moment the review is really written. */
+async function dropDraft(slug: string): Promise<void> {
+  const jar = await cookies();
+  jar.set(DRAFT_COOKIE, '', {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: draftPath(slug),
+    maxAge: 0,
+  });
 }
 
 export async function toggleLike(formData: FormData): Promise<void> {
@@ -58,23 +101,33 @@ export async function postReview(formData: FormData): Promise<void> {
     redirect(`/sign-in?next=${encodeURIComponent(back)}&intent=review`);
   }
 
+  const rating = Number.parseInt(String(formData.get('rating') ?? ''), 10);
+  const body = String(formData.get('body') ?? '');
+
   // TEN AN HOUR (research/03 §9 item 14, lib/rate-limit.ts). This path had no
   // bound at all until Phase 9a: every post is an UPSERT that bumps
   // `tools.rating_count` and invalidates the catalogue cache for the listing,
   // and nothing stopped a script doing that once a second under one free
   // account. The refusal is a sentence on the page they are already on; the
-  // listing and their existing review are untouched.
+  // listing and their existing review are untouched — and so are the words
+  // they typed, which is what `keepDraft` is for.
   if (!allowReview(viewer).allowed) {
-    redirect(`${back}?review=too-many#reviews`);
+    await keepDraft(slug, rating, body);
+    redirect(reviewNoticeUrl(back,'too-many'));
   }
 
-  const rating = Number.parseInt(String(formData.get('rating') ?? ''), 10);
-  const body = String(formData.get('body') ?? '');
-
   const written = await writeReview(slug, rating, body);
+  if (!written) {
+    await keepDraft(slug, rating, body);
+    revalidatePath(back);
+    redirect(reviewNoticeUrl(back,'refused'));
+  }
+
+  // It is written. Nothing is left in the browser.
+  await dropDraft(slug);
   revalidateTag('catalogue');
   revalidatePath(back);
-  redirect(written ? `${back}#reviews` : `${back}?review=refused#reviews`);
+  redirect(`${back}#reviews`);
 }
 
 /* ---------------------------------------------------------------------------
