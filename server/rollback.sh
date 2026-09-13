@@ -25,6 +25,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=server/common.sh
+. "$HERE/common.sh"
 COMPOSE_FILE="${FOUNDIT_COMPOSE_FILE:-$HERE/compose.prod.yml}"
 ENV_DIR="${FOUNDIT_ENV_DIR:-/root/.foundit}"
 BASE="${FOUNDIT_BASE:-/srv/foundit}"
@@ -34,15 +36,12 @@ DB_CONTAINER="${FOUNDIT_DB_CONTAINER:-foundit-dev-db}"
 DB_NAME="${FOUNDIT_DB_NAME:-foundit}"
 HEALTH_URL="${FOUNDIT_HEALTH_URL:-http://127.0.0.1:3000/healthz}"
 
-if [ "$(id -u)" = "0" ]; then
-  echo "refusing: run this as founditops, not as root." >&2
-  exit 77
-fi
-SUDO=""
-if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+foundit_refuse_root
+foundit_set_sudo
 
-DC=(docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
-say() { printf '==> %s\n' "$*"; }
+# `$SUDO` in front for the same reason deploy.sh has one: compose is what reads
+# the root-only env file. On the development machine SUDO is empty.
+DC=($SUDO docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
 
 RESTORE_DB=""
 TAG_ARG=""
@@ -65,7 +64,7 @@ if ! printf '%s' "$TARGET" | grep -Eq '^sha-[0-9a-f]{7,40}$'; then
   exit 64
 fi
 
-if [ ! -f "$ENV_DIR/app.env" ]; then
+if ! foundit_file_exists "$ENV_DIR/app.env"; then
   echo "refusing: $ENV_DIR/app.env does not exist." >&2
   exit 78
 fi

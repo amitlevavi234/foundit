@@ -34,6 +34,8 @@ set -euo pipefail
 # exercise this script end to end without a /srv or a /root to write to. On the
 # host every one of these is the default.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=server/common.sh
+. "$HERE/common.sh"
 COMPOSE_FILE="${FOUNDIT_COMPOSE_FILE:-$HERE/compose.prod.yml}"
 ENV_DIR="${FOUNDIT_ENV_DIR:-/root/.foundit}"
 BASE="${FOUNDIT_BASE:-/srv/foundit}"
@@ -54,15 +56,13 @@ HEALTH_TRIES="${FOUNDIT_HEALTH_TRIES:-40}"
 # `id -u` is 0 only on a real Unix root. On the development machine under Git
 # Bash it is not, sudo is absent, and SUDO stays empty — which is how this same
 # script is exercised there.
-if [ "$(id -u)" = "0" ]; then
-  echo "refusing: run this as founditops, not as root." >&2
-  echo "It uses sudo for the two steps that need it, and nothing else." >&2
-  exit 77
-fi
-SUDO=""
-if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+foundit_refuse_root
+foundit_set_sudo
 
-DC=(docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
+# `$SUDO` in front, because compose is the thing that READS app.env and
+# embed.env, and those are root-only. On this development machine SUDO is
+# empty and this is `docker compose` exactly as typed.
+DC=($SUDO docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
 
 # --- 1b. the tag -----------------------------------------------------------
 #
@@ -99,7 +99,7 @@ fi
 #                 half of that check.
 for name in app.env embed.env migrate.env; do
   file="$ENV_DIR/$name"
-  if [ ! -f "$file" ]; then
+  if ! foundit_file_exists "$file"; then
     echo "refusing: $file does not exist." >&2
     echo "docs/launch-runbook.md step 1 is where it is created." >&2
     exit 78
@@ -157,7 +157,12 @@ if [ ! -s "$DUMP" ]; then
   rm -f "$DUMP"
   exit 71
 fi
-$SUDO docker exec -i -u postgres "$DB_CONTAINER" pg_restore -l /dev/stdin < "$DUMP" > /dev/null \
+# `pg_restore -l` WITH NO FILE ARGUMENT, reading stdin. Naming `/dev/stdin`
+# instead looks equivalent and is not: pg_restore seeks in the file it is
+# given, the container's /dev/stdin is a pipe, and it then reports "did not
+# find magic string in file header" on a dump that is perfectly good — a check
+# that fails on every healthy backup is worse than no check at all.
+$SUDO docker exec -i -u postgres "$DB_CONTAINER" pg_restore -l < "$DUMP" > /dev/null \
   || { echo "!! the pre-migration dump is not readable; refusing to migrate" >&2; exit 71; }
 ln -sfn "$DUMP" "$BACKUP_DIR/latest-pre-deploy.dump" 2>/dev/null || true
 say "dump is $(wc -c < "$DUMP") bytes and pg_restore can read it"
@@ -208,11 +213,19 @@ rollback_to_previous() {
   return 75
 }
 
+# THE APP IS WHAT THE DEPLOY WAITS ON, AND THE WORKER IS NOT, which is a
+# decision rather than an oversight. The worker embeds statements from a queue;
+# the site serves pages. A worker that cannot start — no key, a provider
+# outage, the advisory lock held by a process somebody left running — must not
+# roll back a perfectly good site, and `--wait` over both services would do
+# exactly that. It is started, it is checked, and a worker that is not running
+# is a loud line rather than a rollback.
 say "starting ${TAG}"
-if ! "${DC[@]}" up -d --wait --wait-timeout 120 --remove-orphans; then
+if ! "${DC[@]}" up -d --wait --wait-timeout 120 --remove-orphans app; then
   rollback_to_previous || exit 75
   exit 75
 fi
+"${DC[@]}" up -d worker >/dev/null 2>&1 || true
 
 say "waiting for ${HEALTH_URL}"
 ok=""
@@ -226,6 +239,20 @@ if [ -z "$ok" ]; then
   "${DC[@]}" logs --tail=40 app >&2 || true
   rollback_to_previous || exit 75
   exit 75
+fi
+
+# --- 7b. and say whether the worker came with it ---------------------------
+#
+# Not a failure, and not silence either. A site with no embed worker looks
+# perfectly well and stops making anything new searchable, which is the kind of
+# outage nobody notices for a week.
+sleep 3
+if docker inspect -f '{{.State.Running}}' foundit-worker 2>/dev/null | grep -q true; then
+  say "the embed worker is running"
+else
+  echo "!! THE EMBED WORKER IS NOT RUNNING. The site is up and new listings will" >&2
+  echo "   not become searchable until it is. Its last lines:" >&2
+  "${DC[@]}" logs --tail=12 worker >&2 || true
 fi
 
 # --- 8. record it ----------------------------------------------------------

@@ -152,7 +152,13 @@ services:
     # repository and it has to be the code the app was built from, or a
     # statement the app just wrote is embedded by a worker that reads its
     # schema differently.
-    command: ["node", "scripts/embed-worker.mjs", "--loop"]
+    # NO ARGUMENTS. `scripts/embed-worker.mjs` polls for ever at its default
+    # interval; `--once` is the one-tick form for a person at a keyboard and
+    # `--interval=N` is for a test. Anything else is refused by name, which is
+    # how the first version of this line — `--loop`, a flag that has never
+    # existed — was found: the container printed a usage message and exited 1,
+    # three times, and `restart: on-failure:3` then stopped trying.
+    command: ["node", "scripts/embed-worker.mjs"]
 
     # NO PUBLISHED PORT AT ALL. It answers nothing; it takes work from a table.
     # A health check would have to invent something to ask it.
