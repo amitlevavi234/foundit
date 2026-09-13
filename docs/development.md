@@ -932,8 +932,8 @@ never in anything whose output goes to a log.
 
 **`DATABASE_URL` in that env file must name the container, not `127.0.0.1`.**
 `db/docker-compose.dev.yml` publishes 5433 on the HOST's loopback, and a
-container's own loopback is the container. Use
-`postgresql://foundit_app:…@foundit-dev-db:5432/foundit`.
+container's own loopback is the container. Use `foundit-dev-db:5432` as the host in that connection string, with the
+password `db/docker-compose.dev.yml` publishes.
 
 ### The deploy, and its rollback
 
