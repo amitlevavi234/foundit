@@ -100,9 +100,16 @@ jobs:
           fi
 
           echo '--- files in the image that should not be there ---'
+          # `/app` and not `/`, because `/etc/ssl/cert.pem` and
+          # `/etc/ssl1.1/cert.pem` are the base image's CA bundles: a `*.pem`
+          # sweep of the whole filesystem finds them on every Alpine image ever
+          # built and would fail this step for ever. What is being asked is
+          # whether anything from the BUILD CONTEXT reached a layer, and the
+          # build context is copied to /app.
           found=$(docker run --rm --entrypoint sh foundit:ci -c '
-            find / -xdev \( -name ".env" -o -name ".env.local" -o -name "*.pem" \
-                         -o -name "id_ed25519*" -o -name "id_rsa*" \) \
+            find /app \( -name ".env" -o -name ".env.local" -o -name ".env.*" \
+                      -o -name "*.pem" -o -name "*.key" \
+                      -o -name "id_ed25519*" -o -name "id_rsa*" \) \
               -not -path "*/node_modules/*" 2>/dev/null | head -20')
           if [ -n "$found" ]; then
             echo "$found"
