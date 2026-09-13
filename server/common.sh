@@ -213,3 +213,61 @@ foundit_release_deploy_lock() {
     rmdir "$FOUNDIT_LOCK_DIR" 2>/dev/null || true
   fi
 }
+
+# --- running a tool that says too much when it fails -----------------------
+#
+# WHAT THIS IS FOR, from a CI run that caught it. `server/backup/verify-restore.sh`
+# asked the AWS CLI to list the bucket, the CLI could not make the connection,
+# and it said so:
+#
+#   aws: [ERROR]: SSL validation failed for
+#   https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<bucket>?list-type=2 …
+#
+# That one line carries the account id, the endpoint and the bucket name, on
+# stderr, from a cron job whose output goes to a log and sometimes to an email.
+# `tests/deploy.test.mjs` runs both backup scripts against an env file full of
+# canary values and greps every line of their output for each one; it passed on
+# a laptop with no `aws` installed and failed on a runner that has one. The
+# scripts themselves print only basenames — this is a tool printing its own
+# arguments back.
+#
+# SO NO TOOL'S STDERR REACHES THE TERMINAL. It is captured, and what is printed
+# instead is a sentence this repository wrote and the exit code, which is what
+# an operator needs to know *that* it failed. WHAT it said is kept where it is
+# reachable and not in a log: `$FOUNDIT_TOOL_LOG`, mode 0600, under the state
+# directory. Only the PATH of that file is printed, and a path is not a secret.
+#
+# STDOUT IS PASSED THROUGH UNTOUCHED, because callers parse it — `aws s3 ls`'s
+# listing is how the verifier finds the newest artefact.
+#
+# Returns the tool's own exit code, so `|| fail …` still reads normally.
+foundit_quiet_run() { # foundit_quiet_run <what it was doing> <command> [args...]
+  local what="$1"; shift
+  local err rc=0
+  err="$(mktemp "${TMPDIR:-/tmp}/foundit-tool.XXXXXX" 2>/dev/null)" || err=""
+  if [ -z "$err" ]; then
+    # No temporary file, so there is nowhere to put the output. Throwing it
+    # away is the safe direction: the alternative is letting it out.
+    "$@" 2>/dev/null && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] || warn "${what} failed (exit ${rc}); its output could not be captured and was dropped"
+    return "$rc"
+  fi
+  chmod 600 "$err" 2>/dev/null || true
+
+  "$@" 2>"$err" && rc=0 || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    warn "${what} failed (exit ${rc}). Its own message is not printed here:"
+    warn "  a tool that cannot reach a bucket says which bucket, at which endpoint."
+    if [ -n "${FOUNDIT_TOOL_LOG:-}" ]; then
+      mkdir -p "$(dirname "$FOUNDIT_TOOL_LOG")" 2>/dev/null || true
+      : > "$FOUNDIT_TOOL_LOG" 2>/dev/null || true
+      chmod 600 "$FOUNDIT_TOOL_LOG" 2>/dev/null || true
+      if cat "$err" >> "$FOUNDIT_TOOL_LOG" 2>/dev/null; then
+        warn "  it is in ${FOUNDIT_TOOL_LOG}, mode 0600. Read it there, not in a chat window."
+      fi
+    fi
+  fi
+  rm -f "$err"
+  return "$rc"
+}

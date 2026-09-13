@@ -14,8 +14,9 @@
 # THE ORDER IS THE WHOLE POINT, and every step before the last is reversible:
 #
 #   1. refuse to run as root, and refuse a tag that is not sha-<hex>
-#   1d. TAKE THE LOCK. One deploy at a time, or `current_tag` ends up naming an
-#      image that is not running — see foundit_take_deploy_lock in common.sh
+#   1c. TAKE THE LOCK, before the environment and before `docker info`. One
+#      deploy at a time, or `current_tag` ends up naming an image that is not
+#      running — see foundit_take_deploy_lock in common.sh
 #   2. no-op if that tag is already running and healthy
 #   3. pull  — a failed pull leaves the running stack untouched
 #   4. pg_dump BEFORE any migration runs (research/10 §4.3)
@@ -74,12 +75,6 @@ HEALTH_TRIES="${FOUNDIT_HEALTH_TRIES:-40}"
 # Bash it is not, sudo is absent, and SUDO stays empty — which is how this same
 # script is exercised there.
 foundit_refuse_root
-foundit_set_sudo
-
-# `$SUDO` in front, because compose is the thing that READS app.env and
-# embed.env, and those are root-only. On this development machine SUDO is
-# empty and this is `docker compose` exactly as typed.
-DC=($SUDO docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
 
 # --- 1b. the tag -----------------------------------------------------------
 #
@@ -103,6 +98,46 @@ foundit_tag_ok "$TAG" || {
   echo "usage: server/deploy.sh sha-1a2b3c4" >&2
   exit 64
 }
+
+# --- 1c. THE LOCK, and it is this early on purpose -------------------------
+#
+# BEFORE THE ENVIRONMENT, BEFORE `docker info`, BEFORE ANYTHING THAT CAN FAIL
+# FOR A REASON THAT IS NOT "SOMEBODY ELSE IS DEPLOYING". The Phase 9a review's
+# F3 is the reason there is a lock at all; the reason it is HERE rather than
+# after the checks is a CI run that failed the test for it.
+#
+# A `deploy.sh` that dies at its first docker call — no daemon on the runner,
+# no env file, the wrong container name — used to hold the lock for a few
+# milliseconds and release it on the way out. On a machine where the first
+# check fails fast, two runs started together therefore BOTH proceeded: the
+# second took the lock the first had already dropped. The window was small and
+# the failure it left is the one F3 describes, so it is not a window worth
+# having. Taken here, the lock is held for every line of the run that can do
+# anything, including the ones that refuse.
+#
+# The tag check stays in front of it because it costs nothing, touches nothing,
+# and a run that is about to exit 64 has no business holding a lock the
+# operator's next attempt needs.
+mkdir -p "$STATE_DIR" 2>/dev/null || {
+  echo "refusing: $STATE_DIR could not be created." >&2
+  echo "   It holds current_tag, previous_tag and deploy.log, and it is where the" >&2
+  echo "   one-deploy-at-a-time lock lives. On the host it is /srv/foundit/state;" >&2
+  echo "   elsewhere, set FOUNDIT_BASE to a directory this account can write to." >&2
+  exit 78
+}
+foundit_take_deploy_lock "$STATE_DIR"
+
+# --- 1d. sudo, and the compose command it builds ---------------------------
+#
+# `foundit_set_sudo` ASKS THE DAEMON — `docker info`, then `sudo -n true` — so
+# it is the first thing in this script that talks to anything, and it is after
+# the lock for that reason.
+#
+# `$SUDO` in front, because compose is the thing that READS app.env and
+# embed.env, and those are root-only. On this development machine SUDO is
+# empty and this is `docker compose` exactly as typed.
+foundit_set_sudo
+DC=($SUDO docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
 
 # --- 1c. the env files -----------------------------------------------------
 #
@@ -160,19 +195,7 @@ for name in app.env embed.env migrate.env; do
   fi
 done
 
-mkdir -p "$STATE_DIR" "$BACKUP_DIR"
-
-# --- 1d. one deploy at a time ----------------------------------------------
-#
-# BEFORE STEP 2 AND BEFORE ANYTHING IS READ OR WRITTEN. The Phase 9a review's
-# F3: two concurrent runs of two good tags left the site running an image from
-# two deploys ago while `current_tag` named a third, took two pre-migration
-# dumps a second apart, and made the following `rollback.sh` a no-op that
-# reported success. common.sh has the full account and the lock itself.
-#
-# The second run exits 75 having touched nothing: no dump, no migration, no
-# `docker` call at all.
-foundit_take_deploy_lock "$STATE_DIR"
+mkdir -p "$BACKUP_DIR"
 
 PREV_TAG="$(cat "$STATE_DIR/current_tag" 2>/dev/null || echo "")"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -50,9 +50,16 @@
 # snapshot rather than beside it: a search during the dump would otherwise skew
 # them by one and bring the same false alarm back in a rarer, harder form.
 #
-# NO CREDENTIAL IS EVER PRINTED. The settings come from an env file this script
-# sources and never echoes; the S3 secret goes to the AWS CLI through the
-# environment; and every path printed below is a basename.
+# NO CREDENTIAL IS EVER PRINTED, AND THAT NOW COVERS WHAT THE TOOLS PRINT. The
+# settings come from an env file this script sources and never echoes; the S3
+# secret goes to the AWS CLI through the environment; every path printed below
+# is a basename — and every call to `aws` or `age` goes through
+# `foundit_quiet_run`, because the scripts being careful is not enough when the
+# TOOL quotes its own arguments back. A CI run caught the AWS CLI reporting an
+# unreachable bucket as "SSL validation failed for
+# https://<account id>.r2.cloudflarestorage.com/<bucket>?list-type=2": the
+# account id, the endpoint and the bucket, on stderr, out of a cron job. See
+# server/common.sh.
 #
 # AND IT RECORDS ITS OWN FAILURES (F9). `infra.record_ops_event('backup', …)`
 # used to be the last line of the script and therefore ran only on success,
@@ -75,6 +82,10 @@ DB_SUPERUSER="${FOUNDIT_DB_SUPERUSER:-postgres}"
 # development catalogue and high enough to catch an empty file.
 MIN_BYTES="${BACKUP_MIN_BYTES:-20000}"
 AWSCLI="${FOUNDIT_AWSCLI:-aws}"
+# Where a failing tool's own words go instead of to the terminal. Mode 0600,
+# beside the deploy state, and only its PATH is ever printed. See
+# `foundit_quiet_run` in server/common.sh for what this is defending against.
+FOUNDIT_TOOL_LOG="${FOUNDIT_TOOL_LOG:-${FOUNDIT_BASE:-/srv/foundit}/state/tool-errors.log}"
 
 # shellcheck source=server/common.sh
 . "$HERE/../common.sh"
@@ -260,7 +271,11 @@ tar -C "$WORK" -cf "$BUNDLE" \
 ARTEFACT="$BUNDLE"
 if [ -n "${DUMP_AGE_RECIPIENT:-}" ]; then
   command -v age >/dev/null 2>&1 || fail "DUMP_AGE_RECIPIENT is set but \`age\` is not installed"
-  age -r "$DUMP_AGE_RECIPIENT" < "$BUNDLE" > "${BUNDLE}.age" \
+  # THROUGH THE WRAPPER, like every other tool here: age's own complaint about
+  # a malformed recipient quotes the recipient, and while a public half is not
+  # a secret it is not this script's to print either.
+  foundit_quiet_run "encrypting the archive" \
+    age -r "$DUMP_AGE_RECIPIENT" -o "${BUNDLE}.age" "$BUNDLE" \
     || fail "age could not encrypt the archive"
   ARTEFACT="${BUNDLE}.age"
   say "encrypted to a recipient whose private half is not on this machine"
@@ -304,9 +319,14 @@ elif [ -n "${BACKUP_S3_BUCKET:-}" ]; then
   command -v "$AWSCLI" >/dev/null 2>&1 || fail "$AWSCLI is not installed"
   # The key and the secret reach the CLI through the environment, which
   # `set -a` above already exported. They are never arguments.
-  "$AWSCLI" s3 cp "$ARTEFACT" \
-    "s3://${BACKUP_S3_BUCKET}/${BACKUP_S3_PREFIX:-logical-dumps}/${NAME}" \
-    --endpoint-url "$BACKUP_S3_ENDPOINT" >/dev/null \
+  #
+  # AND ITS STDERR NEVER REACHES THE TERMINAL. The CLI quotes the URL it could
+  # not reach — endpoint, account id and bucket in one line — and this runs
+  # from cron. `foundit_quiet_run` in server/common.sh has the whole account.
+  foundit_quiet_run "uploading the archive" \
+    "$AWSCLI" s3 cp "$ARTEFACT" \
+      "s3://${BACKUP_S3_BUCKET}/${BACKUP_S3_PREFIX:-logical-dumps}/${NAME}" \
+      --endpoint-url "$BACKUP_S3_ENDPOINT" >/dev/null \
     || fail "the upload failed"
   say "uploaded ${NAME} to the bucket"
 else

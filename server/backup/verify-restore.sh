@@ -53,6 +53,13 @@
 # 0019's comment on that column says "never a stack trace and never a path with
 # a credential in it", and the dashboard's Backups panel renders it to a person.
 #
+# AND WHAT IT PRINTS. Same rule, and it has to cover the TOOLS as well as this
+# script: the AWS CLI reports an unreachable bucket by quoting the URL, which
+# is the account id, the endpoint and the bucket in one line on stderr. A CI
+# run caught exactly that. Every `aws` and `age` call here goes through
+# `foundit_quiet_run` (server/common.sh), which passes stdout through, captures
+# stderr, and prints a sentence and an exit code instead.
+#
 # THE KIND IS `restore_test`, WITH AN UNDERSCORE. 0019's check constraint names
 # exactly three kinds — 'backup', 'restore_test', 'update_check' — so a
 # hyphenated spelling is not a different label, it is a failed INSERT.
@@ -75,6 +82,10 @@ OWNER="${FOUNDIT_DB_OWNER:-foundit_owner}"
 MAX_AGE_HOURS="${RESTORE_MAX_AGE_HOURS:-30}"
 MIN_PUBLISHED="${RESTORE_MIN_PUBLISHED:-1}"
 AWSCLI="${FOUNDIT_AWSCLI:-aws}"
+# Where a failing tool's own words go instead of to the terminal. Mode 0600,
+# beside the deploy state, and only its PATH is ever printed. See
+# `foundit_quiet_run` in server/common.sh.
+FOUNDIT_TOOL_LOG="${FOUNDIT_TOOL_LOG:-${FOUNDIT_BASE:-/srv/foundit}/state/tool-errors.log}"
 
 STAMP="$(date -u +%FT%TZ)"
 foundit_set_sudo
@@ -145,11 +156,24 @@ if [ -n "${BACKUP_REPO_PATH:-}" ]; then
   ARTEFACT="$WORK/$(basename "$NEWEST")"
 elif [ -n "${BACKUP_S3_BUCKET:-}" ]; then
   PREFIX="${BACKUP_S3_PREFIX:-logical-dumps}"
-  KEY="$("$AWSCLI" s3 ls "s3://${BACKUP_S3_BUCKET}/${PREFIX}/" \
+  # EVERY `aws` CALL GOES THROUGH THE WRAPPER, AND A CI RUN IS WHY. The CLI
+  # reports an unreachable bucket by quoting the URL — "SSL validation failed
+  # for https://<account id>.r2.cloudflarestorage.com/<bucket>?list-type=2" —
+  # so its stderr carries the endpoint, the account id and the bucket name out
+  # of a cron job and into a log. tests/deploy.test.mjs greps every line of
+  # this script's output for exactly those values; it passed on a laptop with
+  # no `aws` installed and failed on a runner that has one.
+  #
+  # `foundit_quiet_run` passes STDOUT through — this listing is parsed — and
+  # captures stderr. server/common.sh has the account.
+  KEY="$(foundit_quiet_run "listing the backup bucket" \
+          "$AWSCLI" s3 ls "s3://${BACKUP_S3_BUCKET}/${PREFIX}/" \
           --endpoint-url "$BACKUP_S3_ENDPOINT" | sort | tail -1 | awk '{print $4}')"
   [ -n "$KEY" ] || fail "the backup bucket has nothing under its prefix"
-  "$AWSCLI" s3 cp "s3://${BACKUP_S3_BUCKET}/${PREFIX}/${KEY}" "$WORK/$KEY" \
-    --endpoint-url "$BACKUP_S3_ENDPOINT" >/dev/null || fail "could not download the newest backup"
+  foundit_quiet_run "downloading the newest backup" \
+    "$AWSCLI" s3 cp "s3://${BACKUP_S3_BUCKET}/${PREFIX}/${KEY}" "$WORK/$KEY" \
+    --endpoint-url "$BACKUP_S3_ENDPOINT" >/dev/null \
+    || fail "could not download the newest backup"
   ARTEFACT="$WORK/$KEY"
 else
   fail "neither a filesystem repository nor a bucket is configured"
@@ -185,7 +209,11 @@ if [ "${ARTEFACT##*.}" = "age" ]; then
   # encrypted logical dump is verified by hand at the quarterly drill.
   # docs/launch-runbook.md step 2 carries that distinction.
   [ -n "${DUMP_AGE_IDENTITY:-}" ] || fail "the newest artefact is encrypted and no identity is configured"
-  age -d -i "$DUMP_AGE_IDENTITY" < "$ARTEFACT" > "${ARTEFACT%.age}" || fail "could not decrypt"
+  # Through the wrapper: `age`'s own failure quotes the identity FILE's path,
+  # and that path is the one thing on this machine that must not be advertised.
+  foundit_quiet_run "decrypting the artefact" \
+    age -d -i "$DUMP_AGE_IDENTITY" -o "${ARTEFACT%.age}" "$ARTEFACT" \
+    || fail "could not decrypt"
   ARTEFACT="${ARTEFACT%.age}"
 fi
 tar -C "$WORK" -xf "$ARTEFACT" || fail "the artefact is not a readable archive"

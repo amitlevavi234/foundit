@@ -37,11 +37,6 @@ DB_NAME="${FOUNDIT_DB_NAME:-foundit}"
 HEALTH_URL="${FOUNDIT_HEALTH_URL:-http://127.0.0.1:3000/healthz}"
 
 foundit_refuse_root
-foundit_set_sudo
-
-# `$SUDO` in front for the same reason deploy.sh has one: compose is what reads
-# the root-only env file. On the development machine SUDO is empty.
-DC=($SUDO docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
 
 RESTORE_DB=""
 TAG_ARG=""
@@ -66,6 +61,29 @@ if ! foundit_tag_ok "$TARGET"; then
   exit 64
 fi
 
+# --- the lock, before the environment and before `docker info` -------------
+#
+# THE SAME LOCK A DEPLOY TAKES, not a second one, and at the same point in the
+# script for the same reason. The Phase 9a review's F3 was two deploys racing;
+# a rollback racing a deploy is the same collision with a worse ending, because
+# the rollback is the thing somebody reaches for when the machine is already
+# having a bad day. It is taken before the env-file checks and before
+# `foundit_set_sudo` talks to the daemon, so a run that dies at its first
+# docker call still held the lock while it did — see deploy.sh §1c.
+mkdir -p "$STATE_DIR" 2>/dev/null || {
+  echo "refusing: $STATE_DIR could not be created." >&2
+  echo "   It holds the tags this script reads and the lock it takes. On the host" >&2
+  echo "   it is /srv/foundit/state; elsewhere, set FOUNDIT_BASE." >&2
+  exit 78
+}
+foundit_take_deploy_lock "$STATE_DIR"
+
+# `foundit_set_sudo` asks the daemon, so it is after the lock. `$SUDO` in front
+# for the same reason deploy.sh has one: compose is what reads the root-only
+# env file. On the development machine SUDO is empty.
+foundit_set_sudo
+DC=($SUDO docker compose --project-directory "$(dirname "$COMPOSE_FILE")" -f "$COMPOSE_FILE")
+
 if ! foundit_file_exists "$ENV_DIR/app.env"; then
   echo "refusing: $ENV_DIR/app.env does not exist." >&2
   exit 78
@@ -80,15 +98,6 @@ if foundit_modes_enforced; then
 else
   warn "this filesystem does not enforce file modes, so the 0600 check is NOT being made."
 fi
-
-# --- one at a time, and the same lock a deploy takes -----------------------
-#
-# THE SAME LOCK, not a second one, and that is the point. The Phase 9a review's
-# F3 was two deploys racing; a rollback racing a deploy is the same collision
-# with a worse ending, because the rollback is the thing somebody reaches for
-# when the machine is already having a bad day. common.sh has the account.
-mkdir -p "$STATE_DIR"
-foundit_take_deploy_lock "$STATE_DIR"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 say "$(date -u +%FT%TZ) — rolling back to ${TARGET}"

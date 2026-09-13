@@ -28,12 +28,12 @@
 // ===========================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 const read = (path) => readFileSync(join(ROOT, path), 'utf8');
@@ -194,7 +194,50 @@ test('the rollback validates its tag the same way, out of one function', () => {
   }
 });
 
-test('two deploys at once: the second one touches nothing and says why', (t) => {
+/**
+ * Hold the deploy lock the way `foundit_take_deploy_lock` holds it, and give
+ * back a function that lets go.
+ *
+ * WHICH MECHANISM, DECIDED THE WAY THE SCRIPT DECIDES IT. common.sh uses
+ * `flock` where the machine has one — Linux, which is the CI runner and the
+ * host — and an atomic `mkdir` where it does not, which is Git Bash here. A
+ * test that only knew about `mkdir` would pass on this laptop by not actually
+ * taking the lock CI's deploy.sh looks at.
+ *
+ * The `flock` half has to be a live process: the kernel drops the lock when the
+ * file descriptor closes, so nothing short-lived can hold one. It prints TOOK
+ * and then sleeps, and the caller waits for that line before going on.
+ */
+async function holdDeployLock(stateDir) {
+  const dir = stateDir.replace(/\\/g, '/');
+  mkdirSync(stateDir, { recursive: true });
+
+  const hasFlock = spawnSync('bash', ['-c', 'command -v flock >/dev/null 2>&1'], {
+    encoding: 'utf8',
+  }).status === 0;
+
+  if (!hasFlock) {
+    mkdirSync(join(stateDir, '.deploy.lock'));
+    return { how: 'mkdir', release: () => rmSync(join(stateDir, '.deploy.lock'), { force: true, recursive: true }) };
+  }
+
+  const child = spawn(
+    'bash',
+    ['-c', `exec 9>"${dir}/.deploy.lock.file"; flock -n 9 || exit 3; echo TOOK; sleep 120`],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('flock did not answer in 15s')), 15_000);
+    timer.unref?.();
+    child.stdout.on('data', (chunk) => {
+      if (String(chunk).includes('TOOK')) { clearTimeout(timer); resolve(); }
+    });
+    child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`the holder exited ${code}`)); });
+  });
+  return { how: 'flock', release: () => child.kill() };
+}
+
+test('a deploy that cannot have the lock touches nothing and says why', async (t) => {
   if (!bashAvailable()) { t.skip('no bash on this machine.'); return; }
 
   // THE PHASE 9a REVIEW'S F3, and the worst thing it found in server/. Two
@@ -205,10 +248,19 @@ test('two deploys at once: the second one touches nothing and says why', (t) => 
   // `current_tag` did not name, two pre-migration dumps were taken a second
   // apart, and the next `rollback.sh` was a no-op that reported success.
   //
-  // The lock is taken BEFORE the dump, the migration and every docker call, so
-  // what this asserts is that the loser did nothing at all.
+  // THE TEST HOLDS THE LOCK ITSELF RATHER THAN RACING TWO DEPLOYS, and a CI
+  // run is why. Starting two and hoping they overlap works on a machine where
+  // a deploy takes a minute and fails on one where it takes milliseconds: on
+  // the runner there is no usable Docker daemon, so the first `deploy.sh` died
+  // at its first check and had released the lock before the second one
+  // started, and both proceeded. A test whose outcome depends on how fast the
+  // thing it is testing fails is not a test.
+  //
+  // So: take the lock, run ONE deploy, and assert it did nothing at all.
   const dir = envDirWithCanaries();
   const base = mkdtempSync(join(tmpdir(), 'foundit-lock-'));
+  const state = join(base, 'state');
+  let lock = null;
   try {
     const env = {
       ...process.env,
@@ -219,50 +271,89 @@ test('two deploys at once: the second one touches nothing and says why', (t) => 
       FOUNDIT_IMAGE_REPO: '127.0.0.1:1/nothing',
     };
 
-    // The first run is held open by a lock this test takes itself, the same
-    // way a slow deploy holds it. Starting two real deploys and hoping they
-    // overlap is a test that passes by luck.
-    const state = join(base, 'state');
-    mkdirSync(state, { recursive: true });
-    const held = spawnSync('bash', ['-c',
-      `mkdir "${state.replace(/\\/g, '/')}/.deploy.lock" 2>/dev/null && echo TOOK`], {
-      encoding: 'utf8',
-    });
-    assert.match(held.stdout, /TOOK/, 'the test could not take the lock itself');
+    lock = await holdDeployLock(state);
+    t.diagnostic(`the test holds the lock by ${lock.how}`);
 
-    const second = spawnSync('bash', [join(ROOT, 'server', 'deploy.sh'), 'sha-0000000'], {
+    const refused = spawnSync('bash', [join(ROOT, 'server', 'deploy.sh'), 'sha-0000000'], {
       encoding: 'utf8', cwd: ROOT, timeout: 120_000, env,
     });
 
-    assert.equal(second.status, 75, 'a deploy that cannot have the lock must exit 75');
-    assert.match(second.stderr, /a deploy is already running/,
+    assert.equal(refused.status, 75, 'a deploy that cannot have the lock must exit 75');
+    assert.match(refused.stderr, /a deploy is already running/,
       'and it must say so in words the operator can act on');
-    const output = `${second.stdout ?? ''}\n${second.stderr ?? ''}`;
+    const output = `${refused.stdout ?? ''}\n${refused.stderr ?? ''}`;
     assert.doesNotMatch(output, /pulling the image|pre-migration dump|applying migrations/,
-      'the second run got past the lock and started doing things');
+      'the refused run got past the lock and started doing things');
     assert.deepEqual(
       existsSync(join(base, 'backups'))
         ? readdirSync(join(base, 'backups')).filter((f) => f.startsWith('pre-'))
         : [],
       [],
-      'the second run took a pre-migration dump — the review saw two, a second apart',
+      'the refused run took a pre-migration dump — the review saw two, a second apart',
     );
-    assert.ok(!existsSync(join(state, 'current_tag')), 'the second run recorded itself');
-    assert.ok(!existsSync(join(state, 'deploy.log')), 'the second run wrote to the deploy log');
+    assert.ok(!existsSync(join(state, 'current_tag')), 'the refused run recorded itself');
+    assert.ok(!existsSync(join(state, 'deploy.log')), 'the refused run wrote to the deploy log');
+
+    // AND THE LOCK IS TAKEN BEFORE THE ENVIRONMENT AND BEFORE `docker info`.
+    // That ordering is the other half of the CI failure: with the lock behind
+    // the env-file checks, a run that refuses for any other reason releases it
+    // again within milliseconds and the window F3 describes is still open.
+    // `app.env` is present and readable here, so "it never looked" is the only
+    // thing that can produce this output.
+    assert.doesNotMatch(output, /does not exist|not 600|cannot reach the Docker daemon/,
+      'the refused run got as far as the environment before the lock stopped it');
 
     // And once the lock is released, a run gets past it — a lock nothing can
     // ever take is an outage.
-    rmSync(join(state, '.deploy.lock'), { recursive: true, force: true });
-    const third = spawnSync('bash', [join(ROOT, 'server', 'deploy.sh'), 'sha-0000000'], {
+    lock.release();
+    lock = null;
+    const after = spawnSync('bash', [join(ROOT, 'server', 'deploy.sh'), 'sha-0000000'], {
       encoding: 'utf8', cwd: ROOT, timeout: 120_000, env,
     });
-    assert.notEqual(third.status, 75, 'the lock was not released');
-    assert.match(`${third.stdout}`, /deploying sha-0000000/, 'the third run never started');
-    t.diagnostic(`second run exit=${second.status}, third run exit=${third.status}`);
+    // WHAT IT DOES NEXT DEPENDS ON THE MACHINE and must not be asserted: here
+    // it reaches the pull and fails there; on a runner with no reachable
+    // daemon it stops at `foundit_set_sudo` first. What is the same everywhere
+    // is that the lock is no longer what stopped it.
+    assert.notEqual(after.status, 75, 'the lock was not released');
+    assert.doesNotMatch(
+      `${after.stdout ?? ''}\n${after.stderr ?? ''}`,
+      /a deploy is already running/,
+      'the lock was not released',
+    );
+    t.diagnostic(`refused exit=${refused.status}, after release exit=${after.status}`);
   } finally {
+    if (lock) lock.release();
     rmSync(dir, { recursive: true, force: true });
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test('the lock is taken before the environment and before any docker call', () => {
+  // The source half of the assertion above, because the ordering is the thing
+  // and a passing run cannot prove WHERE the lock was taken, only that it was.
+  const deploy = read('server/deploy.sh').replace(/^\s*#.*$/gm, '');
+  const at = (needle) => deploy.indexOf(needle);
+
+  assert.ok(at('foundit_take_deploy_lock') > 0, 'deploy.sh must take the lock');
+  assert.ok(
+    at('foundit_take_deploy_lock') < at('foundit_set_sudo'),
+    'the lock must be taken before `foundit_set_sudo`, which runs `docker info`',
+  );
+  assert.ok(
+    at('foundit_take_deploy_lock') < at('foundit_file_exists'),
+    'the lock must be taken before the env files are looked for',
+  );
+  assert.ok(
+    at('foundit_tag_ok') < at('foundit_take_deploy_lock'),
+    'and after the tag check, which touches nothing and must not hold a lock to fail',
+  );
+
+  // rollback.sh takes the SAME lock at the same point, for the same reason.
+  const rollback = read('server/rollback.sh').replace(/^\s*#.*$/gm, '');
+  assert.ok(
+    rollback.indexOf('foundit_take_deploy_lock') < rollback.indexOf('foundit_set_sudo'),
+    'rollback.sh must take the lock before it talks to the daemon too',
+  );
 });
 
 test('the env files are checked for their MODE, not only for existing', () => {
@@ -543,26 +634,52 @@ test('a failed dump leaves a red row, not an absence', () => {
 test('they refuse without their env file, by name', (t) => {
   if (!bashAvailable()) { t.skip('no bash on this machine.'); return; }
   const missing = join(ROOT, 'no', 'such', 'dir');
+  // A WRITABLE STATE DIRECTORY, because the lock now comes before the env
+  // check and the lock lives in one. `FOUNDIT_BASE` defaults to `/srv/foundit`,
+  // which exists on the host and on neither of the machines this runs on; a
+  // deploy that cannot create its state directory refuses with its own
+  // sentence, and that is a different refusal from the one this test is about.
+  const base = mkdtempSync(join(tmpdir(), 'foundit-noenv-'));
   const runs = [
     ['server/deploy.sh', ['sha-1a2b3c4'], 78, /app\.env does not exist/],
     ['server/backup/pg-dump-offsite.sh', [], 1, /no settings file/],
     ['server/backup/verify-restore.sh', [], 1, /no settings file/],
   ];
-  for (const [script, args, code, message] of runs) {
-    const result = spawnSync('bash', [join(ROOT, script), ...args], {
+  try {
+    for (const [script, args, code, message] of runs) {
+      const result = spawnSync('bash', [join(ROOT, script), ...args], {
+        encoding: 'utf8',
+        cwd: ROOT,
+        // A CONTAINER NOTHING ANSWERS TO, so the two backup scripts' `fail` has
+        // nowhere to write its `infra.ops_events` row. Since F9 every failure
+        // records one, which is the point of F9 — and a test suite that left two
+        // rows in the development database's operations log on every run would
+        // be putting noise on the dashboard's own panel to prove a refusal that
+        // has nothing to do with recording.
+        env: { ...process.env, FOUNDIT_ENV_DIR: missing, FOUNDIT_BASE: base,
+          FOUNDIT_DB_CONTAINER: 'foundit-no-such-container' },
+      });
+      assert.equal(result.status, code, `${script} exited ${result.status}, expected ${code}`);
+      assert.match(result.stderr, message, `${script} did not say which file is missing`);
+    }
+
+    // And a state directory that cannot be created is its own refusal, said in
+    // words, rather than a bare `mkdir: Permission denied` and exit 1. A FILE
+    // as the parent, because `mkdir -p` happily creates any depth of missing
+    // directory and the only cheap way to make it fail on both machines is to
+    // put something that is not a directory in the way.
+    writeFileSync(join(base, 'a-file'), 'not a directory\n');
+    const noState = spawnSync('bash', [join(ROOT, 'server', 'deploy.sh'), 'sha-1a2b3c4'], {
       encoding: 'utf8',
       cwd: ROOT,
-      // A CONTAINER NOTHING ANSWERS TO, so the two backup scripts' `fail` has
-      // nowhere to write its `infra.ops_events` row. Since F9 every failure
-      // records one, which is the point of F9 — and a test suite that left two
-      // rows in the development database's operations log on every run would
-      // be putting noise on the dashboard's own panel to prove a refusal that
-      // has nothing to do with recording.
       env: { ...process.env, FOUNDIT_ENV_DIR: missing,
-        FOUNDIT_DB_CONTAINER: 'foundit-no-such-container' },
+        FOUNDIT_BASE: join(base, 'a-file', 'foundit') },
     });
-    assert.equal(result.status, code, `${script} exited ${result.status}, expected ${code}`);
-    assert.match(result.stderr, message, `${script} did not say which file is missing`);
+    assert.equal(noState.status, 78, 'a state directory that cannot be made must refuse, not crash');
+    assert.match(noState.stderr, /could not be created/);
+    assert.match(noState.stderr, /FOUNDIT_BASE/, 'and it must say how to point it somewhere else');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });
 
@@ -611,11 +728,56 @@ function envDirWithCanaries() {
   return dir;
 }
 
+/**
+ * A directory holding a fake `aws` and a fake `age`, to go first on PATH.
+ *
+ * THIS IS WHAT CI CAUGHT AND THIS LAPTOP COULD NOT. The canary test below runs
+ * both backup scripts against an env file full of recognisable values and
+ * greps every line of their output for each one. It passed here because there
+ * is no `aws` on this machine, so `verify-restore.sh` never got as far as
+ * running one — and failed on a runner that has the CLI installed, where it
+ * said:
+ *
+ *   aws: [ERROR]: SSL validation failed for
+ *   https://CANARY-account-id.r2.cloudflarestorage.com/canary-bucket?list-type=2
+ *
+ * The account id, the endpoint and the bucket, on stderr, from a cron job.
+ * Neither script printed any of that; the TOOL printed its own arguments back,
+ * which is a thing every one of these tools does and which no amount of care
+ * inside the script prevents on its own.
+ *
+ * So the test supplies its own. Each stand-in prints the values it was given
+ * to stderr and exits 1, which is the failure mode the runner had, and the
+ * scripts have to swallow it on both machines.
+ */
+function toolsThatSayTooMuch() {
+  const dir = mkdtempSync(join(tmpdir(), 'foundit-loud-tools-'));
+  writeFileSync(
+    join(dir, 'aws'),
+    '#!/usr/bin/env bash\n'
+      + '# A stand-in for the AWS CLI that fails the way the real one does.\n'
+      + 'echo "aws: [ERROR]: SSL validation failed for '
+      + '${BACKUP_S3_ENDPOINT}/${BACKUP_S3_BUCKET}?list-type=2 (key ${AWS_ACCESS_KEY_ID})" >&2\n'
+      + 'exit 1\n',
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    join(dir, 'age'),
+    '#!/usr/bin/env bash\n'
+      + '# A stand-in for age that quotes the recipient it was handed.\n'
+      + 'echo "age: error: malformed recipient \\"$2\\"" >&2\n'
+      + 'exit 1\n',
+    { mode: 0o755 },
+  );
+  return dir;
+}
+
 test('run with an env file full of canaries, they print none of them', (t) => {
   if (!bashAvailable()) { t.skip('no bash on this machine.'); return; }
 
   const dir = envDirWithCanaries();
   const base = mkdtempSync(join(tmpdir(), 'foundit-deploy-base-'));
+  const tools = toolsThatSayTooMuch();
   try {
     const runs = [
       // The tag refusal, which is where deploy.sh is most likely to echo what
@@ -626,8 +788,8 @@ test('run with an env file full of canaries, they print none of them', (t) => {
       ['server/deploy.sh', ['sha-0000000']],
       ['server/rollback.sh', ['sha-0000000']],
       // The backup scripts, against a bucket that does not exist and an AWS
-      // CLI that is not installed: both fail with the settings file sourced,
-      // which is exactly the moment an error message could carry one.
+      // CLI that fails loudly: both fail with the settings file sourced, which
+      // is exactly the moment an error message could carry one.
       ['server/backup/pg-dump-offsite.sh', []],
       ['server/backup/verify-restore.sh', []],
     ];
@@ -639,6 +801,10 @@ test('run with an env file full of canaries, they print none of them', (t) => {
         timeout: 120_000,
         env: {
           ...process.env,
+          // The stand-ins go FIRST, so they win over a real `aws` on a runner
+          // that has one and stand in for it on a laptop that does not. Both
+          // machines then exercise the same path.
+          PATH: `${tools}${delimiter}${process.env.PATH ?? ''}`,
           FOUNDIT_ENV_DIR: dir,
           FOUNDIT_BASE: base,
           FOUNDIT_HEALTH_TRIES: '1',
@@ -667,9 +833,43 @@ test('run with an env file full of canaries, they print none of them', (t) => {
         );
       }
     }
+
+    // AND THE STAND-INS REALLY RAN, or this test proves nothing about the path
+    // CI exercises. `verify-restore.sh` is the one that reaches `aws`: it is
+    // configured with a bucket and no filesystem repository, so its first act
+    // after loading the settings is to list it.
+    const verify = spawnSync('bash', [join(ROOT, 'server', 'backup', 'verify-restore.sh')], {
+      encoding: 'utf8',
+      cwd: ROOT,
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        PATH: `${tools}${delimiter}${process.env.PATH ?? ''}`,
+        FOUNDIT_ENV_DIR: dir,
+        FOUNDIT_BASE: base,
+        FOUNDIT_DB_CONTAINER: 'foundit-no-such-container',
+      },
+    });
+    const said = `${verify.stdout ?? ''}\n${verify.stderr ?? ''}`;
+    if (/cannot reach the Docker daemon/.test(said)) {
+      // The script stops before it ever lists a bucket. Nothing to prove here,
+      // and inventing a failure out of a machine that cannot run the step is
+      // the kind of red that teaches people to ignore reds.
+      t.diagnostic('no reachable Docker daemon, so the bucket step was not reached');
+    } else {
+      assert.match(
+        said,
+        /listing the backup bucket failed \(exit 1\)/,
+        'the AWS stand-in did not run, so this test did not exercise the path CI did:\n'
+          + said.slice(0, 400),
+      );
+    }
+    assert.doesNotMatch(said, /SSL validation failed/,
+      'the tool’s own message reached the terminal');
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(base, { recursive: true, force: true });
+    rmSync(tools, { recursive: true, force: true });
   }
 });
 

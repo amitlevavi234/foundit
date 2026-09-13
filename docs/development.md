@@ -1047,6 +1047,18 @@ running` having taken no dump, run no migration and made no `docker` call.
 where it does not, which is Git Bash here. A run killed outright on the `mkdir`
 path leaves the directory behind; the refusal says to remove it.
 
+**The lock is taken before the environment and before `docker info`, and a CI
+run is why.** It used to come after the env-file checks, which is fine on a
+machine where a deploy takes a minute and useless on one where the first check
+fails in milliseconds: on a runner with no reachable daemon the first
+`deploy.sh` died immediately and had released the lock before the second one
+started, so both proceeded. The only thing in front of the lock now is the tag
+check, which touches nothing — a run about to exit 64 has no business holding a
+lock the operator's next attempt needs. A consequence worth knowing: the state
+directory has to be creatable before anything else happens, so a `FOUNDIT_BASE`
+this account cannot write to is now its own refusal (exit 78, with the variable
+named) rather than a bare `mkdir: Permission denied`.
+
 **The exit codes now say which half failed.** 64 a bad tag, 70 the pull, 71 the
 dump, 72 a migration, 75 health never came (or another deploy holds the lock),
 **76 the app is up and the worker is not**, 77 run as root, 78 an env file is
