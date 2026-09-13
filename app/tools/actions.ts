@@ -5,6 +5,7 @@ import { revalidateTag } from 'next/cache';
 import { redirect } from 'next/navigation';
 
 import { currentUserId, deleteOwnReview, setLiked, writeReview } from '@/lib/accounts';
+import { allowReview } from '@/lib/rate-limit';
 
 /* ===========================================================================
  * Liking a tool, and reviewing one.
@@ -52,8 +53,19 @@ export async function postReview(formData: FormData): Promise<void> {
   const slug = String(formData.get('slug') ?? '');
   const back = safeBack(String(formData.get('back') ?? ''), slug);
 
-  if (!(await currentUserId())) {
+  const viewer = await currentUserId();
+  if (!viewer) {
     redirect(`/sign-in?next=${encodeURIComponent(back)}&intent=review`);
+  }
+
+  // TEN AN HOUR (research/03 §9 item 14, lib/rate-limit.ts). This path had no
+  // bound at all until Phase 9a: every post is an UPSERT that bumps
+  // `tools.rating_count` and invalidates the catalogue cache for the listing,
+  // and nothing stopped a script doing that once a second under one free
+  // account. The refusal is a sentence on the page they are already on; the
+  // listing and their existing review are untouched.
+  if (!allowReview(viewer).allowed) {
+    redirect(`${back}?review=too-many#reviews`);
   }
 
   const rating = Number.parseInt(String(formData.get('rating') ?? ''), 10);

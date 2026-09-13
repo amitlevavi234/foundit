@@ -642,18 +642,54 @@ declare r record; n integer;
 begin
   perform pg_temp.be('dev_admin');
 
-  -- Backups and Server: three kinds, none of them recorded, and nothing that
-  -- could be drawn as a zero.
+  -- Backups and Server: three kinds, always, whatever has been recorded.
   select count(*) into n from public.admin_ops_events();
   if n <> 3 then perform pg_temp.fail('the ops panel does not draw one row per kind'); end if;
 
+  -- WHAT THIS USED TO ASSERT, AND WHY IT CHANGED IN PHASE 9a. Until 9a nothing
+  -- anywhere called infra.record_ops_event, so this loop insisted that NO kind
+  -- was recorded — which was the right test for a panel built before its
+  -- writers existed, and the point of building it then was that it could say
+  -- "never recorded" in words instead of drawing a 0.
+  --
+  -- Phase 9a gave two of the three kinds a writer:
+  --   backup        server/backup/pg-dump-offsite.sh, at the end of a dump
+  --                 that has been proved readable and is over the size floor.
+  --   restore_test  server/backup/verify-restore.sh, on success AND on
+  --                 failure, so a broken backup is a red row rather than an
+  --                 absence somebody has to notice.
+  -- `update_check` still has none. That is the unattended-upgrades report and
+  -- it is a 9b step (docs/launch-runbook.md), so on any database this suite
+  -- runs against it must read as never recorded.
+  --
+  -- SO THE INVARIANT IS NO LONGER "nothing is recorded". It is the one that
+  -- was always the point: a kind with no row behind it draws NOTHING — not a
+  -- zero, not a date, not a tick — and a kind with a row draws what the row
+  -- says. That holds on a fresh CI database (nothing recorded) and on a
+  -- development one where the restore test has run (two recorded), which is
+  -- what makes it a test rather than a snapshot of one machine.
   for r in select * from public.admin_ops_events()
   loop
-    if r.recorded then
-      perform pg_temp.fail(format('%s is recorded, and nothing writes it yet', r.kind));
+    if r.kind = 'update_check' and r.recorded then
+      perform pg_temp.fail(
+        'update_check is recorded, and nothing writes it until 9b installs the '
+        || 'unattended-upgrades report');
     end if;
-    if r.ok is not null or r.at is not null then
+    if not r.recorded and (r.ok is not null or r.at is not null or r.detail is not null) then
       perform pg_temp.fail(format('%s has a value with no row behind it', r.kind));
+    end if;
+    if r.recorded and (r.ok is null or r.at is null) then
+      perform pg_temp.fail(format('%s is recorded and the panel has nothing to draw', r.kind));
+    end if;
+    -- And a detail line never carries a credential or a path. The two writers
+    -- are careful about this (verify-restore.sh sends the count table and
+    -- nothing else); this is the check that does not depend on their being
+    -- careful tomorrow.
+    if r.detail is not null and (
+         r.detail ~* '(password|secret|api[_-]?key|postgres(ql)?://|r2\.cloudflarestorage)'
+         or r.detail ~ '(^|[[:space:]])/[A-Za-z]' ) then
+      perform pg_temp.fail(
+        format('the %s detail line carries a credential or a path: %s', r.kind, left(r.detail, 80)));
     end if;
   end loop;
 

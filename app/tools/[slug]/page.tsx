@@ -140,9 +140,16 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
   const tool = await load(slug);
   if (!tool) notFound();
 
-  const raw = (await searchParams).q;
+  const search = await searchParams;
+  const raw = search.q;
   const query = (Array.isArray(raw) ? raw[0] : raw)?.trim() || null;
   const back = backTo(query);
+
+  /* The two ways posting a review can come back refused, as words rather than
+     as a status code. A Server Component cannot set one (.env.example says so
+     for the search limiter too), so the action redirects here with a marker
+     and this turns it into a sentence. */
+  const reviewNotice = (Array.isArray(search.review) ? search.review[0] : search.review) ?? null;
 
   const primary = tool.categories.find((c) => c.isPrimary) ?? tool.categories[0];
   const good = tool.flags.filter((flag) => GOOD_FOR[flag]);
@@ -517,6 +524,14 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
                 not us — and db/test/accounts_test.sql tries it as the
                 maintainer on this very tool. */}
             <ReviewForm
+              notice={
+                reviewNotice === 'too-many'
+                  ? 'You have posted a lot of reviews in the last hour. Try again shortly — '
+                    + 'nothing you wrote was lost.'
+                  : reviewNotice === 'refused'
+                    ? 'That review was not saved. Check the rating and try again.'
+                    : null
+              }
               slug={tool.slug}
               name={tool.name}
               back={here}

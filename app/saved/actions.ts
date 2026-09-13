@@ -12,6 +12,7 @@ import {
   unsaveTool,
   unshareCollection,
 } from '@/lib/accounts';
+import { allowSave } from '@/lib/rate-limit';
 
 /* ===========================================================================
  * What a person does to their own saved lists.
@@ -85,9 +86,30 @@ export async function removeSaved(formData: FormData): Promise<void> {
  * saving puts you back where you were doing it.
  */
 export async function saveToCollection(formData: FormData): Promise<void> {
-  await requireViewer();
+  const viewer = await currentUserId();
+  if (!viewer) redirect('/sign-in?next=%2Fsaved');
+
   const slug = String(formData.get('slug') ?? '');
   const back = String(formData.get('back') ?? `/tools/${slug}`);
+
+  // A HUNDRED AND TWENTY AN HOUR (lib/rate-limit.ts). Saving is the one thing
+  // people genuinely do in bursts — a page of twenty results, one at a time,
+  // twice over, is eighty — so the ceiling is generous and is still nothing at
+  // all for a script.
+  //
+  // THE REFUSAL LANDS ON /saved AND NOT ON THE PAGE THEY WERE ON, which is the
+  // opposite of what every other refusal in this codebase does, and it is a
+  // trade rather than an oversight. The save control is on `ToolCard`, which
+  // is rendered by six screens; a sentence they were returned to their own
+  // page with would have to be threaded through all six. The page about their
+  // saved lists is where "you have saved a great many things this hour"
+  // belongs anyway, and nothing was saved, so there is nothing to lose by
+  // moving. If a seventh screen ever makes that annoying, the fix is a notice
+  // in the chrome rather than six copies of this string.
+  if (!allowSave(viewer).allowed) {
+    redirect('/saved?save=too-many');
+  }
+
   let collectionId = String(formData.get('collectionId') ?? '');
 
   // "New collection…" from the save menu: make it, then save into it.

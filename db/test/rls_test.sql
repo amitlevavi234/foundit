@@ -105,6 +105,108 @@ begin
 end
 $$;
 
+-- ===========================================================================
+-- 1b. research/03 §9 items 1 and 2, WORD FOR WORD (Phase 9a, gate item 9)
+--
+-- The checklist's first two items are the two queries below, and each is
+-- required to return ZERO ROWS. They overlap with the checks above and are
+-- written out separately anyway, for three reasons:
+--
+--   * ITEM 2 IS BROADER THAN THE CHECK ABOVE. That one exempts SELECT — a
+--     read policy of `true` is how a public table is published — and exempts
+--     `search_events` by name. Item 2 exempts nothing at all. A blanket rule
+--     with a list of exceptions is only honest while somebody is reading the
+--     list, so here the list is TWO NAMES, written down, and anything else
+--     fails. A third `true` policy is then a decision somebody makes in a diff
+--     rather than a line that slips under an existing exemption.
+--
+--   * docs/launch-checklist.md cites this block as the evidence for items 1
+--     and 2, and evidence should be the thing the checklist asked for rather
+--     than something close to it.
+--
+--   * The queries in the checklist are Supabase-flavoured only in that they
+--     assume a `public` schema and row-level security. Both are true here, so
+--     these two translate with no adaptation at all — which is worth saying,
+--     because most of the other thirty-eight do not.
+--
+-- THE TWO EXCEPTIONS, AND WHY EACH IS SAFE:
+--
+--   categories.categories_read (SELECT, qual = true)
+--     The category list is the site's navigation. It is on the home page, in
+--     the footer and in /browse, for everybody, signed in or not. There is
+--     nothing in the table but a name, a slug and a sort order; a policy that
+--     narrowed it would be narrowing access to a menu.
+--
+--   search_events.search_events_insert (INSERT, with_check = true)
+--     The server writes one row per search, for everybody, including
+--     strangers. The row carries no user column and cannot be given one
+--     (0002 and db/test/search_events_test.sql), so an unconditional INSERT
+--     grants the ability to add an unattributable row to an aggregate — and
+--     the SELECT side of the same table is admin-only, which is the half that
+--     matters. Making this conditional would mean conditioning it on an
+--     identity, which is precisely the join this product does not make.
+-- ===========================================================================
+do $$
+declare bad text;
+begin
+  -- ITEM 1: "RLS is enabled on every table in public." Zero rows.
+  select string_agg(tablename, ', ') into bad
+  from pg_tables
+  where schemaname = 'public' and rowsecurity = false;
+  if bad is not null then
+    perform pg_temp.fail('research/03 §9 item 1 — rowsecurity = false on: ' || bad);
+  end if;
+
+  -- ITEM 2: "Every RLS-enabled table has at least one policy..."
+  select string_agg(c.relname, ', ') into bad
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity
+    and not exists (select 1 from pg_policies p
+                     where p.schemaname = 'public' and p.tablename = c.relname);
+  if bad is not null then
+    -- A table with row-level security ON and NO POLICY denies everything to
+    -- everybody except a superuser. That is safe and almost never intended:
+    -- it is what a half-finished migration leaves behind, and it fails as a
+    -- silently empty page rather than as an error.
+    perform pg_temp.fail(
+      'research/03 §9 item 2 — row-level security is on with no policy at all on: ' || bad);
+  end if;
+
+  -- ITEM 2, second half: "...and none of them is `true`", with the two named
+  -- exceptions above and no others.
+  select string_agg(format('%s.%s (%s)', tablename, policyname, cmd), ', ') into bad
+  from pg_policies
+  where schemaname = 'public'
+    and (qual = 'true' or with_check = 'true')
+    and not (tablename = 'categories'    and policyname = 'categories_read')
+    and not (tablename = 'search_events' and policyname = 'search_events_insert');
+  if bad is not null then
+    perform pg_temp.fail(
+      'research/03 §9 item 2 — a policy evaluates to true and is not one of the two '
+      || 'exceptions named in db/test/rls_test.sql: ' || bad);
+  end if;
+
+  -- And the exceptions must still BE there. A test whose whole content is an
+  -- exemption list passes trivially the day somebody deletes the thing it
+  -- exempts and replaces it with something else.
+  if not exists (select 1 from pg_policies
+                  where schemaname = 'public' and tablename = 'categories'
+                    and policyname = 'categories_read' and qual = 'true') then
+    perform pg_temp.fail(
+      'categories_read is no longer the public read policy this file exempts — '
+      || 'check whether the exemption list is still describing this schema');
+  end if;
+  if not exists (select 1 from pg_policies
+                  where schemaname = 'public' and tablename = 'search_events'
+                    and policyname = 'search_events_insert' and with_check = 'true') then
+    perform pg_temp.fail(
+      'search_events_insert is no longer the unconditional insert this file exempts — '
+      || 'check whether the exemption list is still describing this schema');
+  end if;
+end
+$$;
+
 -- The application must not connect as a role that ignores all of the above.
 do $$
 declare r record;

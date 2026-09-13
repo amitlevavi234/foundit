@@ -49,6 +49,15 @@ export interface ReviewFormProps {
   signedIn: boolean;
   google: boolean;
   email: boolean;
+  /**
+   * One sentence when the last attempt came back refused, or null.
+   *
+   * It is a PROP AND NOT A LOOKUP because a Server Component cannot set a
+   * status code: `postReview` redirects to this page with a marker in the
+   * query and the page turns that into words. The same limitation .env.example
+   * records for the search limiter answering 200 rather than 429.
+   */
+  notice?: string | null;
 }
 
 const STAR_WORDS = [
@@ -59,7 +68,9 @@ const STAR_WORDS = [
   'Solved it completely',
 ];
 
-export function ReviewForm({ slug, name, back, mine, signedIn, google, email }: ReviewFormProps) {
+export function ReviewForm({
+  slug, name, back, mine, signedIn, google, email, notice = null,
+}: ReviewFormProps) {
   if (!signedIn) {
     return (
       <div
@@ -90,6 +101,16 @@ export function ReviewForm({ slug, name, back, mine, signedIn, google, email }: 
     >
       <input type="hidden" name="slug" value={slug} />
       <input type="hidden" name="back" value={back} />
+
+      {notice ? (
+        <p
+          role="status"
+          className="muted"
+          style={{ margin: 0, fontSize: 'var(--t-body-sm)', color: 'var(--coral)' }}
+        >
+          {notice}
+        </p>
+      ) : null}
 
       <div>
         <h3 className="h3" style={{ margin: '0 0 4px' }}>

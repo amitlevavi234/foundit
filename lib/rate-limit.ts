@@ -194,6 +194,42 @@ export const DEFAULT_EMBEDDING_TOKENS_PER_DAY = 1_500_000;
 export const DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR = 30;
 
 /**
+ * Writing a review, and saving a tool. Phase 9a, gate item 7.
+ *
+ * THE TWO WRITE PATHS THAT HAD NO BOUND AT ALL. Every other one in this file
+ * was added when something went wrong; these two were simply never asked
+ * about, and research/03 §9 item 14 names reviewing outright ("review 10/hour
+ * per user"). Neither is about money — a review costs one row and a save costs
+ * one row, and no paid call is made by either — and neither is about the
+ * catalogue in the way publishing is. They are about what a script with a free
+ * account can do to a PAGE.
+ *
+ *   REVIEWS — ten an hour, per account, which is research/03's number. One
+ *   person writing eleven considered reviews in an hour is not a thing that
+ *   happens; a script rewriting one review a second is, and each rewrite is an
+ *   UPSERT that bumps `tools.rating_count` and invalidates the catalogue cache
+ *   for that listing. The refusal is a sentence on the page they are on and
+ *   the review they typed is still in the form.
+ *
+ *   SAVES — one hundred and twenty an hour, per account. Deliberately
+ *   generous, because saving is the one thing a person genuinely does in
+ *   bursts: a page of twenty results, saved one by one, twice, is eighty. What
+ *   it bounds is `tools.save_count` and `collection_items`, neither of which
+ *   anything orders on, and a thousand saves an hour from one account.
+ *
+ * BOTH ARE PER ACCOUNT AND NOT PER ADDRESS, and that is the honest weakness:
+ * accounts are free. The per-address half is what publishing has and these do
+ * not, because a review and a save both already require a signed-in identity
+ * that the database checks, where publishing's damage is to a shared
+ * catalogue. The ceiling that survives a restart is the same one it is for
+ * reviews everywhere else: the partial unique index that allows one live
+ * review per person per tool (0001), which a script cannot get past however
+ * many times it posts.
+ */
+export const DEFAULT_REVIEWS_PER_ACCOUNT_PER_HOUR = 10;
+export const DEFAULT_SAVES_PER_ACCOUNT_PER_HOUR = 120;
+
+/**
  * The two limits on asking for a 6-digit sign-in code, from research/09 §6.
  *
  * They defend different things and both are needed.
@@ -316,6 +352,8 @@ export interface Limits {
   toolsPerAccountPerDay: number;
   toolsPerAddressPerHour: number;
   editsPerAccountPerHour: number;
+  reviewsPerAccountPerHour: number;
+  savesPerAccountPerHour: number;
   opensPerVisitorPerHour: number;
   opensPerDay: number;
 }
@@ -362,6 +400,14 @@ export function limits(): Limits {
     editsPerAccountPerHour: positiveInt(
       process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR,
       DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
+    ),
+    reviewsPerAccountPerHour: positiveInt(
+      process.env.MAX_REVIEWS_PER_ACCOUNT_PER_HOUR,
+      DEFAULT_REVIEWS_PER_ACCOUNT_PER_HOUR,
+    ),
+    savesPerAccountPerHour: positiveInt(
+      process.env.MAX_SAVES_PER_ACCOUNT_PER_HOUR,
+      DEFAULT_SAVES_PER_ACCOUNT_PER_HOUR,
     ),
     opensPerVisitorPerHour: positiveInt(
       process.env.MAX_OPENS_PER_VISITOR_PER_HOUR,
@@ -635,6 +681,13 @@ declare global {
          */
         edited: TokenBuckets;
         /**
+         * Reviewing and saving. A third hourly instance, for the same reason
+         * `edited` is a second one: one map, one window, and a sweep of one
+         * cannot discard another's buckets. The two share it because they
+         * share a window, and are told apart by their key prefix.
+         */
+        wrote: TokenBuckets;
+        /**
          * Outbound clicks, counted globally per day. The per-visitor half
          * lives in `buckets`, which is already hourly and already keyed on a
          * salted hash of the address; this is the backstop a per-visitor
@@ -660,6 +713,7 @@ function state() {
     circuit: new RefusalCircuit(),
     published: new TokenBuckets(undefined, 50_000, DAY_MS),
     edited: new TokenBuckets(),
+    wrote: new TokenBuckets(),
     opens: new DailyCap(),
     rerankCapAnnounced: false,
   };
@@ -677,6 +731,11 @@ function state() {
   // here beside this paragraph.
   const s = globalThis.__founditLimiter;
   s.opens ??= new DailyCap();
+  // Phase 9a's two write paths, added after that object first existed. Same
+  // paragraph, same reason: in development the limiter outlives the module, so
+  // the first request after this field was added would find a limiter without
+  // one and throw out of a Server Action.
+  s.wrote ??= new TokenBuckets();
   return s;
 }
 
@@ -938,6 +997,39 @@ export function allowEdit(accountId: string): EditAllowance {
   const taken = state().edited.take(
     visitorKey(`edit-account:${accountId.trim()}`),
     limits().editsPerAccountPerHour,
+  );
+  return { allowed: taken.allowed, retryAfterSeconds: taken.retryAfterSeconds };
+}
+
+/**
+ * May this account post a review right now?
+ *
+ * Ten an hour, per account, from research/03 §9 item 14. The account id is
+ * hashed with the per-process salt on the way in and the string is dropped,
+ * exactly like every other bucket here, so this cannot become a record of who
+ * reviewed what and when — which matters more here than anywhere else in this
+ * file, because a review is a public thing attached to a person.
+ */
+export function allowReview(accountId: string): EditAllowance {
+  const taken = state().wrote.take(
+    visitorKey(`review-account:${accountId.trim()}`),
+    limits().reviewsPerAccountPerHour,
+  );
+  return { allowed: taken.allowed, retryAfterSeconds: taken.retryAfterSeconds };
+}
+
+/**
+ * May this account save a tool right now?
+ *
+ * A hundred and twenty an hour. Saving is the one thing people genuinely do in
+ * bursts — a page of twenty results, saved one at a time, twice over, is
+ * eighty — so the number is generous on purpose and still nothing at all for a
+ * script. Same map, same salt, same hashing as everything above.
+ */
+export function allowSave(accountId: string): EditAllowance {
+  const taken = state().wrote.take(
+    visitorKey(`save-account:${accountId.trim()}`),
+    limits().savesPerAccountPerHour,
   );
   return { allowed: taken.allowed, retryAfterSeconds: taken.retryAfterSeconds };
 }

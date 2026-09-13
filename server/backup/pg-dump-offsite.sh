@@ -140,7 +140,25 @@ else
   say "retention on the bucket is a lifecycle rule, not this script (research/11 §5.3)"
 fi
 
-# --- 8. and only now ------------------------------------------------------
+# --- 8. record it, and only now -------------------------------------------
+#
+# `infra.record_ops_event('backup', …)` is what the dashboard's Backups panel
+# reads (db/migrations/0019_admin_dashboard.sql). Before Phase 9a nothing
+# called it and the panel said "never recorded", honestly; this is the first of
+# its two writers, and server/backup/verify-restore.sh is the other.
+#
+# THE DETAIL LINE IS A SIZE AND A TIMESTAMP. Never the repository, never the
+# endpoint, never a path — 0019's comment on that column asks for "one short
+# sentence for a person… never a path with a credential in it", and the panel
+# renders it to one. db/test/admin_test.sql greps every detail line for a
+# credential shape and for a leading path, so this is checked rather than
+# promised.
+printf "select infra.record_ops_event('backup', true, \$d\$logical dump, %s bytes, %s\$d\$);\n" \
+  "$SIZE" "$STAMP" \
+  | $SUDO docker exec -i -u postgres "$DB_CONTAINER" \
+      psql -v ON_ERROR_STOP=1 -qXAt -d "$DB_NAME" > /dev/null \
+  || say "the dump succeeded but the ops_events row could not be written"
+
 say "OK ${STAMP} size=${SIZE}"
 if [ -n "${BACKUP_PING_URL:-}" ]; then
   curl -fsS -m 20 --retry 3 "$BACKUP_PING_URL" > /dev/null || true

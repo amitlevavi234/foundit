@@ -213,6 +213,25 @@ const OPS_LABEL: Record<string, string> = {
   update_check: 'Last update check',
 };
 
+/**
+ * What writes each kind, so that "never recorded" says WHY rather than just
+ * that. Two of the three got a writer in Phase 9a; the third is a 9b step, and
+ * a panel that said "Phase 9's jobs will" about all three would be wrong about
+ * two of them from the day the first backup ran.
+ */
+const OPS_WRITER: Record<string, string> = {
+  backup:
+    'server/backup/pg-dump-offsite.sh writes this at the end of a nightly dump it has proved '
+    + 'readable. Until one runs there is no figure here to show.',
+  restore_test:
+    'server/backup/verify-restore.sh writes this every time it restores the newest backup and '
+    + 'counts the rows — on failure as well as on success. Until one runs there is no figure '
+    + 'here to show.',
+  update_check:
+    'Nothing writes this yet. The unattended-upgrades report is a 9b step '
+    + '(docs/launch-runbook.md), and until it is installed there is no figure here to show.',
+};
+
 function OpsRow({ event }: { event: OpsEvent }) {
   const label = OPS_LABEL[event.kind] ?? event.kind;
   if (!event.recorded) {
@@ -220,7 +239,7 @@ function OpsRow({ event }: { event: OpsEvent }) {
       <Stat
         value="Never recorded"
         label={label}
-        sub="Nothing writes this yet. Phase 9's jobs will, and until one of them runs there is no figure here to show."
+        sub={OPS_WRITER[event.kind] ?? 'Nothing writes this yet.'}
         unrecorded
       />
     );
@@ -560,10 +579,15 @@ export default async function AdminDashboard() {
             ))}
           </div>
           <p className="admnote">
-            A red row here outranks everything else on this page (§10). There are none, and there
-            are none because <strong>nothing writes them yet</strong>: the table is built and
-            waiting, the writer is the owner&rsquo;s and Phase 9&rsquo;s jobs are what call it.
-            Until one does, every row above says so in words rather than showing a date.
+            <strong>A red row here outranks everything else on this page</strong> (§10). Two of
+            these three have a writer since Phase 9a — the nightly dump and the restore test that
+            takes the newest backup, rebuilds it into a scratch database and compares every
+            table&rsquo;s row count with the source. Both write here whether they succeed or fail,
+            so a broken backup is a red row rather than an absence somebody has to notice. The
+            update check has no writer until 9b installs it, and until then it says so in words
+            rather than showing a date. Nothing on this page can write any of them: the function
+            is granted to the schema owner alone, and a dashboard that could write its own
+            &ldquo;last backup succeeded&rdquo; row would be a dashboard nobody should believe.
           </p>
         </Section>
 

@@ -27,6 +27,8 @@ import {
   DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_RERANK_CALLS_PER_DAY,
+  DEFAULT_REVIEWS_PER_ACCOUNT_PER_HOUR,
+  DEFAULT_SAVES_PER_ACCOUNT_PER_HOUR,
   DEFAULT_SEARCHES_PER_IP_PER_HOUR,
   DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY,
   DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
@@ -36,6 +38,9 @@ import {
   allowEdit,
   allowOutboundOpen,
   allowPublish,
+  allowReview,
+  allowSave,
+  allowSearch,
   allowSignInCode,
   limits,
   mayEmbedTokens,
@@ -212,6 +217,8 @@ test('the limits come from the environment, with the documented defaults', () =>
     MAX_TOOLS_PER_ACCOUNT_PER_DAY: process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY,
     MAX_TOOLS_PER_ADDRESS_PER_HOUR: process.env.MAX_TOOLS_PER_ADDRESS_PER_HOUR,
     MAX_EDITS_PER_ACCOUNT_PER_HOUR: process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR,
+    MAX_REVIEWS_PER_ACCOUNT_PER_HOUR: process.env.MAX_REVIEWS_PER_ACCOUNT_PER_HOUR,
+    MAX_SAVES_PER_ACCOUNT_PER_HOUR: process.env.MAX_SAVES_PER_ACCOUNT_PER_HOUR,
     MAX_OPENS_PER_VISITOR_PER_HOUR: process.env.MAX_OPENS_PER_VISITOR_PER_HOUR,
     MAX_OPENS_PER_DAY: process.env.MAX_OPENS_PER_DAY,
   };
@@ -231,6 +238,8 @@ test('the limits come from the environment, with the documented defaults', () =>
       toolsPerAccountPerDay: DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY,
       toolsPerAddressPerHour: DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
       editsPerAccountPerHour: DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
+      reviewsPerAccountPerHour: DEFAULT_REVIEWS_PER_ACCOUNT_PER_HOUR,
+      savesPerAccountPerHour: DEFAULT_SAVES_PER_ACCOUNT_PER_HOUR,
       opensPerVisitorPerHour: DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
       opensPerDay: DEFAULT_OPENS_PER_DAY,
     });
@@ -943,5 +952,221 @@ test('the beacon route answers 204 to everything and reads no cookie', () => {
     actions,
     /export async function recordOpen/,
     'the Server Action whose id was in the public client bundle is gone',
+  );
+});
+
+/* ===========================================================================
+ * Phase 9a — every path, exceeded, with its refusal
+ *
+ * Gate item 7 asks for one test per path that exceeds the limit and pastes the
+ * refusal. The limits above are each tested where they were added and for the
+ * reason they were added; this section is the one place that walks the whole
+ * list at once, so a path added in a later phase with no bound at all has an
+ * obvious place to fail.
+ *
+ * Each one sets the ceiling low, spends it, and asserts on the refusal — not
+ * only that it came, but that it says how long to wait and that it belongs to
+ * one visitor or one account rather than to everybody.
+ *
+ * `t.diagnostic` prints the refusal, so the run itself is the evidence.
+ * ======================================================================== */
+
+/** Set an environment variable for the length of one call, and put it back. */
+function withEnv(name, value, fn) {
+  const before = process.env[name];
+  try {
+    process.env[name] = value;
+    return fn();
+  } finally {
+    if (before === undefined) delete process.env[name];
+    else process.env[name] = before;
+  }
+}
+
+test('PATH 1 of 7 — searching: the one past the ceiling is refused', (t) => {
+  withEnv('MAX_SEARCHES_PER_IP_PER_HOUR', '4', () => {
+    const who = `203.0.113.${Math.floor(Math.random() * 200) + 1}`;
+    for (let i = 0; i < 4; i += 1) {
+      assert.equal(allowSearch(who).allowed, true, `search ${i + 1} of 4`);
+    }
+    const refused = allowSearch(who);
+    assert.equal(refused.allowed, false, 'the fifth search is refused');
+    assert.ok(refused.retryAfterSeconds > 0, 'and it says how long to wait');
+    t.diagnostic(
+      `search refused: allowed=${refused.allowed} retryAfterSeconds=${refused.retryAfterSeconds}`,
+    );
+    assert.equal(allowSearch('198.51.100.7').allowed, true, 'a different visitor is unaffected');
+  });
+});
+
+test('PATH 2 of 7 — adding a tool: the one past the daily ceiling is refused', (t) => {
+  withEnv('MAX_TOOLS_PER_ACCOUNT_PER_DAY', '3', () => {
+    const who = `publish-${Math.random()}`;
+    const where = `203.0.113.${Math.floor(Math.random() * 200) + 1}`;
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(allowPublish(who, where).allowed, true, `publish ${i + 1} of 3`);
+    }
+    const refused = allowPublish(who, where);
+    assert.equal(refused.allowed, false, 'the fourth publish in a day is refused');
+    assert.equal(refused.refusedBy, 'account', 'and it knows which ceiling refused it');
+    assert.ok(refused.retryAfterSeconds > 0);
+    t.diagnostic(
+      `publish refused: refusedBy=${refused.refusedBy} `
+        + `retryAfterSeconds=${refused.retryAfterSeconds}`,
+    );
+  });
+});
+
+test('PATH 3 of 7 — editing a listing: the one past the hourly ceiling is refused', (t) => {
+  withEnv('MAX_EDITS_PER_ACCOUNT_PER_HOUR', '3', () => {
+    const who = `edit-${Math.random()}`;
+    for (let i = 0; i < 3; i += 1) assert.equal(allowEdit(who).allowed, true);
+    const refused = allowEdit(who);
+    assert.equal(refused.allowed, false, 'the fourth edit in an hour is refused');
+    t.diagnostic(`edit refused: retryAfterSeconds=${refused.retryAfterSeconds}`);
+  });
+});
+
+test('PATH 4 of 7 — reviewing: the eleventh in an hour is refused', (t) => {
+  assert.equal(DEFAULT_REVIEWS_PER_ACCOUNT_PER_HOUR, 10, 'research/03 §9 item 14 says ten');
+  withEnv('MAX_REVIEWS_PER_ACCOUNT_PER_HOUR', '3', () => {
+    const who = `review-${Math.random()}`;
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(allowReview(who).allowed, true, `review ${i + 1} of 3`);
+    }
+    const refused = allowReview(who);
+    assert.equal(refused.allowed, false, 'the fourth review in an hour is refused');
+    assert.ok(refused.retryAfterSeconds > 0, 'and it says how long to wait');
+    assert.ok(refused.retryAfterSeconds <= 60 * 60, 'which is inside the hour');
+    t.diagnostic(`review refused: retryAfterSeconds=${refused.retryAfterSeconds}`);
+    assert.equal(allowReview(`${who}-other`).allowed, true, 'one account cannot lock out another');
+  });
+});
+
+test('PATH 5 of 7 — saving: the one past the hourly ceiling is refused', (t) => {
+  assert.equal(DEFAULT_SAVES_PER_ACCOUNT_PER_HOUR, 120, 'generous, because saving comes in bursts');
+  withEnv('MAX_SAVES_PER_ACCOUNT_PER_HOUR', '3', () => {
+    const who = `save-${Math.random()}`;
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(allowSave(who).allowed, true, `save ${i + 1} of 3`);
+    }
+    const refused = allowSave(who);
+    assert.equal(refused.allowed, false, 'the fourth save in an hour is refused');
+    t.diagnostic(`save refused: retryAfterSeconds=${refused.retryAfterSeconds}`);
+    assert.equal(allowSave(`${who}-other`).allowed, true, 'one account cannot lock out another');
+  });
+});
+
+test('PATH 6 of 7 — the sign-in code: the one past the per-address ceiling is refused', (t) => {
+  withEnv('MAX_CODES_PER_ADDRESS_PER_HOUR', '3', () => {
+    const address = `someone-${Math.random()}@example.invalid`;
+    const ip = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(allowSignInCode(address, ip).allowed, true, `code ${i + 1} of 3`);
+    }
+    const refused = allowSignInCode(address, ip);
+    assert.equal(refused.allowed, false, 'the fourth code for one address is refused');
+    assert.equal(refused.refusedBy, 'address', 'and it knows which of the two ceilings refused');
+    t.diagnostic(
+      `sign-in code refused: refusedBy=${refused.refusedBy} `
+        + `retryAfterSeconds=${refused.retryAfterSeconds}`,
+    );
+  });
+});
+
+test('PATH 7 of 7 — the click beacon: the one past the ceiling counts nothing', (t) => {
+  withEnv('MAX_OPENS_PER_VISITOR_PER_HOUR', '3', () => {
+    const who = `192.0.2.${Math.floor(Math.random() * 200) + 1}`;
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(allowOutboundOpen(who), true, `click ${i + 1} of 3`);
+    }
+    assert.equal(allowOutboundOpen(who), false, 'the fourth click in an hour counts nothing');
+    t.diagnostic('outbound click refused: allowOutboundOpen() === false, and /o still answers 204');
+  });
+});
+
+test('every limit in .env.example’s table has a limiter, and every limiter is in the table', () => {
+  // THE TABLE IS THE INDEX AND THIS IS WHAT KEEPS IT HONEST. A variable in
+  // that table with no `limits()` entry is a promise; a `limits()` entry not
+  // in the table is a limit nobody can find.
+  const example = readFileSync(new URL('../.env.example', import.meta.url), 'utf8');
+  const table = /EVERY LIMIT, IN ONE TABLE[\s\S]*?^# ={10,}$/m.exec(example);
+  assert.ok(table, '.env.example must carry the one table of every limit');
+
+  const named = [...table[0].matchAll(/\b(MAX_[A-Z_]+)\b/g)].map((m) => m[1]);
+  const unique = [...new Set(named)].sort();
+  assert.ok(unique.length >= 13, `only ${unique.length} limits in the table: ${unique.join(', ')}`);
+
+  const configured = limits();
+  for (const name of unique) {
+    // MAX_SEARCHES_PER_IP_PER_HOUR -> searchesPerIpPerHour
+    const key = name
+      .replace(/^MAX_/, '')
+      .toLowerCase()
+      .replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(configured, key),
+      `${name} is in the table in .env.example but limits() has no ${key}`,
+    );
+    // And the variable is really read, rather than the default happening to
+    // agree with it: set it to something nobody would choose and watch the
+    // answer move.
+    withEnv(name, '7', () => {
+      assert.equal(limits()[key], 7, `${name} is named in the table and nothing reads it`);
+    });
+  }
+
+  for (const key of Object.keys(configured)) {
+    const name = `MAX_${key.replace(/([A-Z])/g, '_$1').toUpperCase()}`;
+    assert.ok(
+      unique.includes(name),
+      `limits() has ${key} (${name}) and .env.example’s table does not name it`,
+    );
+  }
+});
+
+test('the two limiters Phase 9a added keep nothing about the account', () => {
+  // The property every bucket in this file has, asserted for the two new ones:
+  // the key is a salted hash and the string is dropped inside `visitorKey`, so
+  // the limiter cannot become a record of who reviewed what and when — which
+  // matters more here than anywhere else, because a review is a public thing
+  // attached to a person.
+  const account = 'acct_9f2c1ab4deadbeef';
+  const key = visitorKey(`review-account:${account}`);
+  assert.ok(!key.includes(account), 'the account id must not be in the key');
+  assert.match(key, /^[0-9a-f]{64}$/, 'the key is a sha-256 digest and nothing else');
+  assert.notEqual(
+    key,
+    visitorKey(`save-account:${account}`),
+    'reviewing and saving must be different buckets for the same person',
+  );
+
+  const source = readFileSync(new URL('../lib/rate-limit.ts', import.meta.url), 'utf8');
+  for (const fn of ['allowReview', 'allowSave']) {
+    const body = new RegExp(`export function ${fn}\\([\\s\\S]*?\\n\\}`).exec(source)?.[0] ?? '';
+    assert.match(body, /visitorKey\(/, `${fn} must hash the account id`);
+    assert.doesNotMatch(body, /console\.|\blog\(/, `${fn} must not log anything`);
+  }
+});
+
+test('the two write paths actually call them, and before they write', () => {
+  // A limiter nothing calls is the Phase 7 review's F4 again: `allowPublish`
+  // existed and `saveListing` did not call it.
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  // The CALL SITE and not the import: both writers are named at the top of
+  // their file in an import list, which comes before everything.
+  const tools = strip(readFileSync(new URL('../app/tools/actions.ts', import.meta.url), 'utf8'));
+  assert.match(tools, /allowReview\(viewer\)/, 'postReview must ask allowReview');
+  assert.ok(
+    tools.indexOf('allowReview(viewer)') < tools.indexOf('await writeReview('),
+    'the limit must be taken BEFORE the review is written',
+  );
+
+  const saved = strip(readFileSync(new URL('../app/saved/actions.ts', import.meta.url), 'utf8'));
+  assert.match(saved, /allowSave\(viewer\)/, 'saveToCollection must ask allowSave');
+  assert.ok(
+    saved.indexOf('allowSave(viewer)') < saved.indexOf('await saveTool('),
+    'the limit must be taken BEFORE the tool is saved',
   );
 });

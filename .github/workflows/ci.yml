@@ -44,6 +44,154 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  image:
+    name: The image builds, and carries no credential
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # THE IMAGE IS BUILT ON EVERY CHANGE AND PUSHED ON NONE OF THEM.
+    # .github/workflows/release.yml pushes, on a tag, and that is a decision
+    # somebody makes. What this job answers is the question a release
+    # workflow answers too late: does the Dockerfile still build?
+    #
+    # A build that only happens at release time is a build that breaks in the
+    # ten minutes between deciding to ship and shipping, which is the worst
+    # possible moment to find out that a COPY names a directory that moved.
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build it
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: foundit:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check no credential reached a layer
+        # THE BUILD CONTEXT IS `COPY . .`, so .dockerignore is the only thing
+        # between a developer's .env.local and a layer that carries it for
+        # ever. `docker history` and `docker save` both hand a layer to
+        # anybody with the image, and a layer cannot be un-published.
+        #
+        # Two checks: the history (which shows every ARG and every RUN line),
+        # and the filesystem the image actually ships.
+        run: |
+          set -euo pipefail
+
+          echo '--- the build history ---'
+          docker history --no-trunc --format '{{.CreatedBy}}' foundit:ci | head -40
+
+          if docker history --no-trunc foundit:ci \
+             | grep -qiE 'API_KEY=[^$]|SECRET=[^$]|PASSWORD=[^$]|sk-[A-Za-z0-9]{20}'; then
+            echo "A credential-shaped value is in the image history."
+            exit 1
+          fi
+
+          echo '--- files in the image that should not be there ---'
+          found=$(docker run --rm --entrypoint sh foundit:ci -c '
+            find / -xdev \( -name ".env" -o -name ".env.local" -o -name "*.pem" \
+                         -o -name "id_ed25519*" -o -name "id_rsa*" \) \
+              -not -path "*/node_modules/*" 2>/dev/null | head -20')
+          if [ -n "$found" ]; then
+            echo "$found"
+            echo "One of these is in the image. Fix .dockerignore."
+            exit 1
+          fi
+          echo "CLEAN: no env file, key or certificate in the image."
+
+          echo '--- it must not run as root ---'
+          who=$(docker run --rm --entrypoint sh foundit:ci -c 'id -u')
+          if [ "$who" = "0" ]; then
+            echo "The image runs as root. research/07 §6.5: USER is the line that stops"
+            echo "a remote-execution bug from being a write to anything root owns."
+            exit 1
+          fi
+          echo "runs as uid $who"
+
+      - name: Check the production compose file validates
+        # `config` expands every env file into stdout, which is exactly why
+        # server/deploy.sh never runs it (tests/deploy.test.mjs asserts that).
+        # Here the env files are three throwaway lines written by this step,
+        # and the output goes to /dev/null: what is being checked is that the
+        # file parses and interpolates, not what it says.
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          printf 'DATABASE_URL=postgresql://foundit_app:local_development_only_app@db:5432/foundit\n' > "$dir/app.env"
+          printf 'DATABASE_URL_EMBED=postgresql://foundit_embed:local_development_only_embed@db:5432/foundit\n' > "$dir/embed.env"
+          printf 'DATABASE_URL_OWNER=postgresql://foundit_owner:local_development_only@db:5432/foundit\n' > "$dir/migrate.env"
+          docker network create foundit-db_default >/dev/null
+          IMAGE_TAG=sha-0000000 FOUNDIT_ENV_DIR="$dir" \
+            docker compose -f server/compose.prod.yml config --quiet
+          docker network rm foundit-db_default >/dev/null
+          rm -rf "$dir"
+          echo "server/compose.prod.yml validates."
+
+      - name: Check a container from it answers / and /healthz
+        # The gate's item 1, in CI rather than only on a laptop. A PostgreSQL
+        # service container stands in for the host's database; the migrations
+        # are applied out of the image being tested, which is also how
+        # server/deploy.sh applies them.
+        run: |
+          set -euo pipefail
+          docker network create foundit-ci >/dev/null
+          docker run -d --name ci-db --network foundit-ci \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=local_development_only \
+            -e POSTGRES_DB=foundit \
+            -v "$PWD/db/dev-roles.sql:/docker-entrypoint-initdb.d/10-dev-roles.sql:ro" \
+            pgvector/pgvector:pg17-trixie >/dev/null
+          for i in $(seq 1 40); do
+            docker exec ci-db pg_isready -U postgres -d foundit >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+          docker run --rm --network foundit-ci --entrypoint node \
+            -e DATABASE_URL_OWNER=postgresql://foundit_owner:local_development_only@ci-db:5432/foundit \
+            foundit:ci db/apply.mjs >/dev/null
+
+          docker run -d --name ci-app --network foundit-ci -p 127.0.0.1:3200:3000 \
+            -e DATABASE_URL=postgresql://foundit_app:local_development_only_app@ci-db:5432/foundit \
+            -e BETTER_AUTH_URL=http://127.0.0.1:3200 \
+            foundit:ci >/dev/null
+
+          ok=""
+          for i in $(seq 1 40); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3200/healthz)" = "200" ]; then
+              ok=yes; break
+            fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "the container never answered /healthz. Its log:"
+            docker logs ci-app
+            exit 1
+          fi
+
+          echo "--- GET /healthz ---"; curl -s http://127.0.0.1:3200/healthz; echo
+          echo "--- GET / ---";        curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3200/
+          echo "--- the security headers it sends ---"
+          curl -sI http://127.0.0.1:3200/ \
+            | grep -iE 'content-security-policy|strict-transport|x-content-type|referrer-policy|permissions-policy|cross-origin-opener'
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f ci-app ci-db >/dev/null 2>&1 || true
+          docker network rm foundit-ci >/dev/null 2>&1 || true
+          docker network rm foundit-db_default >/dev/null 2>&1 || true
+
   secrets:
     name: No credentials committed
     runs-on: ubuntu-latest

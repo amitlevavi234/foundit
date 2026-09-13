@@ -27,7 +27,7 @@ export const metadata: Metadata = {
 export const dynamic = 'force-dynamic';
 
 interface SavedProps {
-  searchParams: Promise<{ shared?: string | string[] }>;
+  searchParams: Promise<{ shared?: string | string[]; save?: string | string[] }>;
 }
 
 export default async function Saved({ searchParams }: SavedProps) {
@@ -45,6 +45,21 @@ export default async function Saved({ searchParams }: SavedProps) {
         className="shell"
         style={{ padding: '18px 56px 80px', flex: 1 }}
       >
+        {/* The save limiter's refusal, as words. `saveToCollection` sends
+            somebody here when they have saved a hundred and twenty things in
+            an hour — nothing was saved, and the sentence says so rather than a
+            status code, which a Server Component cannot set. */}
+        {params.save === 'too-many' ? (
+          <p
+            role="status"
+            className="muted"
+            style={{ margin: '0 0 18px', color: 'var(--coral)' }}
+          >
+            That one was not saved — you have saved a great many things in the last hour.
+            Try again shortly; everything already here is untouched.
+          </p>
+        ) : null}
+
         <SavedView
           data={data}
           origin={baseUrl()}

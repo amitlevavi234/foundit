@@ -1,0 +1,109 @@
+# Build the image and push it. Nothing else.
+#
+# research/10 §2.5's shape, WITH ONE DELIBERATE SUBTRACTION, and the
+# subtraction is the security property this file exists for.
+#
+# THE RESEARCHED WORKFLOW HOLDS AN SSH KEY. Its second job installs
+# `secrets.SSH_PRIVATE_KEY`, connects to the host and runs a deploy. The key is
+# neutered by a forced command in `authorized_keys`, which is a real mitigation
+# and not nothing — but it still means a credential that can reach the
+# production machine lives in a GitHub secret, and a compromise of this
+# repository, of an action it uses, or of GitHub itself is then a compromise of
+# the server.
+#
+# THIS HOST HAS NO INBOUND SSH FROM THE INTERNET AT ALL. `cloudflared` dials
+# out; ufw denies everything but SSH from one address; the Hetzner cloud
+# firewall denies it again (server/setup/03-host-hardening.sh, research/07 §2).
+# A GitHub runner is not that address and must not become one.
+#
+# SO THE DIRECTION IS REVERSED: this workflow's only output is an image in
+# GHCR, tagged with the commit it was built from. The HOST pulls, when a person
+# runs `server/deploy.sh sha-<hex>` (or, in 9b, a timer does). Nothing here can
+# reach the server, and there is no secret in this file that would be worth
+# stealing — `GITHUB_TOKEN` is minted per run and scoped to this repository's
+# packages.
+#
+# WHAT MAKES A RELEASE: a tag, `v*`. Not a push to a branch. A branch push
+# already runs tests.yml; an image is a thing somebody decided to make, and
+# deciding is what a tag is for.
+name: Image
+
+on:
+  push:
+    tags: ['v*']
+  # So the image for a given commit can be rebuilt without moving a tag.
+  workflow_dispatch:
+
+# Two deploys of the same tag are a no-op (server/deploy.sh exits early), but
+# two BUILDS racing to push the same tag are not worth allowing.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build and push the image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Read the code and write a package. Nothing else — not `contents:
+      # write`, not `id-token`, not `actions`.
+      contents: read
+      packages: write
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Work out the tag the host will ask for
+        id: tag
+        # `sha-<7 hex>`, which is the ONLY shape server/deploy.sh accepts. A
+        # branch name or `latest` could not be rolled back to, because
+        # `previous_tag` would name the same bytes as `current_tag`.
+        run: echo "image=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Minted for this run, scoped by the `permissions:` block above, and
+          # expired when the job ends. There is no long-lived token here.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # ONE TAG, AND IT NAMES A COMMIT. No `:latest`. A moving tag is a tag
+          # that cannot be rolled back to and a deploy nobody can reconstruct.
+          tags: ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.image }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # NO `secrets:` AND NO `build-args` CARRYING ONE. research/10 §2.5
+          # passes a Sentry auth token as a BuildKit secret so source maps can
+          # be uploaded; next.config.mjs disables source maps instead, for the
+          # reason written there. A build arg would be worse still — `docker
+          # history` prints those.
+          provenance: false
+
+      - name: Say what the host should ask for
+        run: |
+          echo "### Image built" >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo 'On the host, as founditops:' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "server/deploy.sh ${{ steps.tag.outputs.image }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This workflow cannot reach the server. It never could, and that is' >> "$GITHUB_STEP_SUMMARY"
+          echo 'the arrangement: the host pulls, nothing pushes to the host.' >> "$GITHUB_STEP_SUMMARY"
