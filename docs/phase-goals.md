@@ -194,9 +194,70 @@ Or stop after 35 turns, saying plainly what is blocking.
 
 ## Phase 9 — hardening and launch
 
+Phase 9 is in two halves. **9a** is everything that can be built and proved on
+the development machine and in CI without touching the live server; an agent
+does it under the usual gate. **9b** is the on-server work — accounts, secrets,
+the backup bucket, the go-live switch — which needs the owner at the keyboard
+and is written as a runbook with evidence boxes, not delegated to an agent. No
+agent touches the live server, `main`, or the tunnel in either half.
+
+### Phase 9a — hardening, provable here
+
 ```text
-/goal Phase 9 of docs/build-phases.md is complete: rate limits live on search and all four write paths, off-site backups running with a restore VERIFIED by restoring and counting rows, Sentry receiving errors, Core Web Vitals measured, and every item of the checklist in research/03 section 9 ticked with pasted evidence rather than assertion. Include a fresh external port scan showing nothing listening. Any item that cannot be evidenced is reported as not done. Or stop after 30 turns.
+/goal Phase 9a is complete AND its gate has passed. Read docs/build-phases.md (Phase 9), research/10-deploy-and-ops.md (§2 the pipeline, §3 downtime, §4 migrations in the pipeline, §5 TLS and the proxy — read it knowing the live server uses a Cloudflare Tunnel and no public port, §6 limits and log rotation, §7 monitoring, §8 the runbooks), research/08-postgres-selfhosted.md (§5 backups, §5.8 automatic restore verification, §6 PITR, §8 monitoring, §9 security), research/07-server-hardening.md (§2 firewalls, §4 unattended upgrades, §5 fail2ban, §6 secrets on the host), research/11-cloudflare-edge.md (§3 caching, §4 rate limiting, §5.3 R2, §5.4 the tunnel, §9 verification), research/03-security-and-authorization.md §9 (the checklist — written for Supabase and Vercel before the hosting decision), server/setup/*.sh and server/placeholder/compose.yml (what exists on the host today), docs/development.md, docs/product-decisions.md §13, and the Phase 6, 7 and 8 sections of docs/loop-progress.md including their reviews. Every claim is settled by pasting real command output.
+
+Done means all ten:
+1. The application is packaged to run on the host the way research/10 describes, adapted to the tunnel: a Dockerfile building the standalone Next output, a production compose file (app, the embed worker as its own service with the advisory lock, and nothing else — PostgreSQL is already a host service) with memory limits, log rotation, health checks, `127.0.0.1` binding only, secrets from a root-only env file and never in the compose file; `docker compose config` validates; the image builds in CI; a container started from it answers `/` and `/healthz` (new, dependency-free, no database round trip beyond a `select 1`) on the development machine.
+2. A deploy that is idempotent and reversible: `server/deploy.sh` (host side) pulls a tagged image, takes an automatic `pg_dump` BEFORE applying migrations (research/10 §4.3), applies them as `foundit_owner`, starts the new container, waits for `/healthz`, and rolls back to the previous tag when health does not come — with `server/rollback.sh` for the case the migration itself was wrong (§4.4). A GitHub workflow builds and pushes the image on a tag and never holds an SSH key to the host (research/10 §2.5's shape); the host pulls. Exercised end to end against the development database and a local registry or a saved image tarball, with the rollback path proven by deploying an image whose `/healthz` fails.
+3. Backups, proved by restoring: `server/backup/` holds the pgBackRest configuration from research/08 §5.3 pointed at an S3-compatible bucket (R2), the nightly `pg_dump` from §5.4, and `verify-restore.sh` from §5.8 that restores the newest backup into a scratch database, counts rows in every table against the source, runs `select count(*) from tools where status = 'published'`, and writes the result to `infra.ops_events` through `infra.record_ops_event`. All of it exercised on the development machine against a local MinIO or filesystem repo standing in for R2, with the `ops_events` row pasted and the dashboard's Backups panel showing it instead of "Never recorded". `archive_mode` stays off in `09-postgres-service.sh` until 9b turns it on in the same change that installs pgBackRest (the file says why).
+4. Errors reach somebody: Sentry wired for the server and the browser (research/10 §7.2), sending no request body, no query text, no email address and no cookie — a scrubber test proves a captured event from a search with a sentence, a signed-in session and an address contains none of them; keyless it is inert; `SENTRY_DSN` read from the environment only; tests/markup.test.mjs's fetch allow-list is extended by exactly the Sentry transport and says so.
+5. Speed measured: Core Web Vitals (LCP, INP, CLS) reported from the browser through the same scrubbed channel or Cloudflare's cookieless Web Analytics (research/11 §5.2) — choose one, say why — and a `scripts/vitals.mjs` that measures the five main pages against a production build with Lighthouse or `web-vitals` in a headless browser and prints a table; paste the table and record it in eval/baselines.md as the first performance baseline, with the two pages that regressed from Phase 6's "every page is dynamic" named.
+6. The edge: a `server/cloudflare/` folder with the Cache Rules from research/11 §3.6 as configuration or an exact click-by-click runbook, the `/api/search` (or the search Server Action's) edge rate limit from §4.2, the `_rsc` and session cache-key traps from §3.3–3.4 handled, security headers and a Content-Security-Policy with a per-request nonce and no `unsafe-inline` in `script-src` set by the app (research/03 §9 items 25 and 38, adapted) — proven with `curl -I` against a production build, and every page still rendering with the CSP on (a test loads each route in a headless browser and fails on a CSP violation).
+7. The rate limits are live everywhere and proven: search, adding a tool, editing, reviewing, saving, the sign-in code, and the click beacon — one test per path exceeds it and pastes the refusal; the limits and their costs are in one table in `.env.example`; `tests/rate-limit.test.mjs` still holds the monthly worst case ≤ $5 with the worker included.
+8. The checklist translated: `docs/launch-checklist.md` takes research/03 §9's forty items one by one and for each writes the Foundit equivalent (Supabase → our Postgres roles and policies, Vercel → the host and the tunnel, Storage → not applicable because nothing is uploaded, Turnstile → what the limiter does instead, and so on), with EVIDENCE pasted for every item that can be proved on the development machine or in CI, and an explicit "9b, owner" tag for every item that can only be proved on the host. No item is ticked by assertion; no item is silently dropped.
+9. Security regression tests: `tests/headers.test.mjs` (the headers and CSP), `tests/healthz.test.mjs`, `tests/deploy.test.mjs` (the scripts parse, refuse to run as root or without their env file, and never print a secret), `db/test/rls_test.sql` extended with research/03 §9 items 1 and 2 as assertions (every `public` table has RLS enabled and forced, and every policy that is `true` is one of the two named exceptions); `npm test`, `npm run lint`, `npx tsc --noEmit`, `npm run build`, `bash db/test.sh`, a keyless `--baseline` (nDCG unchanged), `bash scripts/scan-secrets.sh` and `node scripts/scan-control-bytes.mjs` all pass; nothing new is joinable between `search_events` and a person; no secret in any tracked file.
+10. Review: a FRESH Opus 5 subagent that has not seen the work attacks the deploy scripts (secrets, root, rollback, a hostile image tag), the backup and restore (a corrupted backup, a restore that "passes" on an empty scratch database, a bucket credential in a log), the Sentry scrubber (a sentence, an address, a cookie, a token in a URL), the CSP (an inline script, a nonce reuse, a page that breaks), the rate limits (each path, forged headers, a restart), and every line of docs/launch-checklist.md marked as evidenced. Paste its findings verbatim, then fix each or justify it explicitly.
+
+Constraints that cannot be traded: no agent touches the live server, `main`, the tunnel or Cloudflare's account — everything on-host is written as scripts and runbooks for 9b; never disable row-level security or write a policy evaluating to true; the app never connects as the owner and the owner is not a superuser anywhere; the server never fetches a URL a stranger supplied; search logs never joinable to a person, including through Sentry or analytics; no secret in any tracked file, compose file, image layer or workflow log; the golden set is never edited. Update docs/loop-progress.md before finishing. Do not start 9b.
+
+Or stop after 35 turns, saying plainly what is blocking.
 ```
+
+### Phase 9b — on the host, with the owner
+
+Written as `docs/launch-runbook.md` by 9a's agent and executed by the owner and
+the supervisor together, one numbered step at a time, each with an evidence
+box. In outline, and in order:
+
+1. Owner creates: the R2 bucket and an access key scoped to it; a Sentry
+   project and its DSN; production keys for Google (the client already has
+   the production redirect URI), Resend (`foundit-prod`, sending-only, scoped
+   to `mail.foundit.tools`), and OpenAI (a second key, with the $10 project
+   limit); all typed into `/root/.foundit/app.env` on the host, never into
+   chat.
+2. Supervisor, over SSH with the owner watching: pgBackRest installed and
+   `archive_mode` turned on in the same change; first full backup; the first
+   automatic restore verification, its `ops_events` row read back.
+3. The production database created from the migrations as `foundit_owner`
+   (not a superuser — proven with `select rolsuper from pg_roles`), the
+   seeded catalogue loaded, embeddings filled by the worker, the keyless
+   baseline run against it.
+4. The image deployed with `server/deploy.sh`; `/healthz` green; the
+   placeholder's compose stopped; the tunnel's ingress pointed at the app;
+   Cloudflare cache and rate-limit rules applied from `server/cloudflare/`.
+5. Verification from outside: research/11 §9 (origin not discoverable, origin
+   unreachable directly), a fresh external port scan pasted, the CSP and
+   headers checked from a browser, one real Google sign-in and one real
+   emailed code on foundit.tools, one search, one save, one tool added and
+   found within a minute, one review removed and the author's notice
+   received; the dashboard read as the owner.
+6. Every "9b, owner" item in `docs/launch-checklist.md` ticked with evidence,
+   the privacy and terms pages written (research/13 §6.3 — a launch blocker),
+   the Google consent screen published, and the owner's explicit go.
+
+The supervisor does not run step 4 without the owner saying go in that
+session, whatever the standing go-ahead says: it is the switch from the
+placeholder to the real site.
 
 ---
 
