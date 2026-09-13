@@ -7,7 +7,7 @@ import { Button } from '@/components/Button';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { Stars } from '@/components/Stars';
-import { allReviews } from '@/lib/admin';
+import { reviewPage } from '@/lib/admin';
 import { MAX_REMOVAL_REASON, MIN_REMOVAL_REASON, type AdminReview } from '@/lib/admin-sql';
 
 import { removeReviewAction } from '../actions';
@@ -63,10 +63,13 @@ function day(value: string | null): string {
 }
 
 const TROUBLE: Record<string, string> = {
-  'reason-too-short': `A reason is at least ${MIN_REMOVAL_REASON} characters. Nothing was removed.`,
+  'reason-too-short': `A reason is at least ${MIN_REMOVAL_REASON} characters once control characters and repeated spaces are taken out. Nothing was removed.`,
   'reason-too-long': `A reason is at most ${MAX_REMOVAL_REASON} characters. Nothing was removed.`,
-  refused: 'The database refused that removal. Nothing was removed.',
-  gone: 'That review is not live — it has already been taken down, or it is not there. Nothing was changed.',
+  // ONE SENTENCE FOR EVERY WAY IT DID NOT HAPPEN (Phase 8 review, F4). It used
+  // to be two — "the database refused that" and "that review is not there" —
+  // and the pair answered whether a review id existed to anybody who could
+  // post the action.
+  'not-removed': 'That removal did not happen, and nothing was changed.',
 };
 
 const TOLD: Record<string, string> = {
@@ -87,15 +90,21 @@ interface Props {
 }
 
 export default async function AdminReviews({ searchParams }: Props) {
-  const reviews = await allReviews();
-  if (!reviews) notFound();
+  const page = await reviewPage();
+  if (!page) notFound();
 
   const params = await searchParams;
   const problem = first(params.problem);
   const told = first(params.told);
 
-  const live = reviews.filter((r) => !r.removedAt);
-  const down = reviews.filter((r) => r.removedAt);
+  // THREE LISTS, BECAUSE THERE ARE THREE STATES (Phase 8 review, F8).
+  // `removedAt` used to be the review's `deleted_at`, which its AUTHOR sets
+  // when they retract it — so an author's own deletion sat in the Removed
+  // section with no reason and no remover, under copy promising both.
+  const { rows: reviews } = page;
+  const live = reviews.filter((r) => !r.removedByAdminAt && !r.authorDeletedAt);
+  const down = reviews.filter((r) => r.removedByAdminAt);
+  const retracted = reviews.filter((r) => !r.removedByAdminAt && r.authorDeletedAt);
 
   return (
     <div className="page">
@@ -150,7 +159,7 @@ export default async function AdminReviews({ searchParams }: Props) {
         <section className="admsection">
           <div className="section-head">
             <h2 className="h3" style={{ margin: 0 }}>
-              Removed
+              Removed by an administrator
             </h2>
             <span className="admperiod">
               {down.length} {down.length === 1 ? 'review' : 'reviews'}
@@ -159,8 +168,9 @@ export default async function AdminReviews({ searchParams }: Props) {
 
           {down.length === 0 ? (
             <p className="admnote">
-              No review has ever been taken down. Every one that is will stay on this list, with
-              the reason and who wrote it — a removal is a record, not an erasure.
+              No review has ever been taken down by an administrator. Every one that is will stay
+              on this list, with the reason and who wrote it — a removal is a record, not an
+              erasure.
             </p>
           ) : (
             <div className="panel">
@@ -170,6 +180,43 @@ export default async function AdminReviews({ searchParams }: Props) {
             </div>
           )}
         </section>
+
+        <section className="admsection">
+          <div className="section-head">
+            <h2 className="h3" style={{ margin: 0 }}>
+              Taken down by its author
+            </h2>
+            <span className="admperiod">
+              {retracted.length} {retracted.length === 1 ? 'review' : 'reviews'}
+            </span>
+          </div>
+
+          {retracted.length === 0 ? (
+            <p className="admnote">Nobody has retracted a review of their own.</p>
+          ) : (
+            <div className="panel">
+              {retracted.map((review) => (
+                <Row key={review.id} review={review} />
+              ))}
+            </div>
+          )}
+          <p className="admnote">
+            <strong>These are not takedowns and their words are not here.</strong> Somebody
+            deleted what they wrote, which is their own decision about their own words, so the
+            operator gets the listing, the handle and the date and not the text — the same rule
+            that keeps a private saved list off this dashboard (§10, and <code>0015</code>).
+            An administrator may still record a removal against one, and it is the only way to
+            stop the same words being posted again: use the form on the row.
+          </p>
+        </section>
+
+        {page.total > page.rows.length ? (
+          <p className="admnote">
+            Showing {page.rows.length} of {page.total} reviews, newest first. The rest are not on
+            this page; there is no control for them yet and this sentence is here rather than a
+            list that silently stops.
+          </p>
+        ) : null}
       </main>
 
       <SiteFooter />
@@ -178,7 +225,11 @@ export default async function AdminReviews({ searchParams }: Props) {
 }
 
 function Row({ review }: { review: AdminReview }) {
-  const removed = Boolean(review.removedAt);
+  // The form is drawn for anything an administrator has not already removed —
+  // INCLUDING a review its author retracted, which is the decision of
+  // 13 September 2026 (Phase 8 review, F8): recording a removal against one is
+  // what arms the permanent bar in 0015 and stops the same words going back up.
+  const removed = Boolean(review.removedByAdminAt);
 
   return (
     <article className="admreview">
@@ -197,13 +248,24 @@ function Row({ review }: { review: AdminReview }) {
 
       {review.body ? (
         <p className="admreview-body">{review.body}</p>
+      ) : review.authorDeletedAt && !review.removedByAdminAt ? (
+        <p className="admreview-body faint">
+          Taken down by its author on {day(review.authorDeletedAt)}. The words are not shown
+          here.
+        </p>
       ) : (
         <p className="admreview-body faint">A rating with no words.</p>
       )}
 
+      {review.authorDeletedAt && review.removedByAdminAt ? (
+        <p className="admnote" style={{ margin: 0 }}>
+          Its author had already taken it down on {day(review.authorDeletedAt)}.
+        </p>
+      ) : null}
+
       {removed ? (
         <p className="admnote" style={{ margin: 0 }}>
-          <strong>Removed {day(review.removedAt)}</strong>
+          <strong>Removed {day(review.removedByAdminAt)}</strong>
           {review.removedBy ? ` by @${review.removedBy}` : ''}: {review.removalReason}
         </p>
       ) : (

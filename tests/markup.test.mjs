@@ -107,14 +107,43 @@ const OUTBOUND = [
   [EMAIL_FILE, 'RESEND_URL', EMAIL_URL],
 ];
 
+/**
+ * The one file that calls `fetch` and is not on the outbound list.
+ *
+ * THE RULE IS ABOUT THE SERVER, and this is not the server. It is a `'use
+ * client'` component, the request is made by the visitor's own browser, and
+ * the address is `/o` — a path on this site with no host in it, which cannot
+ * reach anywhere else however it is called. It exists because the Phase 8
+ * review's F5 moved the outbound-click beacon off the tool page's own URL, so
+ * that the slug stops appearing in the request line of every access log beside
+ * the visitor's address (app/o/route.ts).
+ *
+ * It is listed separately rather than added to OUTBOUND because OUTBOUND's
+ * three entries are asserted field by field against a hardcoded external
+ * address, and this one has no external address to assert.
+ */
+const SAME_ORIGIN_FETCHER = 'components/OutboundLink.tsx';
+
 test('nothing on the server asks a stranger’s address for anything', () => {
-  // Three exceptions, all named. A tool's own URL is still never fetched by us,
-  // and the tests below say so precisely for each of them.
+  // Three exceptions, all named, plus one same-origin client component. A
+  // tool's own URL is still never fetched by us, and the tests below say so
+  // precisely for each of them.
   const fetchers = SOURCES.filter((path) => /(^|[^.\w])fetch\s*\(/.test(read(path))).map(rel);
   assert.deepEqual(
     fetchers.sort(),
-    [EMBEDDINGS_FILE, READER_FILE, EMAIL_FILE].sort(),
-    `${EMBEDDINGS_FILE}, ${READER_FILE} and ${EMAIL_FILE} are the only files that may make an outbound request`,
+    [EMBEDDINGS_FILE, READER_FILE, EMAIL_FILE, SAME_ORIGIN_FETCHER].sort(),
+    `${EMBEDDINGS_FILE}, ${READER_FILE}, ${EMAIL_FILE} and ${SAME_ORIGIN_FETCHER} are the only `
+      + 'files that may call fetch',
+  );
+
+  // And the fourth one goes to a path on this site and nowhere else: no
+  // scheme, no host, no interpolation, nothing a caller could steer.
+  const beacon = read(join(ROOT, SAME_ORIGIN_FETCHER));
+  assert.match(beacon, /fetch\('\/o',/, `${SAME_ORIGIN_FETCHER} must post to /o and nothing else`);
+  assert.doesNotMatch(
+    beacon,
+    /fetch\(\s*(`|[A-Za-z_$])/,
+    `${SAME_ORIGIN_FETCHER} builds a fetch address rather than naming one`,
   );
 
   const imageLoaders = SOURCES.filter((path) => /from ['"]next\/image['"]/.test(read(path))).map(rel);
@@ -965,28 +994,55 @@ test('NO SCREEN AND NO ACTION DECIDES WHO IS AN ADMINISTRATOR', () => {
   // refuse. A comparison in TypeScript here would be a second opinion about
   // the same question, and a second opinion is what eventually disagrees.
   //
-  // app/admin/metadata.ts is deliberately NOT on this list. It reads the flag,
-  // and what it decides with it is the text of the <title> element — because
-  // Next resolves a segment's metadata before the component throws notFound(),
-  // so a fixed title survived the refusal and confirmed the route. It decides
-  // what a tab is called and never what may be read.
+  // THREE FILES ARE DELIBERATELY NOT ON THIS LIST, and they are the three that
+  // decide what somebody is SHOWN rather than what they may HAVE. The
+  // distinction is lib/admin.ts's own and it is the whole of why this test can
+  // be strict about the rest:
+  //
+  //   app/admin/metadata.ts    decides the text of the <title> element. Next
+  //                            resolves a segment's metadata before the
+  //                            component throws notFound(), so a fixed title
+  //                            survived the refusal and confirmed the route.
+  //   app/admin/layout.tsx     decides the 404. `notFound()` can only set a
+  //                            status code while nothing has been sent, and a
+  //                            layout runs before the page it wraps — so
+  //                            /admin answering 200 where a missing route
+  //                            answers 404 is fixed HERE or not at all
+  //                            (Phase 8 review, F3).
+  //   app/admin/actions.ts     decides that everybody who is not an
+  //                            administrator gets the not-found page before
+  //                            the action looks at its arguments. Without it
+  //                            the pair of refusal sentences was a per-review
+  //                            oracle to anybody holding the action id (F4).
+  //
+  // Delete all three and the dashboard still refuses everybody: every panel is
+  // an admin_* function that raises 42501 on its own, and the removal is two
+  // ordinary statements the policies and the trigger refuse. What would change
+  // is only how badly it refuses them.
   //
   // Comments are stripped first, so a file SAYING that it does not read the
   // flag is not mistaken for a file that does.
   const withoutComments = (source) =>
     source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 
-  for (const path of [
-    ...PHASE_8_PAGES,
-    'app/admin/actions.ts',
-    'lib/admin.ts',
-    'lib/admin-sql.ts',
-  ]) {
+  for (const path of [...PHASE_8_PAGES, 'lib/admin.ts', 'lib/admin-sql.ts']) {
     const source = withoutComments(read(join(ROOT, path)));
     assert.doesNotMatch(
       source,
       /\bisAdmin\b/,
       `${path} reads an admin flag; the database is what decides`,
+    );
+  }
+
+  // The three exceptions may read the flag and may do exactly one thing with
+  // it: answer with the not-found page, or name a tab. None of them may send a
+  // statement, so none of them can be the place a refusal is decided.
+  for (const path of ['app/admin/layout.tsx', 'app/admin/actions.ts', 'app/admin/metadata.ts']) {
+    const source = withoutComments(read(join(ROOT, path)));
+    assert.match(
+      source,
+      /notFound\(\)|NOT_FOUND/,
+      `${path} reads the admin flag and does something other than answer with the not-found page`,
     );
   }
 
@@ -1033,7 +1089,16 @@ test('the dashboard reads admin functions and never the search tables', () => {
   // The People panel is public activity, so it may not name a collection: a
   // private saved list is the opposite of what somebody did in public, which
   // is why 0015 took the operator out of collections_read.
-  assert.doesNotMatch(sql, /collections/i, 'the dashboard must not read anybody\u2019s saved lists');
+  // Comments stripped: this file now SAYS that 0015 took the operator out of
+  // collections_read, in the paragraph explaining why the reason a removal
+  // needs is cleaned, and a test that read the prose would fail on a sentence
+  // promising exactly what it forbids.
+  const sqlCode = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  assert.doesNotMatch(
+    sqlCode,
+    /collections/i,
+    'the dashboard must not read anybody\u2019s saved lists',
+  );
 });
 
 test('a panel with no writer says so in words and never shows a zero', () => {
@@ -1052,7 +1117,27 @@ test('a panel with no writer says so in words and never shows a zero', () => {
 
   // The honest label on the money panel: in-process counters are not a month
   // to date and the page may not call them one.
-  assert.match(page, /Since this process started/, 'the money panel names its own window');
+  //
+  // IT USED TO SAY "Since this process started", AND THAT WAS THE ONE HEADING
+  // IN THIS SET THAT WAS NOT TRUE (Phase 8 review, F9). `DailyCap` is a rolling
+  // twenty-four-hour window, so the figure resets every day — it was never
+  // "since this process started" — and `count` did not roll the window, so
+  // after a quiet stretch it was not "today" either. The heading names the
+  // window and prints when it began.
+  assert.match(page, /In the last 24 hours, in this process, started/, 'the money panel names its own window');
+  assert.doesNotMatch(
+    page,
+    /Since this process started/,
+    'the money panel must not claim a period its counter does not have',
+  );
+  // And a process that has measured nothing says so rather than drawing a 0,
+  // which is the rule the whole of this test is about.
+  assert.match(page, /Nothing yet/, 'a process with no paid call yet says so in words');
+  assert.match(
+    page,
+    /has not made a paid call in this window/i,
+    'and says why that is not a zero',
+  );
 });
 
 test('the numbers are tabular, and a wide table scrolls inside its own box', () => {
@@ -1100,25 +1185,59 @@ test('the outbound link counts a click and still points straight at the tool', (
   // redirect route would have taken away (docs/product-decisions.md §12).
   assert.match(link, /href=\{link\.href\}/, 'the anchor points at the maker, not at us');
 
-  // The beacon is a Server Action and never a fetch of our own: the allow-list
-  // above is three files and this is not one of them.
-  assert.doesNotMatch(link, /(^|[^.\w])fetch\s*\(/, 'the beacon must not be a fetch');
-  assert.match(link, /recordOpen\(slug\)/, 'the click posts the slug');
+  // THE BEACON POSTS TO `/o` AND NOT TO THE TOOL PAGE (Phase 8 review, F5).
+  //
+  // It used to be a Server Action, and this test used to assert that it was —
+  // "the beacon must not be a fetch". That was the wrong thing to assert. A
+  // Server Action posts to the URL of the page it sits on, so every counted
+  // click was `POST /tools/<slug>` in the request line of every access log in
+  // front of the application, beside the visitor's address and a timestamp:
+  // exactly the join 0019 §3 says this product does not make, made by the
+  // transport rather than by the function. Its action id was also in the
+  // public client bundle, unauthenticated and unbounded.
+  assert.match(link, /beacon\(slug\)/, 'the click posts the slug');
+  assert.match(link, /fetch\('\/o',/, 'and it posts it to /o, whose path carries no slug');
+  assert.match(link, /keepalive: true/, 'so leaving the page does not cancel the count');
+  assert.doesNotMatch(link, /await fetch/, 'and the beacon never blocks the navigation');
 
-  // And what it posts is the slug and nothing else.
-  const actions = read(join(ROOT, 'app/tools/actions.ts'));
-  const recordOpen = /export async function recordOpen\(([^)]*)\)[\s\S]*?\n\}/.exec(actions);
-  assert.ok(recordOpen, 'app/tools/actions.ts must export recordOpen');
+  // What it posts is the slug and nothing else.
+  const beacon = /function beacon\(([^)]*)\)[\s\S]*?\n\}/.exec(link);
+  assert.ok(beacon, 'components/OutboundLink.tsx must have a beacon function');
   assert.equal(
-    recordOpen[1].replace(/\s+/g, ' ').trim(),
+    beacon[1].replace(/\s+/g, ' ').trim(),
     'slug: string',
-    'recordOpen takes the listing and nothing else — no visitor, no session, no address',
+    'the beacon takes the listing and nothing else — no visitor, no session, no address',
   );
   assert.doesNotMatch(
-    recordOpen[0],
-    /currentUserId|cookies\(|headers\(|console\./,
-    'recordOpen must not read who is asking and must not log',
+    beacon[0],
+    /document\.|navigator\.|localStorage|cookie/i,
+    'the beacon must not read anything about the visitor on its way out',
   );
+
+  // And the Server Action whose id was in the client bundle is gone rather
+  // than left beside the new route.
+  const actions = read(join(ROOT, 'app/tools/actions.ts'));
+  assert.doesNotMatch(
+    actions,
+    /export async function recordOpen/,
+    'app/tools/actions.ts must not export recordOpen any more',
+  );
+
+  // The route is the one door, it answers 204 to everything, and it reads no
+  // session at all.
+  const stripped = (source) =>
+    source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const code = stripped(read(join(ROOT, 'app/o/route.ts')));
+  assert.match(code, /status: 204/, 'POST /o answers 204');
+  assert.doesNotMatch(code, /status: (200|403|404|429|500)/, 'and never anything else');
+  assert.doesNotMatch(
+    code,
+    /currentUserId|currentViewer|cookies\(/,
+    'POST /o must not read who is asking',
+  );
+  assert.doesNotMatch(code, /console\./, 'and must not log');
+  assert.match(code, /allowOutboundOpen\(/, 'it is bounded by the existing visitor bucket');
+  assert.match(code, /sameOrigin\(/, 'and Origin-checked, which a Route Handler is not given');
 });
 
 test('the removal tells the author, and the notice is not a second transport', () => {

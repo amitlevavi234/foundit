@@ -88,6 +88,29 @@ function day(value: string | null): string {
   return Number.isNaN(parsed.valueOf()) ? '—' : LONG_DATE.format(parsed);
 }
 
+/**
+ * A day and a time, for the Money panel's heading and for nothing else.
+ *
+ * THE ONLY TIME ON THIS PAGE, and it is about a counter in this process rather
+ * than about a person: `last_at` on the two sentence panels is a timestamptz in
+ * the function and is rendered by `day()` above, deliberately, so the finest
+ * correlation this screen offers between a search and an account is
+ * day-against-day (docs/product-decisions.md §10).
+ */
+const LONG_TIME = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  timeZone: 'UTC',
+  timeZoneName: 'short',
+});
+
+function time(epochMs: number): string {
+  const parsed = new Date(epochMs);
+  return Number.isNaN(parsed.valueOf()) ? '—' : LONG_TIME.format(parsed);
+}
+
 const NUMBER = new Intl.NumberFormat('en-GB');
 const n = (value: number) => NUMBER.format(value);
 const money = (value: number) =>
@@ -322,6 +345,7 @@ export default async function AdminDashboard() {
                   <tr>
                     <th scope="col">Listing</th>
                     <th scope="col">Added by</th>
+                    <th scope="col">Maintained by</th>
                     <th scope="col">Status</th>
                     <th scope="col" className="n">
                       Added
@@ -335,6 +359,9 @@ export default async function AdminDashboard() {
                         <Link href={`/tools/${t.slug}`}>{t.name}</Link>
                       </td>
                       <td className="quiet">{t.handle ? `@${t.handle}` : 'Seeded'}</td>
+                      <td className="quiet">
+                        {t.maintainedBy ? `@${t.maintainedBy}` : 'Unclaimed'}
+                      </td>
                       <td className="quiet">{t.status}</td>
                       <td className="n quiet">{day(t.createdAt)}</td>
                     </tr>
@@ -343,6 +370,14 @@ export default async function AdminDashboard() {
               </table>
             </div>
           )}
+
+          <p className="admnote">
+            <strong>“Added by” is who added it</strong> — <code>tools.submitted_by</code>, which
+            0017 makes unwritable by the application — and “Maintained by” is who looks after it
+            now. Two columns because a claim moves the second and must never move the first: a
+            single column reported the maintainer under the adder’s heading, so one click on{' '}
+            <Link href="/claim">Claim</Link> rewrote a listing’s history on this page.
+          </p>
 
           <h3 className="tab" style={{ margin: 0, color: 'var(--c-muted)' }}>
             Published and never matched by a search — the first {LIST_LIMIT}, oldest first
@@ -392,6 +427,9 @@ export default async function AdminDashboard() {
                     Tools added
                   </th>
                   <th scope="col" className="n">
+                    Maintained
+                  </th>
+                  <th scope="col" className="n">
                     Reviews
                   </th>
                   <th scope="col" className="n">
@@ -412,6 +450,7 @@ export default async function AdminDashboard() {
                       <Link href={`/u/${p.handle}`}>@{p.handle}</Link>
                     </td>
                     <td className="n">{n(p.toolsAdded)}</td>
+                    <td className="n">{n(p.toolsMaintained)}</td>
                     <td className="n">{n(p.reviewsWritten)}</td>
                     <td className="n">{n(p.likesGiven)}</td>
                     <td className="n quiet">{p.lastSeenDay ? day(p.lastSeenDay) : 'Not since this was built'}</td>
@@ -428,6 +467,13 @@ export default async function AdminDashboard() {
             <code> collections_read</code> to make that true). “Last seen” is a day and never a
             time, stamped once a day by the statement that already asks who is signing in — so
             an account that has not been back since Phase 8 shipped has none yet.
+          </p>
+          <p className="admnote">
+            “Tools added” counts what this handle <strong>added</strong> and “Maintained” counts
+            what it looks after now. They were one column until 13 September 2026, and it was the
+            second one wearing the first one’s name: claiming a seeded listing moved a count off
+            one handle and onto another, with <code>tools.submitted_by</code> unchanged
+            throughout.
           </p>
         </Section>
 
@@ -450,27 +496,51 @@ export default async function AdminDashboard() {
         </Section>
 
         {/* --- Money ------------------------------------------------------- */}
-        <Section title="Money" period="Since this process started">
-          <div className="admrow">
-            <Stat
-              value={n(today.reader)}
-              label="Reader requests"
-              sub="Model calls reading a typed sentence"
-            />
-            <Stat value={n(today.rerank)} label="Reranker requests" sub="Judgements of a page of candidates" />
-            <Stat
-              value={n(today.embeddings)}
-              label="Embedding requests"
-              sub={`${n(today.embeddingTokens)} tokens`}
-            />
-            <Stat value={bytes(data.databaseBytes)} label="Database" sub="pg_database_size, right now" />
-          </div>
+        {/*
+          THE HEADING IS THE FIX (Phase 8 review, F9). It said "Since this
+          process started", and the counter is a rolling twenty-four-hour
+          window that resets itself — so the figure was neither that nor
+          "today": after a quiet stretch it showed an expired window's total
+          until the next paid call happened to roll it. `DailyCap.rolled()`
+          now advances the window when it is read, and the period says which
+          twenty-four hours these are.
+        */}
+        <Section
+          title="Money"
+          period={`In the last 24 hours, in this process, started ${time(today.startedAt)}`}
+        >
+          {today.measured ? (
+            <div className="admrow">
+              <Stat
+                value={n(today.reader)}
+                label="Reader requests"
+                sub="Model calls reading a typed sentence"
+              />
+              <Stat value={n(today.rerank)} label="Reranker requests" sub="Judgements of a page of candidates" />
+              <Stat
+                value={n(today.embeddings)}
+                label="Embedding requests"
+                sub={`${n(today.embeddingTokens)} tokens`}
+              />
+              <Stat value={bytes(data.databaseBytes)} label="Database" sub="pg_database_size, right now" />
+            </div>
+          ) : (
+            <div className="admrow">
+              <Stat
+                value="Nothing yet"
+                label="Model requests"
+                sub="This process has not made a paid call in this window. That is not a zero: a zero would say the requests were counted and there were none, and until one is made there is nothing here that has been measured at all."
+                unrecorded
+              />
+              <Stat value={bytes(data.databaseBytes)} label="Database" sub="pg_database_size, right now" />
+            </div>
+          )}
           <p className="admnote">
-            These are <strong>this process&rsquo;s</strong> counters and not a month to date. The
-            limiter keeps them in memory on purpose — nothing about a visitor is written down —
-            so a restart forgets them, and there is no month-to-date figure to show that would not
-            be a guess. The embedding worker&rsquo;s own spend is counted by the worker and is not
-            visible here at all.
+            These are <strong>this process&rsquo;s</strong> counters over a rolling twenty-four
+            hours, and not a month to date. The limiter keeps them in memory on purpose — nothing
+            about a visitor is written down — so a restart forgets them, and there is no
+            month-to-date figure to show that would not be a guess. The embedding worker&rsquo;s
+            own spend is counted by the worker and is not visible here at all.
           </p>
           <p className="admnote">
             <strong>The worst case is knowable, and it is this.</strong> Every daily cap spent

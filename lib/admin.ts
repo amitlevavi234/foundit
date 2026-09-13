@@ -12,11 +12,12 @@ import {
   MY_REMOVALS_SQL,
   RECORD_REMOVAL_SQL,
   REMOVE_REVIEW_SQL,
+  cleanReason,
   reasonProblem,
-  toAdminReviews,
+  toAdminReviewPage,
   toDashboard,
   toMyRemovals,
-  type AdminReview,
+  type AdminReviewPage,
   type Dashboard,
   type MyRemoval,
 } from './admin-sql';
@@ -84,18 +85,42 @@ export const dashboard = cache(async (): Promise<Dashboard | null> => {
   });
 });
 
-/** Every review, newest first, for /admin/reviews. Null for everybody else. */
-export const allReviews = cache(async (limit = 100, offset = 0): Promise<AdminReview[] | null> => {
-  return asViewer(async (tx) => {
-    try {
-      const { rows } = await tx.query(ADMIN_REVIEWS_SQL, [limit, offset]);
-      return toAdminReviews((rows[0] as { rows?: unknown } | undefined)?.rows);
-    } catch (error) {
-      refused(error);
-      return null;
-    }
-  });
-});
+/** How many reviews one page of /admin/reviews draws. */
+export const REVIEWS_PER_PAGE = 100;
+
+/**
+ * One page of reviews, newest first, with the total beside it. Null for
+ * everybody who is not an administrator.
+ *
+ * The total is what the page needs to say "showing 100 of N" rather than
+ * quietly dropping the rest, which is the smaller half of the Phase 8 review's
+ * F8: `allReviews()` defaulted to 100, the page passed no argument, and with
+ * more than a hundred reviews the older removals fell off the Removed list
+ * with nothing anywhere saying so.
+ */
+export const reviewPage = cache(
+  async (limit = REVIEWS_PER_PAGE, offset = 0): Promise<AdminReviewPage | null> => {
+    return asViewer(async (tx) => {
+      try {
+        const { rows } = await tx.query(ADMIN_REVIEWS_SQL, [limit, offset]);
+        return toAdminReviewPage(
+          (rows[0] as { rows?: unknown } | undefined)?.rows,
+          limit,
+          offset,
+        );
+      } catch (error) {
+        refused(error);
+        return null;
+      }
+    });
+  },
+);
+
+/* `allReviews` WAS HERE and is gone with the thing that needed it. It returned
+ * a page of rows and no count, which is how `/admin/reviews` came to draw 100
+ * of N and say nothing about the rest (Phase 8 review, F8). `reviewPage` is
+ * the only reader now, and it cannot hand back rows without the total beside
+ * them. */
 
 /**
  * The removals of this person's own reviews, for their Settings page.
@@ -117,10 +142,26 @@ export const myRemovals = cache(async (): Promise<MyRemoval[]> => {
   });
 });
 
-/** Why a removal did not happen, in a shape the page turns into a sentence. */
+/**
+ * Why a removal did not happen, in a shape the page turns into a sentence.
+ *
+ * `refused` AND `gone` ARE ONE OUTCOME NOW, and the Phase 8 review's F4 is
+ * why. They were two sentences that told a caller whether a review id existed,
+ * and that caller did not have to be an administrator to get one. The
+ * authorisation half is fixed where it belongs — app/admin/actions.ts answers
+ * everybody else with the not-found page before any of this runs — and the
+ * difference is collapsed here as well, so the comment that file has always
+ * carried is true of the code as well as of the intent.
+ */
 export type RemovalOutcome =
-  | { ok: true; toolName: string; told: 'emailed' | 'logged' | 'no-address' | 'not-configured' }
-  | { ok: false; reason: 'reason-too-short' | 'reason-too-long' | 'refused' | 'gone' };
+  | {
+      ok: true;
+      toolName: string;
+      told: 'emailed' | 'logged' | 'no-address' | 'not-configured';
+      /** False when the author had already taken it down themselves. */
+      tookItDown: boolean;
+    }
+  | { ok: false; reason: 'reason-too-short' | 'reason-too-long' | 'not-removed' };
 
 /**
  * Take a review down, and tell its author.
@@ -158,45 +199,53 @@ export async function removeReview(
   const problem = reasonProblem(rawReason);
   if (problem === 'short') return { ok: false, reason: 'reason-too-short' };
   if (problem === 'long') return { ok: false, reason: 'reason-too-long' };
-  if (!/^[0-9]{1,19}$/.test(reviewId)) return { ok: false, reason: 'gone' };
+  if (!/^[0-9]{1,19}$/.test(reviewId)) return { ok: false, reason: 'not-removed' };
 
-  const reason = rawReason.trim();
+  // The reason as it will be STORED. Every other person-typed string in this
+  // codebase goes through this function before it reaches the database, and
+  // this was the one that did not (Phase 8 review, F10). The CHECK added in
+  // 0020 §6 is the guarantee; this is what keeps an administrator from meeting
+  // a constraint name.
+  const reason = cleanReason(rawReason);
 
   const removal = await asViewer<
-    { authorId: string; toolName: string; when: Date } | 'refused' | 'gone'
+    { authorId: string; toolName: string; when: Date; tookItDown: boolean } | 'no'
   >(async (tx) => {
     try {
       const written = await tx.query(RECORD_REMOVAL_SQL, [reviewId, reason]);
-      // No row means there is no live review with that id — already removed,
-      // or never there. The same answer for both (lib/accounts.ts's rule), and
-      // the transaction rolls back rather than leaving a reason behind.
-      if (written.rows.length === 0) return 'gone';
+      // No row means there is no review with that id at all. A review its
+      // author already deleted DOES get one: the reason goes on the record,
+      // the permanent bar in `reviews_removal_is_final` is armed, and the
+      // author is told (supervisor's decision, 13 September 2026).
+      if (written.rows.length === 0) return 'no';
 
       const { rows } = await tx.query(REMOVE_REVIEW_SQL, [reviewId]);
       const row = rows[0] as
-        | { author_id?: string; tool_name?: string; deleted_at?: Date }
+        | { author_id?: string; tool_name?: string; deleted_at?: Date; took_it_down?: boolean }
         | undefined;
-      if (!row?.author_id) return 'gone';
+      if (!row?.author_id) return 'no';
       return {
         authorId: row.author_id,
         toolName: String(row.tool_name ?? ''),
         when: row.deleted_at ?? new Date(),
+        tookItDown: row.took_it_down === true,
       };
     } catch (error) {
-      // 42501 from the policy or the trigger, a CHECK on the reason, or
-      // something of ours: all of them are "it did not come down", and the
-      // screen says that rather than which.
+      // 42501 from the policy or the trigger, a CHECK on the reason, a second
+      // removal refused by the unique index, or something of ours: all of them
+      // are "it did not come down", and the screen says that rather than
+      // which. The transaction rolls back, so no reason is left behind.
       refused(error);
-      return 'refused';
+      return 'no';
     }
   });
 
-  if (removal === 'refused') return { ok: false, reason: 'refused' };
-  if (removal === 'gone') return { ok: false, reason: 'gone' };
+  if (removal === 'no') return { ok: false, reason: 'not-removed' };
 
   return {
     ok: true,
     toolName: removal.toolName,
+    tookItDown: removal.tookItDown,
     told: await tell(removal.authorId, removal.toolName, removal.when, reason),
   };
 }

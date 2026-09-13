@@ -2,8 +2,6 @@
 
 import type { ReactNode } from 'react';
 
-import { recordOpen } from '@/app/tools/actions';
-
 import { buttonClassName, type ButtonSize, type ButtonVariant } from './Button';
 import { Icon } from './Icon';
 import { outboundLink } from '@/lib/outbound';
@@ -35,15 +33,28 @@ import { outboundLink } from '@/lib/outbound';
  * result card was a Foundit URL — so the status bar would stop telling people
  * where they are going, a copied link would be ours rather than the maker's,
  * and a person with JavaScript off would be routed through us for a counter.
- * Instead the `href` is exactly what it was, and `onClick` posts a Server
- * Action beside it. `void` and never awaited: the new tab is already opening
- * and nobody waits on bookkeeping (lib/db.ts's rule about the search log,
- * applied to a click).
+ * Instead the `href` is exactly what it was, and `onClick` posts to `/o`
+ * beside it. Never awaited: the new tab is already opening and nobody waits on
+ * bookkeeping (lib/db.ts's rule about the search log, applied to a click).
  *
- * WHAT THE BEACON CARRIES: the slug, and nothing else. There is no visitor
- * argument to `recordOpen`, and none to `public.record_tool_open` underneath
- * it — no cookie is read, no address is taken and nothing is written to a log.
- * Two people opening the same listing are the same statement.
+ * IT POSTS TO `/o` AND NOT TO THE TOOL PAGE, and that is the Phase 8 review's
+ * F5. Phase 8 used a Server Action, and a Server Action posts to the URL of
+ * the page it is on — so every counted click was `POST /tools/<slug>` in the
+ * request line of every access log in front of the application, beside the
+ * visitor's address and a timestamp. The function logged nothing; the
+ * transport logged everything. `/o` is one character, the same for every
+ * listing, and the slug travels in the body where no access log will carry it.
+ * app/o/route.ts is the whole of the reasoning, including why it answers 204
+ * to everybody and how it is bounded.
+ *
+ * WHAT THE BEACON CARRIES: the slug, and nothing else. No cookie is read, no
+ * address is sent, and `public.record_tool_open` underneath it has no second
+ * argument to give it. Two people opening the same listing are the same
+ * statement.
+ *
+ * `keepalive` so the request survives the page being left behind, and the
+ * promise is dropped on the floor: there is nothing a failed count should do
+ * to somebody who is on their way to a maker's site.
  *
  * WITH JAVASCRIPT OFF, THE LINK STILL WORKS AND THE CLICK IS NOT COUNTED.
  * That is the right way round: the recommendation is the product and the
@@ -67,6 +78,27 @@ export interface OutboundLinkProps {
   slug?: string;
 }
 
+/**
+ * Tell the server a listing was opened. One POST, one field, no answer read.
+ *
+ * `catch(() => {})` rather than nothing at all, because an unhandled rejection
+ * in a browser is a console error on a page somebody is using, and the route
+ * answers 204 to everything so there is never anything here worth reporting.
+ */
+function beacon(slug: string): void {
+  try {
+    void fetch('/o', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // A browser with no fetch is a browser that opens the link and counts
+    // nothing, which is the same thing JavaScript being off does.
+  }
+}
+
 export function OutboundButton({
   url,
   children,
@@ -85,7 +117,7 @@ export function OutboundButton({
       target={link.target}
       rel={link.rel}
       className={buttonClassName(variant, size, className)}
-      onClick={slug ? () => void recordOpen(slug) : undefined}
+      onClick={slug ? () => beacon(slug) : undefined}
     >
       {children}
       {hideIcon ? null : (

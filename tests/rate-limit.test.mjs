@@ -23,6 +23,8 @@ import {
   DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
   DEFAULT_EMBEDDING_CALLS_PER_DAY,
   DEFAULT_EMBEDDING_TOKENS_PER_DAY,
+  DEFAULT_OPENS_PER_DAY,
+  DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_RERANK_CALLS_PER_DAY,
   DEFAULT_SEARCHES_PER_IP_PER_HOUR,
@@ -32,10 +34,12 @@ import {
   RefusalCircuit,
   TokenBuckets,
   allowEdit,
+  allowOutboundOpen,
   allowPublish,
   allowSignInCode,
   limits,
   mayEmbedTokens,
+  outboundOpensToday,
   paidCallsToday,
   visitorKey,
 } from '../lib/rate-limit.ts';
@@ -208,6 +212,8 @@ test('the limits come from the environment, with the documented defaults', () =>
     MAX_TOOLS_PER_ACCOUNT_PER_DAY: process.env.MAX_TOOLS_PER_ACCOUNT_PER_DAY,
     MAX_TOOLS_PER_ADDRESS_PER_HOUR: process.env.MAX_TOOLS_PER_ADDRESS_PER_HOUR,
     MAX_EDITS_PER_ACCOUNT_PER_HOUR: process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR,
+    MAX_OPENS_PER_VISITOR_PER_HOUR: process.env.MAX_OPENS_PER_VISITOR_PER_HOUR,
+    MAX_OPENS_PER_DAY: process.env.MAX_OPENS_PER_DAY,
   };
   try {
     for (const name of Object.keys(saved)) delete process.env[name];
@@ -225,6 +231,8 @@ test('the limits come from the environment, with the documented defaults', () =>
       toolsPerAccountPerDay: DEFAULT_TOOLS_PER_ACCOUNT_PER_DAY,
       toolsPerAddressPerHour: DEFAULT_TOOLS_PER_ADDRESS_PER_HOUR,
       editsPerAccountPerHour: DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
+      opensPerVisitorPerHour: DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
+      opensPerDay: DEFAULT_OPENS_PER_DAY,
     });
     // Phase 7's review. The embedder has two ceilings now, and the second is
     // the one that is about the money: MAX_EMBEDDING_CALLS_PER_DAY counts
@@ -820,4 +828,120 @@ test('the publishing limiter keeps neither the account id nor the address', () =
   assert.match(fn, /visitorKey\(`publish-account:/, 'the account id is hashed, not kept');
   assert.match(fn, /visitorKey\(`publish-address:/, 'and so is the address');
   assert.doesNotMatch(fn, /console\./, 'and neither is logged');
+});
+
+/* ===========================================================================
+ * Phase 8's review: the two limiter findings
+ * ======================================================================== */
+
+test('the Money panel figure is the window it says it is, not an expired one', () => {
+  // F9, driven by the reviewer's own sequence. `count` was a bare getter that
+  // did not roll the window, so after a quiet day the panel showed yesterday's
+  // total until the next paid call happened to roll it — a number that was
+  // neither "today" nor "since this process started", under a heading that
+  // claimed the second.
+  const clock = fakeClock(1_000_000_000_000);
+  const cap = new DailyCap(clock);
+
+  for (let i = 0; i < 7; i += 1) assert.equal(cap.take(1000), true);
+  assert.equal(cap.count, 7, 'day 1, after 7 reader calls');
+
+  clock.advance(24 * HOUR + MINUTE);
+  assert.equal(
+    cap.count,
+    0,
+    'day 2 with no call made yet: the window expired, and reading it rolls it',
+  );
+
+  assert.equal(cap.take(1000), true);
+  assert.equal(cap.count, 1, 'day 2, after the first call');
+});
+
+test('the Money panel can tell "none yet" from "none today"', () => {
+  // The other half of F9: a freshly restarted process drew `0 / 0 / 0`, which
+  // is a measurement, where the truth was "this process has not measured
+  // anything" — the exact thing the page's own header says it never does.
+  const before = paidCallsToday();
+  assert.equal(typeof before.measured, 'boolean');
+  assert.equal(typeof before.startedAt, 'number');
+  assert.ok(before.startedAt > 0, 'the window has a beginning the page can print');
+  assert.ok(
+    before.startedAt <= Date.now(),
+    'and it is in the past, because it is when this process started counting',
+  );
+});
+
+test('the outbound click is bounded per visitor and per process per day', () => {
+  // F5. `tools.open_count` got a writer in Phase 8 and no bound at all: 200
+  // anonymous posts moved it by 146 in 23 seconds and starved the pool that
+  // renders pages while they ran.
+  const visitor = `1.2.3.${Math.floor(Math.random() * 200) + 1}`;
+  let counted = 0;
+  for (let i = 0; i < DEFAULT_OPENS_PER_VISITOR_PER_HOUR * 4; i += 1) {
+    if (allowOutboundOpen(visitor)) counted += 1;
+  }
+  assert.equal(
+    counted,
+    DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
+    'one visitor may have exactly the hourly bound counted, and no more',
+  );
+
+  // A second visitor has their own bucket, so the bound is per visitor rather
+  // than per site — which is what makes it a fairness limit and not an outage.
+  assert.equal(allowOutboundOpen(`9.9.9.${Math.floor(Math.random() * 200) + 1}`), true);
+
+  // And the daily cap is a real ceiling above it, spent only by clicks the
+  // per-visitor bucket allowed.
+  assert.ok(outboundOpensToday() >= DEFAULT_OPENS_PER_VISITOR_PER_HOUR);
+  assert.ok(outboundOpensToday() <= DEFAULT_OPENS_PER_DAY);
+});
+
+test('the outbound bound keeps nothing about the visitor', () => {
+  // The same rule as every other bucket here: the address is hashed with the
+  // per-process salt on the way in and the string is dropped. This is the
+  // answer to loop-progress's Phase 8 note that bounding the beacon "would
+  // mean reading the visitor's address on a path whose whole design is that it
+  // reads nothing about the visitor".
+  const source = readFileSync(new URL('../lib/rate-limit.ts', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('export function allowOutboundOpen'));
+  const fn = body.slice(0, body.indexOf(String.fromCharCode(10) + '}'));
+  assert.match(fn, /visitorKey\(`open:/, 'the address is hashed, not kept');
+  assert.doesNotMatch(fn, /console\./, 'and it is not logged');
+
+  // Two visitors, two buckets; one visitor, one bucket. Stated over the key
+  // rather than over the limiter, because the key is the whole of it.
+  assert.notEqual(visitorKey('open:1.1.1.1'), visitorKey('open:2.2.2.2'));
+  assert.equal(visitorKey('open:1.1.1.1'), visitorKey('open:1.1.1.1'));
+  assert.notEqual(visitorKey('open:1.1.1.1'), visitorKey('1.1.1.1'));
+});
+
+test('the beacon route answers 204 to everything and reads no cookie', () => {
+  // F5's other half: the count used to be a Server Action, which posts to the
+  // page's own URL — so `POST /tools/<slug>` was in the request line of every
+  // access log, beside the visitor's address. The route's own source is the
+  // thing to assert here, because the alternative is a live server.
+  // Comments out first: this file says "currentUserId() is not called" in
+  // prose, and a test that read the prose would be asserting the opposite of
+  // what it means to.
+  const stripComments = (source) =>
+    source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const route = stripComments(
+    readFileSync(new URL('../app/o/route.ts', import.meta.url), 'utf8'),
+  );
+  assert.match(route, /status: 204/, 'one status, and it is 204');
+  assert.doesNotMatch(route, /status: (200|403|404|429|500)/, 'and there is no second one');
+  assert.doesNotMatch(route, /cookies\(\)/, 'no cookie is read');
+  assert.doesNotMatch(route, /currentUserId|currentViewer/, 'and nobody is identified');
+  assert.match(route, /sameOrigin\(/, 'the Origin is checked, because a Route Handler is not');
+  assert.match(route, /allowOutboundOpen\(/, 'and it is bounded');
+
+  // And the action it replaced is gone rather than left beside it.
+  const actions = stripComments(
+    readFileSync(new URL('../app/tools/actions.ts', import.meta.url), 'utf8'),
+  );
+  assert.doesNotMatch(
+    actions,
+    /export async function recordOpen/,
+    'the Server Action whose id was in the public client bundle is gone',
+  );
 });

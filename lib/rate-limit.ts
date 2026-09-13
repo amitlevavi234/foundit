@@ -118,6 +118,33 @@ export const DEFAULT_READER_CALLS_PER_DAY = 240;
 export const DEFAULT_RERANK_CALLS_PER_DAY = 120;
 
 /**
+ * How many outbound clicks one visitor may have counted in an hour, and how
+ * many this process will count in a day between all of them.
+ *
+ * THE PHASE 8 REVIEW'S F5. `tools.open_count` got a writer in Phase 8 and no
+ * bound at all: 200 anonymous posts in 23 seconds moved it by 146 and starved
+ * the pool that renders pages while they ran, and 5,000 calls at the SQL layer
+ * took 19 seconds. The counter feeds no ordering anywhere — `/top` orders on
+ * likes, saves and rating, and nothing in the codebase orders on `open_count`
+ * — so inflating it moves no listing up a page. What it costs is a pooled
+ * connection and a row version on the catalogue's busiest table, which is
+ * enough.
+ *
+ * THIRTY AN HOUR because the honest upper bound on a person is "opened every
+ * result on a page of twenty, twice". The daily cap is the backstop the
+ * per-visitor one cannot see — a thousand addresses making thirty each — and
+ * it is deliberately far above any real day: 20,000 clicks against a catalogue
+ * of 224 listings is a number this product will not reach before Phase 9
+ * gives it a proper limiter in front of the origin.
+ *
+ * OVER EITHER BOUND, NOTHING IS COUNTED AND NOTHING IS SAID. The route answers
+ * 204 whatever happens, because the alternative is a status code that tells a
+ * script which slugs are real and how much of its allowance is left.
+ */
+export const DEFAULT_OPENS_PER_VISITOR_PER_HOUR = 30;
+export const DEFAULT_OPENS_PER_DAY = 20_000;
+
+/**
  * The embedder's SECOND cap, and the one that is about the money.
  *
  * **THE PHASE 7 REVIEW'S F4, AND IT IS AN ARITHMETIC DEFECT RATHER THAN A
@@ -289,6 +316,8 @@ export interface Limits {
   toolsPerAccountPerDay: number;
   toolsPerAddressPerHour: number;
   editsPerAccountPerHour: number;
+  opensPerVisitorPerHour: number;
+  opensPerDay: number;
 }
 
 /** The configured ceilings. Read at call time so a test can set them. */
@@ -334,6 +363,11 @@ export function limits(): Limits {
       process.env.MAX_EDITS_PER_ACCOUNT_PER_HOUR,
       DEFAULT_EDITS_PER_ACCOUNT_PER_HOUR,
     ),
+    opensPerVisitorPerHour: positiveInt(
+      process.env.MAX_OPENS_PER_VISITOR_PER_HOUR,
+      DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
+    ),
+    opensPerDay: positiveInt(process.env.MAX_OPENS_PER_DAY, DEFAULT_OPENS_PER_DAY),
   };
 }
 
@@ -534,9 +568,41 @@ export class DailyCap {
     return this.used + requests <= cap;
   }
 
+  /**
+   * Roll the window if it has expired, and answer what is in it now.
+   *
+   * THE PHASE 8 REVIEW'S F9. `count` was a bare getter that did not roll, so
+   * the Money panel's figure was neither "today" nor "since this process
+   * started": after a quiet stretch it showed an expired window's total until
+   * the next paid call happened to roll it.
+   *
+   *     day 1, after 7 reader calls   ->  panel shows 7
+   *     day 2, no call made yet       ->  panel shows 7   (the window expired)
+   *     day 2, after the first call   ->  panel shows 1
+   *
+   * A READER THAT MUTATES, which is worth saying out loud. Rolling is what
+   * `take` and `fits` already do on every call, and the alternative — a getter
+   * that reports a window it knows has expired — is the defect. `startedAt`
+   * comes back with it so a page can say WHICH twenty-four hours it is
+   * showing instead of asserting one.
+   */
+  rolled(): { used: number; startedAt: number } {
+    const now = this.clock.now();
+    if (now - this.windowStart >= DAY_MS) {
+      this.windowStart = now;
+      this.used = 0;
+    }
+    return { used: this.used, startedAt: this.windowStart };
+  }
+
   /** How many have been counted in the current window. Tests and the report. */
   get count(): number {
-    return this.used;
+    return this.rolled().used;
+  }
+
+  /** When the window this count belongs to began. */
+  get startedAt(): number {
+    return this.rolled().startedAt;
   }
 }
 
@@ -568,6 +634,13 @@ declare global {
          * other — the same reasoning `published` is a second instance for.
          */
         edited: TokenBuckets;
+        /**
+         * Outbound clicks, counted globally per day. The per-visitor half
+         * lives in `buckets`, which is already hourly and already keyed on a
+         * salted hash of the address; this is the backstop a per-visitor
+         * limit cannot see.
+         */
+        opens: DailyCap;
         /** Whether the "the rerank budget is spent" line has been said today. */
         rerankCapAnnounced: boolean;
       }
@@ -587,9 +660,24 @@ function state() {
     circuit: new RefusalCircuit(),
     published: new TokenBuckets(undefined, 50_000, DAY_MS),
     edited: new TokenBuckets(),
+    opens: new DailyCap(),
     rerankCapAnnounced: false,
   };
-  return globalThis.__founditLimiter;
+
+  // AND A FIELD ADDED SINCE THAT OBJECT WAS CREATED IS MISSING FROM IT.
+  //
+  // `??=` above only runs when there is no limiter at all. In development the
+  // limiter outlives the module — that is the whole point of parking it here —
+  // so the first request after `opens` was added found a limiter without one
+  // and threw "Cannot read properties of undefined (reading 'take')" out of
+  // `POST /o`. A restart fixed it, which is exactly the kind of fix that
+  // teaches nobody anything.
+  //
+  // One property check per call, and a new counter added later gets a line
+  // here beside this paragraph.
+  const s = globalThis.__founditLimiter;
+  s.opens ??= new DailyCap();
+  return s;
 }
 
 /**
@@ -627,6 +715,38 @@ export function allowSearch(address: string): SearchAllowance {
     allowed: visitor.allowed,
     retryAfterSeconds: visitor.retryAfterSeconds,
   };
+}
+
+/**
+ * May this visitor have one more outbound click counted?
+ *
+ * TWO CEILINGS, the per-visitor one first, and neither of them is told to the
+ * caller: `POST /o` answers 204 whether this returns true or false. The
+ * per-visitor bucket is the one that already exists — the same map, the same
+ * per-process salt, the same `visitorKey` that hashes the address and drops it
+ * — with its own prefix so that a person's searches and a person's clicks are
+ * different buckets. NOTHING NEW IS STORED, which is the answer to
+ * docs/loop-progress.md's Phase 8 note that bounding this "would mean reading
+ * the visitor's address on a path whose whole design is that it reads nothing
+ * about the visitor": the address is read, hashed and dropped inside this
+ * function, exactly as it is for every search.
+ *
+ * The daily cap is spent only once the per-visitor bucket has allowed the
+ * click, so a refused visitor cannot spend the whole site's allowance.
+ */
+export function allowOutboundOpen(address: string): boolean {
+  const config = limits();
+  const perVisitor = state().buckets.take(
+    visitorKey(`open:${address}`),
+    config.opensPerVisitorPerHour,
+  );
+  if (!perVisitor.allowed) return false;
+  return state().opens.take(config.opensPerDay, 1);
+}
+
+/** How many outbound clicks this process has counted today. Tests only. */
+export function outboundOpensToday(): number {
+  return state().opens.count;
 }
 
 /** Which ceiling refused, for a message that is honest without being useful. */
@@ -966,18 +1086,44 @@ export function refusalsTrusted(): boolean {
   return state().circuit.trusted;
 }
 
-/** Today's paid-call counts. For the eval and for the admin panel in Phase 8. */
+/**
+ * The paid calls in the CURRENT twenty-four-hour window, in this process.
+ *
+ * Every figure comes from `DailyCap.rolled()`, so an expired window reads as
+ * zero rather than as yesterday's total (F9). `startedAt` is the oldest of the
+ * four windows still open, which is the earliest moment any of these numbers
+ * could have started counting from — the page prints it rather than claiming a
+ * period. `measured` is false when this process has not made a paid call at
+ * all, which is a different thing from having made none today and is the
+ * difference between a sentence and a 0.
+ */
 export function paidCallsToday(): {
   embeddings: number;
   embeddingTokens: number;
   reader: number;
   rerank: number;
+  /** Epoch milliseconds: when the oldest of the four windows began. */
+  startedAt: number;
+  /** Has this process counted a single paid call in the current window? */
+  measured: boolean;
 } {
   const s = state();
+  const embeddings = s.embeddings.rolled();
+  const embeddingTokens = s.embeddingTokens.rolled();
+  const reader = s.reader.rolled();
+  const rerank = s.rerank.rolled();
   return {
-    embeddings: s.embeddings.count,
-    embeddingTokens: s.embeddingTokens.count,
-    reader: s.reader.count,
-    rerank: s.rerank.count,
+    embeddings: embeddings.used,
+    embeddingTokens: embeddingTokens.used,
+    reader: reader.used,
+    rerank: rerank.used,
+    startedAt: Math.min(
+      embeddings.startedAt,
+      embeddingTokens.startedAt,
+      reader.startedAt,
+      rerank.startedAt,
+    ),
+    measured:
+      embeddings.used + embeddingTokens.used + reader.used + rerank.used > 0,
   };
 }

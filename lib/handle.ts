@@ -89,6 +89,11 @@ export const RESERVED_HANDLES: readonly string[] = [
   'help',
   'maker',
   'moderator',
+  // `o` is the outbound-click beacon (app/o/route.ts, added 13 September 2026
+  // by the Phase 8 review's F5). One character, because the path is in the
+  // request line of every access log and a longer one would say more about
+  // what it is for than it needs to.
+  'o',
   'official',
   'pricing',
   'privacy',

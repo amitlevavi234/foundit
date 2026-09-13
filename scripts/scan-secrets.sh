@@ -53,13 +53,25 @@ cd "$(dirname "$0")/.."
 #                                 `sb_secret_xxxxxxxx` in
 #                                 research/05-devops-and-environments.md. Six
 #                                 x's in a row is not a shape a real key has.
+#   a_throwaway_ci_secret_for_   the BETTER_AUTH_SECRET
+#   a_container_that_lives_two_  .github/workflows/ci.yml hands the server it
+#   minutes                      starts for tests/links.test.mjs to walk. It is
+#                                the key six-digit sign-in codes are hashed
+#                                under (db/migrations/0013_accounts.sql,
+#                                lib/auth-options.ts) for a container that
+#                                holds the invented development catalogue, is
+#                                reachable only from that runner, and is
+#                                destroyed when the job ends. Nothing signs in
+#                                to it but the test's own throwaway account at
+#                                @example.invalid, and AUTH_DEV_CODE_TO_LOG=1
+#                                means no message leaves the process.
 #   k, secret-key-value           the two throwaway values tests/email.test.mjs
 #                                 hands the email client. They are arguments to
 #                                 a stubbed fetch that never leaves the
 #                                 process; the test asserts, among other
 #                                 things, that neither ever appears in a log
 #                                 line or an error.
-ALLOWED_SECRET_LITERALS='local_development_only|local_development_only_app|local_development_only_embed|local_development_only_auth|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|secret-key-value|k|your[-_a-z]*|xxx+|[A-Za-z_]*x{6,}|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
+ALLOWED_SECRET_LITERALS='a_throwaway_ci_secret_for_a_container_that_lives_two_minutes|local_development_only|local_development_only_app|local_development_only_embed|local_development_only_auth|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|secret-key-value|k|your[-_a-z]*|xxx+|[A-Za-z_]*x{6,}|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
 
 # Files whose content is not text we can usefully scan.
 SKIP_PATH_RE='\.(pdf|png|jpg|jpeg|gif|webp|ico|woff2?|ttf|zip|gz)$'

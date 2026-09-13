@@ -116,10 +116,30 @@ const RESULTS_DIR = path.join(EVAL_DIR, 'results');
 /** The recorded vectors that let a keyless run measure the real hybrid search. */
 const FIXTURE_PATH = path.join(ROOT, 'db', 'seed', 'embeddings.fixture.json');
 
+/**
+ * What this process exits with, and what each one means to a person reading a
+ * red step in CI.
+ *
+ *   0  the run finished and nothing regressed
+ *   1  the command line was wrong: an unknown flag, a missing file, a number
+ *      where a number does not belong
+ *   2  THERE WAS NO CONNECTION STRING. A separate code from 1 on purpose, and
+ *      it is the Phase 8 review's margin note: this harness reads DATABASE_URL
+ *      from the environment and from nowhere else, and the one way to run it
+ *      is `node --env-file=.env.local eval/run.mjs`. A CI step that forgets
+ *      the env file is not a typo in a flag — it is a step that measured
+ *      nothing and must be told apart from one that measured something and
+ *      found it wrong.
+ *   3  the database answered badly, or stopped answering
+ *   4  nDCG@10 fell below the recorded baseline by more than the tolerance
+ *
+ * `CONSTRAINT_VIOLATION` used to be 2 and was never returned by anything, so
+ * nothing keyed on it and the number was free.
+ */
 export const EXIT = {
   OK: 0,
   USAGE: 1,
-  CONSTRAINT_VIOLATION: 2,
+  NO_CONNECTION: 2,
   DATABASE: 3,
   REGRESSION: 4,
 };
@@ -2292,16 +2312,24 @@ async function main(argv) {
         'The eval harness reads its connection string from the environment and',
         'from nowhere else. Nothing is hardcoded and no default is guessed.',
         '',
-        'Set it for this command only, so it does not linger in your shell:',
+        'The usual cause is a missing --env-file, and the usual fix is:',
+        '',
+        '  node --env-file=.env.local eval/run.mjs --baseline',
+        '',
+        'Or set it for this command only, so it does not linger in your shell:',
         '',
         '  bash/zsh     DATABASE_URL=postgres://user:pass@host:5432/foundit node eval/run.mjs',
         '  PowerShell   $env:DATABASE_URL = \'postgres://user:pass@host:5432/foundit\'; node eval/run.mjs',
         '',
         'Use a read-only role. The harness only ever runs SELECT.',
         '',
+        'This exits 2 rather than 1: nothing was measured, which is a different',
+        'failure from a flag that was typed wrong, and a step that measured',
+        'nothing must never be able to look like a step that passed.',
+        '',
       ].join('\n'),
     );
-    return EXIT.USAGE;
+    return EXIT.NO_CONNECTION;
   }
 
   // --- Golden set --------------------------------------------------------

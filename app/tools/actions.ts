@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { revalidateTag } from 'next/cache';
 import { redirect } from 'next/navigation';
 
-import { currentUserId, deleteOwnReview, recordToolOpen, setLiked, writeReview } from '@/lib/accounts';
+import { currentUserId, deleteOwnReview, setLiked, writeReview } from '@/lib/accounts';
 
 /* ===========================================================================
  * Liking a tool, and reviewing one.
@@ -65,28 +65,21 @@ export async function postReview(formData: FormData): Promise<void> {
   redirect(written ? `${back}#reviews` : `${back}?review=refused#reviews`);
 }
 
-/**
- * Count one click on the link out to a maker's site.
+/* ---------------------------------------------------------------------------
+ * `recordOpen` WAS HERE, AND IT IS GONE ON PURPOSE (Phase 8 review, F5).
  *
- * docs/product-decisions.md §12, finally kept: the count existed as a column
- * from `0001_init.sql` and had no writer until Phase 8, so every maker's
- * dashboard said 0.
+ * Counting a click out to a maker's site is now `POST /o`, a Route Handler
+ * with the slug in its body — see app/o/route.ts. A Server Action posts to the
+ * URL of the page it sits on, so this one put `POST /tools/<slug>` in the
+ * request line of every access log in front of the application, beside the
+ * visitor's address: exactly the join 0019 §3 says this product does not make,
+ * made by the transport rather than by the function. Its action id was also in
+ * the public client bundle, unauthenticated and unbounded.
  *
- * THE SHORTEST ACTION IN THIS CODEBASE, and every line it does not have is the
- * point. It does not ask who is asking — `currentUserId()` is not called and
- * no cookie is read. It does not log. It does not revalidate the catalogue
- * cache: a counter that invalidated four cached pages on every click would
- * cost more than the figure is worth, and the maker dashboard that draws it is
- * `force-dynamic` and reads the live row anyway. It redirects nowhere, because
- * the visitor's browser is already opening the maker's site in another tab and
- * this page is staying exactly where it is.
- *
- * `public.record_tool_open` underneath it takes the slug and has no second
- * argument to give it (0019 §3).
- */
-export async function recordOpen(slug: string): Promise<void> {
-  await recordToolOpen(slug);
-}
+ * Nothing replaces it in this file. `lib/accounts.ts`'s `recordToolOpen` is
+ * still the only writer of `tools.open_count` in the codebase; what changed is
+ * which request reaches it.
+ * ------------------------------------------------------------------------ */
 
 /** Take your own review down. Nobody else's, and nobody else can take yours. */
 export async function removeMyReview(formData: FormData): Promise<void> {

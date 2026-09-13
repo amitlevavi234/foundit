@@ -1,21 +1,38 @@
 'use server';
 
 import { revalidatePath, revalidateTag } from 'next/cache';
-import { redirect } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 
+import { currentViewer } from '@/lib/accounts';
 import { removeReview } from '@/lib/admin';
 
 /* ===========================================================================
  * The one write the operator dashboard makes.
  *
- * WHAT IS NOT HERE IS THE POINT. There is no `if (viewer.isAdmin)` in this
- * file. `removeReview` sends two ordinary statements as whoever is asking, and
- * 0013's policy, 0013's restrictive policy and 0013's trigger are what decide
- * — so a maker, an ordinary account and a stranger are all refused by the
- * database rather than by a line of TypeScript that could be edited out. What
- * a refusal turns into is a sentence in the query string, and the sentence is
- * the same one a review that was already down produces, because "not allowed"
- * and "not there" are one answer (lib/accounts.ts's rule).
+ * NOTHING HERE DECIDES WHETHER THE REMOVAL MAY HAPPEN. `removeReview` sends
+ * two ordinary statements as whoever is asking, and 0013's policy, 0013's
+ * restrictive policy and 0013's trigger are what decide — so a maker, an
+ * ordinary account and a stranger are all refused by the database rather than
+ * by a line of TypeScript that could be edited out.
+ *
+ * WHAT THE CHECK BELOW DECIDES IS WHAT SOMEBODY SEES, and it is the Phase 8
+ * review's F4. This file used to say that "not allowed" and "not there" were
+ * one answer, and they were two: `RECORD_REMOVAL_SQL` selected the live review
+ * first, so no row gave `problem=gone` and a row followed by the database's
+ * refusal gave `problem=refused`. A signed-out stranger with the action id —
+ * lifted from an administrator's own rendered page — could ask that pair about
+ * any review id and be told which of the two it was. Nothing was ever written
+ * by any of it, but it was a per-id oracle over `public.reviews` reached
+ * through a route that is supposed to be refused, and the 303 back to
+ * `/admin/reviews` confirmed the route exists on the way out.
+ *
+ * So the first thing that happens is the same thing app/admin/layout.tsx does,
+ * through the same per-request read of `profiles.is_admin`: anybody who is not
+ * an administrator gets the not-found page, before the review id has been
+ * looked at, before the reason has been measured, and before any statement is
+ * sent. A live id, a missing id, a signed-in non-administrator and a
+ * signed-out stranger are then one answer, because they are all the same
+ * answer as a URL that does not exist.
  *
  * THE ADMIN FLAG IS NEVER WRITTEN BY ANY APPLICATION STATEMENT, and this file
  * is where somebody would eventually be tempted to write one. There is no
@@ -32,6 +49,11 @@ import { removeReview } from '@/lib/admin';
  * ======================================================================== */
 
 export async function removeReviewAction(formData: FormData): Promise<void> {
+  // Before the argument is touched. The same rule 0020 §3 applies inside the
+  // database to `admin_catalogue_counts`, applied here to a Server Action.
+  const viewer = await currentViewer();
+  if (!viewer?.isAdmin) notFound();
+
   const reviewId = String(formData.get('review') ?? '');
   const reason = String(formData.get('reason') ?? '');
 
