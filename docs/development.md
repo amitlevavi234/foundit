@@ -27,6 +27,120 @@ works because renaming a folder does not require opening what is inside it.
 **Do not press "Reset to factory defaults"** in Docker's error dialog. It does
 not fix this, and it deletes every image and container you have.
 
+## The schema owner is not a superuser, anywhere
+
+**`foundit_owner` is `NOSUPERUSER NOBYPASSRLS` — in the development container,
+in CI and on the server.** Since 13 September 2026 here, and since
+`research/08` §9.3 was written on the server it will run on. It matters enough
+to have its own section because the Phase 8 review found eight defects that
+only a superuser owner was hiding, and every one of them was silent.
+
+**What a superuser owner hid.** Every table in `public` is `FORCE ROW LEVEL
+SECURITY`, which subjects the table's OWNER to its own policies. A SECURITY
+DEFINER function runs as `foundit_owner`, so it is subject to them too — unless
+that role is a superuser, in which case row-level security is switched off for
+it entirely. `public.record_tool_open` updated `public.tools` outside 0014's
+counters window, matched no policy, and updated zero rows. An UPDATE that
+matches nothing is a success: no error, no log line, and a counter that would
+have read 0 on every listing for ever. Seven more functions were the same
+defect — the three query caches, the embedding queue, `search_event_tools`,
+the two listing-ownership functions, and `public.profiles_public`, a view that
+would have returned no rows to anybody and blanked every byline on the site.
+
+**How the container is built.** `POSTGRES_USER` is `postgres`, not
+`foundit_owner`, because PostgreSQL refuses to take SUPERUSER away from the
+role `initdb` bootstrapped with — *"the bootstrap superuser must have the
+SUPERUSER attribute"* — so a container started as `foundit_owner` has a
+superuser owner for ever, whatever is written afterwards. `db/dev-roles.sql` is
+mounted into `/docker-entrypoint-initdb.d` and runs once, as `postgres`, on an
+empty `./db/.data`: it creates the four roles, hands the database and schema
+`public` to `foundit_owner`, installs the three extensions, and grants the
+owner two things a plain role cannot have.
+
+`.github/workflows/ci.yml` runs the SAME FILE against its service container, so
+the two cannot drift, and then fails the build if `foundit_owner` comes back
+`rolsuper` or `rolbypassrls`.
+
+**An existing `./db/.data` cannot be converted.** The bootstrap role's
+attribute is fixed at `initdb`, so a container created before this date has to
+be rebuilt. Keep the data:
+
+```bash
+docker exec foundit-dev-db pg_dump -U foundit_owner -d foundit -Fc -f /tmp/foundit.dump
+docker cp foundit-dev-db:/tmp/foundit.dump ./foundit.dump
+docker compose -f db/docker-compose.dev.yml down
+# move ./db/.data aside rather than deleting it, until the restore has been checked
+docker compose -f db/docker-compose.dev.yml up -d
+docker cp ./foundit.dump foundit-dev-db:/tmp/foundit.dump
+docker exec foundit-dev-db pg_restore -U postgres -d foundit /tmp/foundit.dump
+```
+
+`pg_dump` does not carry cluster-level settings, so put back the two things
+`0003` and `0013` set with `ALTER ROLE`:
+
+```bash
+docker exec -i foundit-dev-db psql -U postgres -d foundit \
+  -c "alter role foundit_app set statement_timeout = '5s'" \
+  -c "alter role foundit_auth set search_path = auth_core" \
+  -c "alter role foundit_auth set statement_timeout = '5s'"
+```
+
+Then check, because this is the whole point:
+
+```bash
+docker exec -i foundit-dev-db psql -U postgres -d foundit \
+  -c "select rolname, rolsuper, rolbypassrls from pg_roles where rolname = 'foundit_owner'"
+```
+
+### The owner's window, and when you have to open it by hand
+
+`0020_phase8_review.sql` §2 gives every table in `public` one more policy,
+`TO foundit_owner`, gated on `current_setting('foundit.definer') = 'on'`. It is
+0014's counters window generalised: a SECURITY DEFINER function that needs to
+reach past a policy carries `SET "foundit.definer" = 'on'` in its own
+definition, which PostgreSQL applies on entry and **restores on exit, including
+on an exception**, so the window is open for the body of one named function and
+not one statement longer. `db/test/admin_test.sql` §11 holds the list of
+functions that may carry it and fails on any that is not on it.
+
+**None of this changes what the owner can do.** An owner connection could
+always drop a policy — it owns the tables. What the window changes is that the
+owner has to SAY it is reaching past one, and that everything which does not
+say so gets an error where it used to get `UPDATE 0`.
+
+So: **if you are connected as `foundit_owner` and a statement touches no rows
+when you expected it to touch some, that is row-level security and not a typo.**
+Open the window for the statement and close it again:
+
+```sql
+begin;
+set local "foundit.definer" = 'on';
+-- your statement
+commit;
+```
+
+`set local` rather than `set`, so it goes away with the transaction whether the
+transaction commits or rolls back.
+
+**Three things open it by hand and say so**: `db/seed/dev_seed.sql`, which is
+the owner loading 224 listings that belong to nobody; a handful of fixtures in
+`db/test/`, each carrying a comment saying why no function could plant that
+row; and the admin-flag statement below.
+
+### If `db/apply.mjs --fresh` refuses to create `vector`
+
+`--fresh` drops schema `public`, and the three extensions live in it.
+`citext` and `pg_trgm` are *trusted* extensions and the owner may put them
+back; **`vector` is not**, so a non-superuser cannot create it. Put it back as
+the superuser and run the applier again:
+
+```bash
+docker exec -i foundit-dev-db psql -U postgres -d foundit \
+  -c "create extension if not exists vector"
+```
+
+Or recreate the container, which runs `db/dev-roles.sql` and does all three.
+
 ## The server also runs PostgreSQL
 
 Production lives there, not on the laptop.
@@ -534,6 +648,83 @@ docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
   -c "alter role foundit_auth login noinherit password 'local_development_only_auth'"
 ```
 
+### How the route walk signs itself in, and why that is not a back door
+
+`tests/links.test.mjs` walks every `/admin` route twice: with no session, and
+with a signed-in account that is **not** an administrator. The second half used
+to need `FOUNDIT_TEST_SESSION` set by hand, and nothing anywhere set it — so
+the half of Phase 8's gate item 3 that matters had never run, including in CI
+(the review's F12). It mints its own account now, and it fails rather than
+skipping when a server is answering and the minting does not work.
+
+What it does, in order:
+
+1. `POST /api/auth/email-otp/send-verification-otp` for a fresh
+   `@example.invalid` address, with an `Origin` header — Better Auth answers
+   403 without one.
+2. **Writes the six digits it is about to use** into
+   `auth_core.verification.value`, hashed with the application's own
+   `hashSignInCode`, as `foundit_auth`.
+3. `POST /api/auth/sign-in/email-otp` with those digits, and keeps the cookie
+   Better Auth signs.
+4. Walks the routes, checks the cookie really is a session (it reaches
+   `/settings`), and deletes the account: the profile as `foundit_app` under
+   the throwaway's own claim, which is the path `profiles_delete` exists for,
+   and the `auth_core` rows as `foundit_auth`.
+
+**Step 2 is a shortcut and it is stated rather than hidden.** The stored value
+is HMAC-SHA256 under `BETTER_AUTH_SECRET` (0013, and the Phase 6 review is
+why), so recovering a code the honest way is a million hashes — four seconds,
+measured — and reading it out of a log means knowing where the operator pointed
+their log. Everything else is real: Better Auth issues the row, verifies the
+code, creates the session and signs the cookie, and the cookie is what the walk
+carries. The only thing the test supplies is what an inbox would supply.
+
+**It is not a way in.** The step needs `DATABASE_URL_AUTH` and
+`BETTER_AUTH_SECRET`, which is to say it needs the authentication role's
+password and the key the codes are hashed under. Anybody holding both can
+already sign in as anybody; the test holds them because
+`node --env-file=.env.local --test` hands them to it, and nothing in the
+application reads either from anywhere a request can reach.
+
+The addresses are always `@example.invalid` and `AUTH_DEV_CODE_TO_LOG=1` keeps
+every message in the log, so no message is ever sent anywhere even if the
+address were deliverable, which it is not.
+
+## Counting a click on a link out (`POST /o`)
+
+The "Opened from Foundit" number on a maker's dashboard is
+`tools.open_count`, and the only statement that moves it is
+`public.record_tool_open(citext)`. What reaches that function is **`POST /o`**,
+a Route Handler with the slug in the request body.
+
+**Why a route of its own rather than a Server Action.** A Server Action posts
+to the URL of the page it sits on, so counting a click from `/tools/tabsplit`
+put `POST /tools/tabsplit` in the request line of every access log in front of
+the application, beside the visitor's address and the same timestamp. That is
+the one join `0019` §3 says this product does not make, made by the transport
+rather than by the function (the Phase 8 review's F5). `/o` is one character
+and the same for every listing.
+
+Things to know if you touch it:
+
+- **It answers 204 to everything.** Not 200 for a slug that exists, not 404 for
+  one that does not, not 429 over the bound, not 403 on a bad `Origin`. If you
+  are debugging it, read `tools.open_count`, not the response.
+- **It checks `Origin` itself.** Next verifies the Origin of a Server Action
+  and verifies nothing about a Route Handler. A browser sends `Origin` on every
+  POST including a same-origin one, so a request without one is not a browser.
+  A `curl` without `-H "origin: http://localhost:3000"` counts nothing, and
+  that is not a bug.
+- **It is bounded**: `MAX_OPENS_PER_VISITOR_PER_HOUR` (30) and
+  `MAX_OPENS_PER_DAY` (20,000) in `.env.example`. Both come out of the bucket
+  map `lib/rate-limit.ts` already keeps; the address is hashed with the
+  per-process salt and dropped, so nothing new is stored anywhere.
+- **It reads no cookie**, and `recordToolOpen` still opens its transaction with
+  no identity claim at all. A signed-in person's click and a stranger's are the
+  same statement.
+
+
 ## Making yourself an administrator (and why no screen can)
 
 The operator dashboard at `/admin` is behind `profiles.is_admin`, and **nothing
@@ -551,15 +742,28 @@ the application never has:
 ```bash
 # Sign in first, through /sign-in, so the profile row exists.
 docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
-  -c "update public.profiles set is_admin = true where handle = 'your_handle'"
+  -c "begin; set local \"foundit.definer\" = 'on'; \
+      update public.profiles set is_admin = true where handle = 'your_handle'; \
+      commit"
 ```
 
 Take it away the same way, and take it away when you are finished with it:
 
 ```bash
 docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
-  -c "update public.profiles set is_admin = false where handle = 'your_handle'"
+  -c "begin; set local \"foundit.definer\" = 'on'; \
+      update public.profiles set is_admin = false where handle = 'your_handle'; \
+      commit"
 ```
+
+**`set local "foundit.definer" = 'on'` is not decoration, and it is new on
+13 September 2026.** `profiles_update` is `id = auth.uid()`, `public.profiles`
+is FORCE ROW LEVEL SECURITY, and `foundit_owner` is no longer a superuser — so
+without the window this statement is `UPDATE 0`: no error, no warning, and a
+handle that is not an administrator when you go and look. It is the same defect
+as the Phase 8 review's F1, in the operator's own runbook, and the answer is
+the same: **read the `UPDATE 1` the statement prints.** If it says `UPDATE 0`,
+the window is what is missing.
 
 On the server the same statement runs through the tunnel as `foundit_owner`
 (see *Credentials, and the two roles* above). It is deliberately a thing you
@@ -567,10 +771,30 @@ have to mean to do.
 
 **The Dashboard link in the account menu is a convenience and not the lock.**
 It is drawn only for an administrator, but a person who types `/admin` gets the
-not-found page — the same page, with the same title, that a mistyped URL gets —
-and a person who sends the SQL themselves gets `42501` from every one of the
-twelve `admin_*` functions. The link's absence protects nothing, and it is
-not supposed to.
+not-found page — the same page, with the same title **and the same 404** that a
+mistyped URL gets — and a person who sends the SQL themselves gets `42501` from
+every one of the twelve `admin_*` functions. The link's absence protects
+nothing, and it is not supposed to.
+
+The 404 is `app/admin/layout.tsx`, and it is a layout rather than a line in each
+page for one reason: `notFound()` can only set a status code while nothing has
+been sent, and a layout runs before the page it wraps. Until 13 September 2026
+this sentence said "the same page, with the same title" and was true of both
+halves and of neither — `/admin` answered **200** where
+`/definitely-not-a-route` answered 404, and `HEAD /admin` answered 200 with no
+body at all, so the only thing in that response was the difference.
+
+**Do not put a `loading.tsx` at `app/`.** A `loading.tsx` is a Suspense
+boundary, and one at the root wraps every route in the product — so Next
+flushes the shell, with its 200, before any page has decided anything, and
+`notFound()` can no longer set a status code ANYWHERE in the application. That
+is what it was doing: `/tools/<missing>`, `/u/<nobody>`, `/maker/<not mine>`
+and `/admin` all answered 200 under `next start`. The homepage's loading state
+lives at `app/(home)/loading.tsx` now, in a route group, so the URL is still
+`/` and the boundary wraps the homepage and nothing else; every catalogue route
+keeps its own. `tests/admin.test.mjs` fails if `app/loading.tsx` or
+`app/admin/loading.tsx` reappears, and `tests/links.test.mjs` fails against a
+production build if the status goes back to 200.
 
 ## What the owner must create
 

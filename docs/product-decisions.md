@@ -82,6 +82,26 @@ catalogue is worth policing.
   administrator wrote down, and — where email is configured — one plain-text
   message says the same three things and points at `/contact` for an appeal. The
   Settings copy is the one that works when the mail bounces.
+- **An administrator may record a removal against a review its author has
+  already deleted** (decided by the supervisor, 13 September 2026, after the
+  Phase 8 review). The two are different events and the operator's page now
+  keeps them apart, but they are not exclusive: `0015` deliberately leaves an
+  author's own deletion re-postable, and the permanent bar in
+  `reviews_removal_is_final` is armed by the EXISTENCE of a removal row rather
+  than by `deleted_at`. Without this an author who deletes ahead of a moderator
+  keeps the right to post the same words again, and the screen's only answer
+  was "that review is not live". The reason is recorded and the author is told,
+  exactly as for any other removal.
+- **A retracted review's words are not operator data.** Where an author took
+  their own review down and no administrator has recorded a removal against it,
+  `/admin/reviews` shows the listing, the handle and the date and not the text.
+  The same reasoning `0015` removed `auth.is_admin()` from `collections_read`
+  for: a person who withdrew something did not publish it to us instead.
+- **The reason is a person-typed string and is treated as one** (13 September
+  2026). It goes through the same stripper every other typed string in the
+  product goes through and meets the same CHECK behind it, because it is shown
+  to the author on their Settings page, printed on the operator's screen and
+  put into the body of an email. It was the one typed string with neither.
 - Reports of a review or a listing come in through the contact and report pages
   (`/contact`, `/report`) and reach the team by email (§5).
 - Deleting your own account removes your own reviews.
@@ -297,6 +317,76 @@ a day by the statement the application already runs to find out who is asking.
 Before it, "last seen" would have had to be `profiles.updated_at`, which means
 "last edited their display name" wearing another column's name.
 
+### Amended 13 September 2026, after the Phase 8 review
+
+**What the "never joined" test guarantees, and what it does not.** The
+paragraph above said §2 "is now a test rather than a promise". It was a text
+filter. The review wrote two functions that join search text to a named person
+and pass it verbatim: one reached a person through `public.tools`, which was on
+neither list and carries `submitted_by` and `owner_id`; the other reached
+`public.profiles` as `'public.pro' || 'files'` inside an `execute`, so the name
+never appeared in the text at all.
+
+§2 is three checks now. An **allowlist** of every `admin_*` function's
+arguments and OUT columns, held in the suite and compared against the
+catalogue, so a function that is not in it fails and a column that differs from
+it fails. The two table lists, with `public.tools`, `tool_claims`,
+`ownership_changes`, `review_removals` and `tool_problems` on the **people**
+list, and `public.admin_catalogue_unmatched` as the one named exception —
+allowed only while its columns are exactly `(slug, name, published_at)`. And no
+`admin_*` body may contain `execute`, `format(`, `||`, `to_regclass`,
+`query_to_xml` or a dollar-quoted string, because a body that cannot assemble a
+table name cannot hide one.
+
+Said plainly, because the earlier claim was too large: **this does not make it
+impossible for a migration author to write a function that joins the two.** An
+author who edits the allowlist can ship anything. What it makes impossible is
+doing it by accident, or in a diff that does not say so — the join now costs a
+deliberate edit to the file whose job is refusing things, in the same commit,
+where a reviewer will see it. The real protection is still the schema:
+`public.search_events` has no user column, no session column and no foreign key
+to one, and four migrations say in turn that it never will.
+
+**"Added by" means added by.** The Catalogue and People panels were both keyed
+on `coalesce(owner_id, submitted_by)`, which answers "who maintains this
+listing now". One claim — one click since Phase 7 — moved a listing's "Added
+by" from one handle to another and moved a count off one handle onto another,
+with `submitted_by` unchanged throughout. Both panels read `submitted_by` now,
+and the maintainer has its own column with its own label: the Catalogue shows
+"Added by" and "Maintained by", and People shows "Tools added" and
+"Maintained".
+
+**`last_at` is a timestamp in the function and a day on the page, and the
+difference is deliberate.** `admin_top_queries` and `admin_unmet_demand` return
+`last_at` as a `timestamptz`, because grouping on `query_hash` needs
+`max(created_at)` and a date would make "newest first" a coarser order than the
+data supports. The page renders it through `day()`, and the RSC payload
+therefore carries only the rendered day — so the finest correlation this screen
+offers between a sentence and an account is day-against-day: `last_at`'s day
+against `admin_people.last_seen_day` against `joined_day`. On a site with one
+signed-in account seen on a given day that is a weak inference and it gets
+weaker with scale, but it is the reason the renderer is not going to start
+printing a time, and the reason `last_seen_day` is a DATE column rather than a
+timestamp.
+
+**An author's deletion and an administrator's removal are two events.** The
+Words panel counts distinct reviews rather than `review_removals` rows, and
+`/admin/reviews` keeps the two apart: "Removed by an administrator", with the
+reason and the handle, is a `review_removals` row and nothing else; "Taken down
+by its author" is the author's own `deleted_at`, and it shows the listing, the
+handle and the date **and not the words**, because a retracted review's text is
+not operator data — the same category `0015` took `auth.is_admin()` out of
+`collections_read` for. The page says "showing 100 of N" rather than letting
+older removals fall off a list silently.
+
+**The Money panel names the window it is showing.** It was headed "Since this
+process started", and the counter behind it is a rolling twenty-four hours that
+resets itself — so the figure was never that, and because the getter did not
+roll the window it was not "today" either: after a quiet stretch it showed an
+expired window's total until the next paid call. It is headed "In the last 24
+hours, in this process, started &lt;time&gt;" now, and a process that has made
+no paid call says so in a sentence rather than drawing `0 / 0 / 0`.
+
 ## 11. Paid accounts, later (added 10 September 2026)
 
 Premium accounts are expected eventually, not soon. Two consequences to plan for now,
@@ -365,6 +455,54 @@ Note that **the browser opening a link is not the same as our server fetching on
 (§5 of the plan). The visitor's own browser goes to the maker's site, exactly as it
 would from any other link on the web. That has none of the risk that made us defer the
 automatic filling-in of details, so the link ships in version one.
+
+### Amended 13 September 2026, after the Phase 8 review: the beacon has its own route, and a bound
+
+Two things the paragraph above got wrong, both found by the review.
+
+**The function logged nothing and the request logged everything.** A Server
+Action posts to the URL of the page it sits on, so every counted click was
+`POST /tools/<slug>` in the request line of every access log in front of the
+application, beside the visitor's address and the same timestamp — which is
+word for word the join the paragraph above says this product does not make. It
+was true of the function and false of the transport.
+
+So the count is **`POST /o`** now: a Route Handler, one character, the same
+path for every listing, with the slug in the body where no access log will
+carry it. `app/o/route.ts` holds the reasoning. It answers **204 to
+everybody** — not 200 for a slug that exists and 404 for one that does not, not
+429 over the bound, not 403 on a bad Origin, because a status code that varies
+is an oracle. It checks the `Origin` header itself, because Next verifies the
+Origin of a Server Action and verifies nothing about a Route Handler. And it
+reads no cookie, calls nothing that asks who is asking, and still sends its
+statement with no identity claim at all.
+
+**It is bounded.** Thirty opens per visitor per hour, and a daily cap for the
+whole process as the backstop a per-visitor limit cannot see. Both come out of
+the bucket map `lib/rate-limit.ts` already keeps for searches and sign-in
+codes: the address goes through `visitorKey`, which hashes it with a
+per-process random salt and drops it, so **nothing new is stored anywhere**.
+Over either bound the route answers 204 and counts nothing.
+
+The sentence this replaces — that bounding the count "would mean reading the
+visitor's address on a path whose whole design is that it reads nothing about
+the visitor" — was wrong, and the review said why: the address is already read
+by the proxy and written to its log. That is the argument for a limiter rather
+than against one.
+
+**And it counted nothing at all until this date.** `public.record_tool_open`
+updated `public.tools`, which is FORCE ROW LEVEL SECURITY, outside 0014's
+counters window — so on any database whose owner is not a superuser it matched
+no policy and updated zero rows, silently, for ever. It passed every test
+because the development container and CI both ran with a superuser owner and
+neither does any more. `0020_phase8_review.sql` §1 puts the UPDATE inside the
+window; `db/test/admin_test.sql` §7 fails if the owner is a superuser, and runs
+the same statement by hand with the window shut to prove the window is what
+makes it work.
+
+Everything else above stands: the `href` is still the maker's own address, the
+link still works with JavaScript off and still counts nothing when it is, and
+the count is still clicks rather than people.
 
 ## 13. Hosting: our own machine (decided 10 September 2026)
 

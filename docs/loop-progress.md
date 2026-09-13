@@ -2807,21 +2807,24 @@ place above.
 | The per-address ceiling behind Cloudflare | Still off-tunnel. §19 now says what that means, which is what the review asked for |
 | Whether the 15-token cost constant is wrong for the *web* process too | It is right for the web process — one capped sentence, measured — and was wrong for the worker. Both are now priced separately and `tests/rate-limit.test.mjs` computes each |
 
-## Phase 8 — the operator dashboard — **built; items 1–9 done; item 10 not run by me**
+## Phase 8 — the operator dashboard — **built; reviewed; all twelve findings closed**
 
 One migration, one SQL suite of ten sections, two screens, and two numbers that
-had been on a page for a phase with nothing writing them. The adversarial
-review is item 10 and a fresh agent runs it after this; everything below is
-mine.
+had been on a page for a phase with nothing writing them. Then the adversarial
+review, which found twelve things and one of them eight times: `0020_phase8_
+review.sql`, a second SQL suite's worth of new sections, a Route Handler, a
+layout, `tests/admin.test.mjs`, and **a schema owner that is no longer a
+superuser anywhere**. The review's own words and what each fix was are under
+"Review — item 10" below.
 
 | | What landed | Where |
 | --- | --- | --- |
 | Twelve doors and no other | `admin_demand`, `admin_unmet_demand`, `admin_top_queries`, `admin_catalogue_counts`, `admin_catalogue_added`, `admin_catalogue_unmatched`, `admin_signups`, `admin_people`, `admin_words`, `admin_database_bytes`, `admin_ops_events`, `admin_reviews` — all SECURITY DEFINER with a pinned `search_path`, each opening with its own `auth.is_admin()` check and raising 42501 | `0019_admin_dashboard.sql` §4 |
 | The prefix is the test | `db/test/admin_test.sql` enumerates `public.admin\_%` out of `pg_proc` and calls every one of them as four identities. A fourteenth written next year is tested the day it exists; one granted to `foundit_app` with no check in its body fails in the same pass | `db/test/admin_test.sql` §0–2 |
-| Search text and a person, never joined | §2(a) reads `pg_get_functiondef` for every one of them and fails if a body names a table from the search list AND a table from the people list. Both lists are written twice — in the suite and in the migration's header — so they cannot drift | `0019` header, `admin_test.sql` §2 |
+| Search text and a person, never joined | §2 is three checks: an **allowlist** of every function's OUT columns, held in the suite, so a new column is a deliberate edit to it; the two table lists with `public.tools` on the people list and one named exception; and no `execute`, `format(`, `||`, `to_regclass`, `query_to_xml` or dollar-quoted string in any body. §2(a) alone was a text filter and two functions walked past it (F2) | `0019` header, `0020` header, `admin_test.sql` §2 |
 | `infra.ops_events` | `(kind, ok, detail, at)`, one writer granted to `foundit_owner` only, one reader for the panel. No row-level security, for the reason `auth_core` has none: one writer, one reader, and a policy there would have to say `true`. The grant is the boundary and §4 of the suite reads it back | `0019` §1 |
 | "Last seen" is a fact | `profiles.last_seen_day`, a DATE, written by `public.note_seen_today()` onto `auth.uid()`'s own row at most once a day, folded into the statement every signed-in request already sends | `0019` §2, `lib/account-sql.ts` |
-| The click is counted at last | `public.record_tool_open(citext)` — one argument, no setting read, nothing returned, nothing logged — behind a Server Action on the outbound anchor, whose `href` is still the maker's own address | `0019` §3, `components/OutboundLink.tsx`, `app/tools/actions.ts` |
+| The click is counted at last | `public.record_tool_open(citext)` — one argument, no setting read, nothing returned, nothing logged — behind `POST /o`, a Route Handler with the slug in its body, Origin-checked and bounded. The anchor's `href` is still the maker's own address. It counted nothing at all until 0020 §1 put it inside 0014's counters window (F1), and it posted to `/tools/<slug>` until `/o` existed (F5) | `0019` §3, `0020` §1, `app/o/route.ts`, `components/OutboundLink.tsx` |
 | Review moderation | `/admin/reviews`, newest first, with a Remove control that needs a reason of at least 8 characters and posts two ordinary statements down 0013/0015's path | `app/admin/reviews/page.tsx`, `app/admin/actions.ts`, `lib/admin.ts` |
 | The author is told, twice | one plain-text message through `lib/email.ts`'s existing transport, and a section on their own Settings page with the date, the listing, the reason and `/contact` | `lib/email.ts`, `app/settings/page.tsx` |
 | The screens | `/admin` and `/admin/reviews`, built from `Components.dc.html` because there is no admin artboard | `app/admin/`, `styles/components.css` |
@@ -2830,22 +2833,22 @@ mine.
 
 | Claim | Evidence |
 | --- | --- |
-| Every admin function refuses everybody else | `admin_test.sql` §1 — enumerated from `pg_proc`, called as a signed-out claim, `dev_person`, `dev_maker` and an id no profile has, plus five malformed claims; every call must raise 42501 and any other SQLSTATE is a failure, because an exception out of a dashboard function is a 500 where a not-found page belongs. Then a positive control: the same enumeration as `dev_admin`, where every one must succeed |
+| Every admin function refuses everybody else | `admin_test.sql` §1 — enumerated from `pg_proc`, called as a signed-out claim, `dev_person`, `dev_maker` and an id no profile has, plus five malformed claims, **and each of those four times: with no arguments and with `2147483647`, `-1` and `null` in every argument**. Every call must raise 42501 and any other SQLSTATE is a failure, because an exception out of a dashboard function is a 500 where a not-found page belongs. The argument probe is F6's: with no arguments this passed while `admin_catalogue_counts(2147483647)` answered a stranger 22008. Then a positive control: the same four calls as `dev_admin`, where every one must succeed |
 | Each of them is a definer function with a pinned search_path, and callable with no arguments | §0 — `prosecdef` and `proconfig` read back, and `pronargdefaults = pronargs` asserted so §1's dynamic call cannot silently skip one |
-| No admin function can join search text to a person | §2(a) over `pg_get_functiondef`, plus a vacuity check that at least one function names a search table and at least one names a people table, so the comparison is between two live sets |
+| No admin function can join search text to a person | §2, three checks: an allowlist of every function's arguments and OUT columns held in the suite and compared against `proargnames`/`proargmodes`; the two table lists over `pg_get_functiondef` with `tools`, `tool_claims`, `ownership_changes`, `review_removals` and `tool_problems` on the people list and `admin_catalogue_unmatched` as the one named exception; and no dynamic SQL or string building in any body, read from `prosrc`. Plus the vacuity check that at least one function names each side. What it guarantees is that the join cannot be made by accident or in a diff that does not say so — not that a migration author cannot make it |
 | A function granted to the app without a check fails | §2, same pass — `has_function_privilege('foundit_app', …)` AND the body not containing `if not auth.is_admin() then` |
-| Nothing returning query text returns anything that could say whose | §2(b) — the OUT column names are read from `proargnames` for every function returning a `query_text`, and any column matching `user\|author\|owner\|actor\|admin\|claimant\|handle\|profile\|account\|email\|address\|ip\|session\|visitor\|person\|submitted\|id` fails it. The check fails loudly if no function returns a `query_text` at all, so a rename cannot make it vacuous |
+| Nothing returning query text returns anything that could say whose | §2(b) — the OUT column names are read from `proargnames` for every function returning a `query_text`, and the pattern is **no longer anchored at the end**, because `submitted_by`, `tool_maker`, `typed_near`, `by_whom` and `maker` all sailed through the version that was. The check fails loudly if no function returns a `query_text` at all, so a rename cannot make it vacuous |
 | The operator sees a sentence typed once; a maker still needs five | §2 — a one-off sentence inserted and read back through `admin_unmet_demand` with a count of 1, and `maker_query_threshold()` asserted still 5 |
 | A panel with no writer says so | §3 — `admin_ops_events` returns exactly three rows, all `recorded = false` with `ok` and `at` **null**, then one row recorded through `infra.record_ops_event` and read back as recorded |
 | `infra` is out of reach | §4 — no USAGE on the schema for `foundit_app`, `foundit_embed` or `foundit_auth`; no table privilege on `ops_events` for any of them; no EXECUTE on the writer; and the app role trying anyway is refused |
 | The admin flag is not written by any application statement | §5 — an administrator cannot set it on somebody else or on themselves, an ordinary person cannot set it on themselves, and `has_column_privilege` says no application role may UPDATE `is_admin`, `plan`, `created_at` or `last_seen_day` |
 | Only an admin removes a review, and removing is not editing | §6 — a maker's reason insert refused on privilege and their UPDATE filtered to zero rows; a stranger's UPDATE zero rows; an admin with no reason refused by the trigger; a four-character reason refused by the CHECK; the real removal lands; an admin editing a LIVE review refused 42501 and editing a removed one affects zero rows with the text unchanged; the author cannot undo it, cannot edit it and cannot repost it; the author reads their own removal and the maker and a stranger read none; and it appears on `admin_reviews` with the reason and the administrator's handle |
-| The click is counted and cannot count a person | §7 — a signed-out caller increments a published listing, a direct UPDATE of `open_count` is refused on privilege, a draft's counter does not move for somebody who guessed its slug, and `pronargs = 1` |
+| The click is counted and cannot count a person | §7 — first the premise, which is F1's: the suite fails with a sentence if `foundit_owner` is a superuser or has BYPASSRLS, because every other assertion in it is meaningless on a database that is not the one the server will have. Then a signed-out caller increments a published listing **through the policies**, a direct UPDATE of `open_count` is refused on privilege, a draft's counter does not move for somebody who guessed its slug, `pronargs = 1`, and the reviewer's own reproduction runs verbatim: the same UPDATE by hand with the counters window shut touches no rows, and with it open touches exactly one |
 | "Last seen" is the caller's own, once a day | §8 — stamps today, the second call agrees, nobody else's row moves, a signed-out caller is stamped nothing, and `pronargs = 0` |
 | Nothing was weakened | §9 — every table in `public` still has row-level security enabled AND forced; no new write policy is `true`; `foundit_app` still cannot read `tools.embedding` and still has no USAGE on `auth_core`; `foundit_embed` can run none of the twelve |
-| Every /admin route refuses a stranger and a signed-in non-admin | `tests/links.test.mjs`, walking the routes **read from the route tree** rather than a list, with no cookie and with a non-administrator's session: the body must match the not-found page, must not contain six strings that only appear on a dashboard, and must not carry `Dashboard · Foundit` or `Reviews · Foundit` in its `<title>` |
+| Every /admin route refuses a stranger and a signed-in non-admin | `tests/links.test.mjs`, walking the routes **read from the route tree** rather than a list, with no cookie and with a non-administrator's session **the test mints itself** through the emailed-code path: the status must be 404 where the server is a production build, the body must match the not-found page, it must not contain six strings that only appear on a dashboard, and it must not carry `Dashboard · Foundit` or `Reviews · Foundit` in its `<title>`. Walked with GET and with HEAD, because a HEAD response is nothing but its status line. It fails rather than skipping, and CI starts a server for it (F3, F12) |
 | The screens exist and decide nothing | `tests/markup.test.mjs` — `generateMetadata` rather than a fixed `metadata`, `notFound()` and never a redirect to sign-in, no `isAdmin` read in either page or in `lib/admin*.ts` with comments stripped, nothing anywhere in `app/`, `components/` or `lib/` writing `is_admin`, and all twelve panel functions named in `lib/admin-sql.ts` |
-| A number nothing records is a sentence | `tests/markup.test.mjs` — "Never recorded", "Not recorded", the reason reports are not a number, "Not available", and "Since this process started" all asserted as strings on the page |
+| A number nothing records is a sentence | `tests/markup.test.mjs` — "Never recorded", "Not recorded", the reason reports are not a number and "Not available" all asserted as strings on the page. "Since this process started" is gone: it was the one heading of the set that was not true (F9), and the Money panel now names the window it is showing and says "Nothing yet" where this process has measured nothing |
 | The removal notice is not a second transport | `tests/email.test.mjs` — the dev switch covers it (nothing reaches `api.resend.com` on a machine with a real key), the body is four fields and no fifth, it names the listing, the date, the reason and `/contact`, it has no markup and no link, and with no provider it sends nothing and prints nothing |
 
 ### Live, on the development machine
@@ -2854,7 +2857,12 @@ Two throwaway accounts through the emailed-code path, made administrators **as
 `foundit_owner`**, never through the application.
 
 - `/admin` and `/admin/reviews` as a signed-out stranger: the not-found page,
-  with the root title — byte for byte what `/definitely-not-a-route` answers.
+  with the root title. **Corrected 13 September 2026:** the title matched and
+  the STATUS DID NOT — 200 where `/definitely-not-a-route` answered 404, and
+  `HEAD /admin` answered 200 with no body at all, so the only thing the
+  response carried was the discriminator. It is 404 now, decided in
+  `app/admin/layout.tsx` before anything streams, and checked under
+  `next build && next start` with GET and with HEAD. F3.
 - The same two as a signed-in non-administrator: the same.
 - As an administrator: eight panels. 66 searches, 39 that found nothing good, 1
   unanswered sentence; 224 listings; 16 accounts with their public counts;
@@ -2957,20 +2965,39 @@ browser receives.
 
 ### Known weaknesses, stated rather than hidden
 
-- **`open_count` counts clicks, not people, and nothing bounds it.** One person
-  pressing "Open" a hundred times is a hundred opens. Rate-limiting it would
-  mean reading the visitor's address on a path whose whole design is that it
-  reads nothing about the visitor, so the count is left inflatable and the
-  maker dashboard says "opens". The same shape as §19's five-event threshold,
-  which bounds events and not humans.
+- **`open_count` counts clicks, not people.** One person pressing "Open"
+  thirty times is thirty opens, and the maker dashboard says "opens" rather
+  than "people". The same shape as §19's five-event threshold, which bounds
+  events and not humans. **It is bounded now** — thirty per visitor per hour
+  and a daily cap for the whole process, out of the bucket map that already
+  existed, with nothing new stored (F5). The sentence that used to be here,
+  that bounding it "would mean reading the visitor's address on a path whose
+  whole design is that it reads nothing about the visitor", was wrong: the
+  address is already read by the proxy and written to its log, which is the
+  argument for a limiter rather than against one.
 - **With JavaScript off, the click is not counted.** The link still works,
   because the `href` is the maker's own address and always was. This is the
   right way round and it means the figure is a floor rather than a total.
 - **The Money panel cannot know a month to date.** The counters are in memory
-  so that nothing about a visitor is written down; a restart forgets them. The
-  panel is headed "Since this process started" and shows the worst case at the
-  caps beside it, which is the only monthly figure that is knowable without a
-  table nobody wants.
+  so that nothing about a visitor is written down; a restart forgets them, and
+  the window rolls every twenty-four hours. The panel says which window it is
+  showing and when that window began, and shows the worst case at the caps
+  beside it, which is the only monthly figure knowable without a table nobody
+  wants. It was headed "Since this process started" until 13 September 2026,
+  which was neither what the counter measured nor what it reset on (F9).
+- **A route with its own `loading.tsx` still cannot answer 404.** The fix for
+  F3 moved the ROOT `loading.tsx` into a route group, which gave `notFound()`
+  its status code back everywhere — except on the four routes that have a
+  loading state of their own, because a `loading.tsx` is a Suspense boundary
+  and a Suspense boundary flushes the shell before the page decides anything.
+  Measured under `next start`: `/u/<nobody>` and `/maker/<not mine>` answer
+  404; `/tools/<a slug nobody has>` answers 200, and so would `/browse`,
+  `/top` and `/results` if they had a not-found path. Nothing on those four is
+  a privacy boundary — a tool page is public, and a missing one is missing to
+  everybody — so this is a search engine indexing a "Nothing here" page as a
+  200 rather than a disclosure. The trade is a real one and is not made here:
+  the tool page is the page people navigate to most and its loading state is
+  the thing that makes that feel instant. Phase 9's problem.
 - **`last_seen_day` starts empty for everybody.** The column was added in this
   phase, so an account that has not signed in since reads "Not since this was
   built" rather than a date. That is honest and it is also the one figure on
@@ -2999,6 +3026,602 @@ browser receives.
   suite was written, so the schema matches the committed file, and the
   migration had not been committed or pushed at any point in between. The rule
   is about a migration that has shipped; this one had not.
+
+### Review — item 10, run 12–13 September 2026
+
+A fresh Opus 5 subagent that had not seen the work attacked every `admin_*`
+function and every `/admin` route as a stranger, an ordinary account, a maker
+and an administrator; tried to join search text to a person through any
+function, view or column; tried to make a panel show a number nothing records;
+tried the review removal as author, maker and admin; and checked every claim in
+this file. It found twelve things. **Every one of them is fixed, none is
+deferred**, and each fix has a test that fails without it — the database half
+in `db/migrations/0020_phase8_review.sql` and `db/test/admin_test.sql` §1, §2,
+§7 and §10–14, the application half in `tests/admin.test.mjs`,
+`tests/rate-limit.test.mjs` and `tests/links.test.mjs`.
+
+The review's own words are kept first in each entry, because a finding
+paraphrased by the person fixing it is a finding softened.
+
+**F1 turned out to be one of eight.** Making `foundit_owner` a non-superuser —
+which is what `research/08` §9.3 has said the server would be since before
+Phase 1 — turned seven more silent failures into loud ones within a minute.
+They are listed under F1 rather than given numbers of their own, because they
+are one defect written eight times.
+
+#### F1 — `record_tool_open` writes nothing on a database whose owner is not a superuser, and says nothing when it doesn't  [HIGH]
+
+> `public.tools` is `FORCE ROW LEVEL SECURITY`, so its policies apply to the
+> table owner too … `0014` solved that with a policy `TO foundit_owner` gated
+> on `current_setting('foundit.counters') = 'on'`, and all three counter
+> functions open and close that window around their UPDATE. `record_tool_open`
+> — added four migrations later, doing exactly the same thing to the same
+> table — does not … The statement therefore matches no policy and updates zero
+> rows.
+>
+> It passes today only because `foundit_owner` is a **superuser** in the dev
+> container and in CI, and superusers bypass RLS entirely … On that database
+> the counter never moves, no error is raised (an UPDATE that matches nothing
+> is a success), and `lib/accounts.ts` only logs on an exception — so "Opened
+> from Foundit" goes back to being 0 on every listing with nothing anywhere
+> saying why. That is the precise defect Phase 8 exists to fix.
+
+**Fixed, twice: the instance and the class.**
+
+The instance: `public.record_tool_open` wraps its UPDATE in 0014's window
+exactly as `public.tool_likes_count` does — `set_config('foundit.counters',
+'on', true)`, the UPDATE, `set_config(…, 'off', true)` — and the window is
+closed explicitly rather than left to the transaction, for the reason 0014
+gives. `0020_phase8_review.sql` §1.
+
+The class: **`foundit_owner` is `NOSUPERUSER NOBYPASSRLS` in the development
+container and in CI as of 13 September 2026.** `POSTGRES_USER` is now
+`postgres` in both, because PostgreSQL refuses to take SUPERUSER away from the
+role `initdb` bootstrapped with — "the bootstrap superuser must have the
+SUPERUSER attribute" — so a container started as `foundit_owner` has a
+superuser owner for ever, whatever is written afterwards. The bootstrap is one
+file, `db/dev-roles.sql`, mounted into the container's
+`/docker-entrypoint-initdb.d` and run verbatim by the CI workflow, so the two
+cannot drift. It creates the four roles, hands the database and schema `public`
+to `foundit_owner`, installs the three extensions (`vector` is not a trusted
+extension and a non-superuser cannot create it), grants the owner SET on the
+one custom parameter 0020 needs, and grants the three application roles to the
+owner `WITH INHERIT FALSE` so `db/test.sh` can still `SET ROLE` into each of
+them without acquiring any of their privileges.
+
+The development database was rebuilt on the new cluster and restored from a
+dump taken beforehand: 224 listings, 15 profiles, 8 reviews, 68 search events,
+13 accounts — identical to the snapshot, and the same numbers the reviewer left.
+
+**And then seven more of the same defect appeared.** Every one is a SECURITY
+DEFINER function written on the assumption that running "as the owner" means
+running past row-level security. It does not, and on the server it never would
+have:
+
+| What was silently broken | Why nothing noticed |
+| --- | --- |
+| `store_query_reading`, `store_query_rerank`, `store_query_embedding` and the three `touch_query_*` functions | `query_readings`, `query_reranks` and `query_embeddings` have RLS enabled, forced, and **no policy at all** — deliberately, because the only door is meant to be the definer function. The door was shut on the function too. Every model answer this product pays for would have failed to cache and every cache read would have missed |
+| `query_reading`, `query_rerank`, `query_embedding_missing`, `query_vector_ranks` | the same three tables, on the way in. A cache that cannot be read is a cache that is never warm |
+| `queue_embedding`, `embedding_work`, `embedding_job_done`, `embedding_job_failed`, `embedding_jobs_guard` | `embedding_jobs`, same shape. **No listing would ever have been embedded**, so the vector leg of search would have been empty on the server |
+| `log_search_event_tools` | `search_event_tools` has a read policy (`auth.is_admin()`) and no write policy. No search would ever have recorded which listings it returned — which is the table `admin_catalogue_unmatched` and `maker_search_demand` both read |
+| `store_tool_embedding`, `store_problem_embedding`, `store_generated_statement` | `tools` and `tool_problems` under `tool_is_mine`, called by the embedding role, which maintains nothing |
+| `claim_tool`, `reassign_tool_owner` | both change who maintains a listing, so by definition the caller does not maintain it yet. `ownership_changes` has a read policy and no write policy at all |
+| `maker_search_demand`, `maker_listing_metrics` | read `search_event_tools` under a maker's identity, and that table's read policy is `auth.is_admin()` |
+| **`public.profiles_public`** | a VIEW with `security_invoker = false`, so it reads `public.profiles` as its owner — and `profiles_read` is `id = auth.uid() or auth.is_admin()`. It returned **no rows to anybody**, so every review byline, every `/u/<handle>` page and every "added by" on the site would have been blank |
+
+`db/test/search_events_test.sql` predicted the last one word for word, in a
+comment written months earlier: *"it runs with its owner's rights, so it
+returns rows only while that owner is not itself subject to profiles' FORCED
+row-level security. If that ever changes, this check fails loudly instead of
+every byline in the product quietly going blank."* It fired.
+
+**The fix is 0014's mechanism, generalised and named: the owner's window.** One
+policy per table in `public`, all of them the same three lines, all of them
+`TO foundit_owner` and gated on `current_setting('foundit.definer') = 'on'`.
+The window is opened by a function's own `SET` clause, which PostgreSQL applies
+on entry and **restores on exit, including on an exception** — so it is open
+for the body of one named function and not one statement longer. The list of
+functions that carry the clause is written down in `db/test/admin_test.sql`
+§11 and read back out of the catalogue, so a function cannot acquire the window
+without a deliberate edit to the file whose job is refusing things.
+
+What it does not change: an owner connection could always have dropped a
+policy, because it owns the tables. FORCE ROW LEVEL SECURITY has never
+protected this database from what the owner INTENDS; it protects it from what
+the owner does by accident, and until now the accident was silent. What the
+window adds is that the owner has to say it is reaching past a policy, and that
+everything which does not say so gets an error where it used to get `UPDATE 0`.
+The view, which has nowhere to carry a `SET` clause, reads its six columns
+through `public.profiles_public_rows()`, which does.
+
+Three other things open it by hand and say so: `db/seed/dev_seed.sql`, which is
+the owner loading 224 listings that belong to nobody, and a handful of fixtures
+in `db/test/` that plant rows no function could plant — an aged cache row, a
+judgement under a retired model, a draft listing that already names its owner.
+
+**Tested.** `db/test/admin_test.sql` §7 now checks the premise first — it fails
+with a sentence if `foundit_owner` is a superuser or has BYPASSRLS, because
+every other assertion in the suite is meaningless on a database that is not the
+one the server will have — then counts a click as a signed-out stranger through
+the definer function, then runs the reviewer's own reproduction directly: the
+same UPDATE by hand with the counters window shut must touch **no rows**, and
+with it open must touch exactly one. `.github/workflows/ci.yml` has a step of
+its own that fails the build if the owner is a superuser. Every one of the nine
+SQL suites was re-run on the new cluster and on a scratch database built from
+nothing the way CI builds one; the eight further defects above are what came
+out, and `scripts/embed.mjs --from-fixture` loading 727 vectors as
+`foundit_embed` is the proof that the embedding half works again.
+
+#### F2 — The test that makes "search text and a person are never joined" permanent can be passed by a function that joins them  [HIGH]
+
+> §2(a) reads `pg_get_functiondef` for every `admin_*` function and fails if the
+> text names a table from a search list *and* a table from a people list. Two
+> holes make that a text filter rather than a rule:
+>
+> 1. **`public.tools` is on neither list, and it carries two people columns.**
+>    … A function may therefore go `search_events → search_event_tools → tools`
+>    and return query text beside a person's id without naming a people table at
+>    all.
+> 2. **The name only has to not appear literally.** `'pro' || 'files'` inside an
+>    `execute` defeats the regex outright.
+>
+> And §2(b) … matches OUT column names against
+> `(user|author|owner|…|id)$` — anchored at the end, so `submitted_by`,
+> `tool_maker`, `typed_near`, `by_whom` and `maker` all sail through.
+
+**Fixed.** §2 is three checks now, and the first is the one that matters.
+
+*(i) An allowlist.* Every `admin_*` function's arguments and OUT columns are
+written down in the suite, by name and in order, and compared against
+`proargnames`/`proargmodes` read from the catalogue. A function that is not in
+the list fails. A function whose columns differ from the list fails. So a
+column cannot be added to a panel without somebody editing that file, on
+purpose, in the same commit.
+
+*(ii) The two lists, with `public.tools` on the people list* — along with
+`tool_claims`, `ownership_changes`, `review_removals` and `tool_problems`,
+because every one of them carries `submitted_by`, `owner_id`, `claimant_id` or
+`admin_id`. `public.admin_catalogue_unmatched` is the one named exception, and
+it is allowed only while its columns are exactly `(slug, name, published_at)`,
+which (i) is what pins.
+
+*(iii) No body may build or run SQL.* `execute`, `format(`, `||`,
+`to_regclass`, `query_to_xml` and a dollar-quoted string are all refused
+outright, read from `prosrc` rather than from `pg_get_functiondef` — the
+definition always wraps a body in a dollar-quoted string and would fail its own
+check. A body that cannot assemble a table name cannot hide one from (ii).
+
+And §2(b)'s regex is no longer anchored at the end.
+
+**What this guarantees and what it does not**, which is now written into the
+migration header, into §10 of `docs/product-decisions.md` and into the suite
+itself: it does not make it impossible for a migration author to write a
+function that joins the two, because an author who edits the allowlist can ship
+anything. It makes it impossible to do BY ACCIDENT, or in a diff that does not
+say so. The real protection is still the schema — `public.search_events` has no
+user column, no session column and no foreign key to one, and 0001, 0005, 0010
+and 0017 each say in turn that it never will. §2 is what keeps somebody from
+routing around that through a listing.
+
+**Tested**, against the reviewer's own two attack functions, rolled back:
+
+```
+$ docker exec -i foundit-dev-db psql -X -U foundit_owner -d foundit < f2a.sql
+ERROR:  ADMIN TEST FAILED: select * from public.admin_sentences_by_maker(2147483647, 2147483647) raised 22008 (timestamp out of range) for the ADMIN
+
+$ docker exec -i foundit-dev-db psql -X -U foundit_owner -d foundit < f2b.sql
+ERROR:  ADMIN TEST FAILED: public.admin_sentences_and_handles is an admin_* function and is not in this file's allowlist. Adding a panel means adding its columns here, on purpose, in the same commit — that is what makes "search text and a person are never joined" a rule rather than a text filter.
+```
+
+The first one fails on §1's new argument probe before it reaches §2 — it has
+F6's defect as well, which is its own small verdict on writing a panel in a
+hurry. Given the clamp that removes that, it fails on the allowlist:
+
+```
+$ docker exec -i foundit-dev-db psql -X -U foundit_owner -d foundit < f2d.sql
+ERROR:  ADMIN TEST FAILED: public.admin_sentences_by_maker is an admin_* function and is not in this file's allowlist. …
+```
+
+#### F3 — `/admin` answers 200 where a route that does not exist answers 404  [MEDIUM]
+
+> Gate item 3: "The page for a non-admin is the not-found page, **not a hint
+> that /admin exists**." The body and the `<title>` were both fixed … The
+> status line was not. A HEAD request makes it starkest: there is no body at
+> all, and the only thing the response carries is the discriminator.
+
+**Fixed.** `app/admin/layout.tsx` is new and contains nothing but the check: it
+reads `currentViewer()` — the same per-request read of `profiles.is_admin` the
+header's Dashboard link uses — and calls `notFound()` for anybody who is not an
+administrator. A layout runs before the page it wraps, so the decision is made
+before any part of either screen is rendered, let alone flushed; `notFound()`
+can only set a 404 while nothing has been sent yet. There is deliberately no
+`loading.tsx` and no Suspense boundary anywhere in the segment, and
+`tests/admin.test.mjs` fails if either appears.
+
+**And the layout was not enough, which is the part worth reading.** Against
+`next build && next start` the fixed `/admin` still answered **200** — and so
+did `/tools/<missing>`, `/u/<nobody>` and `/maker/<not mine>`. Four probe
+routes narrowed it to one file: **`app/loading.tsx`**. A `loading.tsx` is a
+Suspense boundary, and one at the root wraps every route in the product, so
+Next flushed the shell — with its 200 — before any page had decided anything,
+and `notFound()` could no longer set a status code anywhere in the
+application. The reviewer found it at `/admin`, where the status was the only
+thing separating a refused route from a route that does not exist. It was true
+everywhere else too, and a search engine indexing a "Nothing here" page as a
+200 is the quieter half of the same bug.
+
+It is `app/(home)/loading.tsx` now: a route group, so the URL is still `/`, the
+boundary wraps the homepage and nothing else, and every catalogue route keeps
+its own `loading.tsx`. With that moved, every `notFound()` in the product
+answers 404 again.
+
+**Tested.** `tests/links.test.mjs` asks the application's own not-found path
+whether `notFound()` produces a 404 on the server it is walking —
+`/tools/<a slug that is not in the catalogue>` answers 404 under `next start`
+and 200 under `next dev`, where a Server Component cannot set a status code —
+and asserts the status as well as the body when it does, saying in a diagnostic
+line which of the two it saw. It walks every admin route with GET **and with
+HEAD**, because a HEAD response is nothing but its status line.
+`tests/admin.test.mjs` fails if `app/loading.tsx` or `app/admin/loading.tsx`
+ever comes back. Verified under `next build && next start` on :3100 with the
+dev server stopped; the four statuses are in the gate output below.
+
+#### F4 — The removal Server Action is an unauthenticated per-review oracle, and the file says it is not  [MEDIUM]
+
+> `app/admin/actions.ts` says: "the sentence is the same one a review that was
+> already down produces, because 'not allowed' and 'not there' are one answer".
+> They are two answers. `RECORD_REMOVAL_SQL` selects the live review first; no
+> row gives `gone`, and a row followed by the RLS refusal gives `refused`. A
+> caller with the action id — a signed-out stranger, or anyone who was an
+> administrator once — gets a per-id oracle over `public.reviews` from an
+> `/admin` route that is supposed to be refused to them, and a 303 to
+> `/admin/reviews` confirming the route exists.
+
+**Fixed in both places.** The first thing `removeReviewAction` does is the same
+thing the layout does, through the same read: anybody who is not an
+administrator gets the not-found page — before the review id has been looked
+at, before the reason has been measured, and before any statement is sent. And
+the two outcomes are collapsed into one: `refused` and `gone` are now
+`not-removed`, with one sentence on the screen, so the comment that file has
+always carried is true of the code as well as of the intent.
+
+**Tested.** `tests/admin.test.mjs` reads the action with its comments stripped
+and asserts that `notFound()` appears before `formData.get('review')` — a
+source-order assertion rather than a behavioural one, because the behavioural
+half needs Next's generated action id, which is exactly what the reviewer had
+to lift from an administrator's rendered page. It also asserts that the `gone:`
+sentence no longer exists on the screen and that one sentence replaced both.
+
+#### F5 — The beacon is unauthenticated and unbounded, and its transport writes the slug into the access log beside the visitor's address  [MEDIUM]
+
+> The *function* logs nothing. The *request that calls it* is a `POST` to
+> `/tools/<slug>` — the Server Action posts to the page's own URL — so the slug
+> is in the request line of every HTTP access log in front of the app, beside
+> the visitor's IP and the timestamp, and a POST to a tool page is one of only
+> four actions. The join the paragraph refuses to make is made by the transport.
+>
+> … `recordOpen` touches nothing in `lib/rate-limit.ts`; there is no
+> per-visitor bucket, no daily cap, no session requirement, and the action id
+> **is** in the public client bundle.
+
+**Fixed.** The count is `POST /o` now — a Route Handler with the slug in its
+body. One character, the same for every listing, so the access log learns that
+somebody opened something and not which something. `app/o/route.ts`:
+
+- **204, always, to everybody.** Not 200 for a slug that exists and 404 for one
+  that does not; not 429 over the bound; not 403 on a bad Origin. A status code
+  that varies is an oracle.
+- **Origin-checked**, because a Route Handler gets none of the protection Next
+  gives a Server Action. A browser sends `Origin` on every POST including a
+  same-origin one, so a missing Origin is not a browser.
+- **Bounded** by `allowOutboundOpen`: thirty per visitor per hour out of the
+  bucket map that already exists, and a daily cap of 20,000 for the whole
+  process as the backstop a per-visitor limit cannot see. Nothing new is
+  stored — the address goes through `visitorKey`, which hashes it with the
+  per-process salt and drops it, exactly as it does for a search. Over either
+  bound the route returns 204 and counts nothing.
+- **No session is read.** No cookie, no `currentUserId()`, and
+  `recordToolOpen` still opens its transaction with no identity claim at all.
+
+The anchor is untouched: a plain `https` link straight at the maker with
+`rel="noopener noreferrer"`, no `onclick` attribute in the served HTML, working
+with JavaScript off and counting nothing when it is. The beacon is a `fetch`
+with `keepalive`, not awaited, so it never blocks the navigation.
+`app/tools/actions.ts` no longer exports `recordOpen` at all, so its id is out
+of the client bundle.
+
+**This also answers the "known weakness" this file used to carry** — that
+bounding the count "would mean reading the visitor's address on a path whose
+whole design is that it reads nothing about the visitor". The reviewer's reply
+is the right one: the address is already read by the proxy and written to its
+log; this is the argument for a limiter, not against.
+
+**Tested.** `tests/rate-limit.test.mjs` spends four times the hourly bound from
+one visitor and asserts exactly thirty were counted, that a second visitor has
+their own bucket, that the daily cap sits above it, and that
+`allowOutboundOpen`'s body hashes the address and logs nothing. A source
+assertion covers the route's single status code, its Origin check, its bound
+and the absence of any cookie read, and that the Server Action is gone rather
+than left beside it. The live flood and the access log are in the gate output.
+
+#### F6 — `admin_catalogue_counts` uses its argument before it checks `auth.is_admin()`  [MEDIUM]
+
+> This one computes `v_since` in its DECLARE block, which runs before the first
+> statement of the body … §1 only ever calls with no arguments, so it never
+> sees it.
+>
+> ```
+> === 2. admin_catalogue_counts(2147483647) as the SAME non-admin ===
+> NOTICE:  refused: sqlstate=22008 message=timestamp out of range
+> ```
+
+**Fixed.** The initialiser moved into the body, after the check, and every
+other panel that builds an interval or a limit from an argument got the same
+treatment and the same clamp: `least(greatest(coalesce(p_days, n), 1), 3650)`
+for a window and `least(greatest(coalesce(p_limit, n), 1), 10000)` for a limit,
+so a huge argument is a long window rather than an error. `0020` §3.
+
+**Tested.** `db/test/admin_test.sql` §1 builds four calls to every function
+from `pg_proc` — with no arguments, and with `2147483647`, `-1` and `null` in
+**every** argument — for four identities and five malformed claims, and any
+SQLSTATE but 42501 fails the suite. §0 asserts that every `admin_*` argument is
+an integer, so a text or timestamp argument cannot silently drop out of that
+probe. The positive control makes the same four calls as the administrator,
+where every one must answer.
+
+#### F7 — "Added by" and "Tools added" report who maintains a listing now, not who added it; a claim silently rewrites both  [MEDIUM]
+
+> Both functions answer "listings this handle currently maintains".
+> `tools.submitted_by` — the column that actually records who added it, and
+> which `0017` makes unwritable by the application — is only consulted when
+> there is no owner … One claim moves a listing from `@amit` to `@tomer` in
+> "Added by" and moves a count off one handle onto another, with `submitted_by`
+> unchanged throughout.
+
+**Fixed.** Both functions key on `t.submitted_by`, and the maintainer gets its
+own column with its own label: `admin_catalogue_added` returns
+`handle` (who added it) and `maintained_by` (who looks after it now), and
+`admin_people` returns `tools_added` and `tools_maintained`. The page draws two
+columns in each table with a note saying which is which and why there are two.
+
+**Tested.** `db/test/admin_test.sql` §10 takes a seeded claimable listing, reads
+who the Catalogue panel credits, claims it through `public.claim_tool` as
+somebody else — the real one-click path — and asserts that "Added by" did not
+move, that the maintainer column did, that the adder's `tools_added` is
+unchanged and that the claimant now maintains one.
+
+#### F8 — The "Removed" list conflates an administrator's takedown with an author's own deletion, and a review its author deleted can never be moderated  [MEDIUM]
+
+> `removed_at` is the review's `deleted_at`, which the author sets when they
+> take their own review down. So: an author's own deletion appears in the
+> operator's **Removed** section with no reason and no remover, directly under
+> copy that says "Every one that is will stay on this list, **with the reason
+> and who wrote it**" … `RECORD_REMOVAL_SQL` refuses it anyway (`and
+> r.deleted_at is null`), so the screen offers no way to record a reason
+> against it … `0015` deliberately leaves an author's own deletion re-postable,
+> so an author who deletes ahead of a moderator can post the same words again,
+> and the permanent bar in `reviews_removal_is_final` is never armed.
+>
+> Related, same screen: `allReviews()` defaults to 100 and the page passes no
+> argument, so with more than 100 reviews the older removals fall off the
+> "Removed" list silently.
+
+**Fixed, and the open question in it was decided.**
+
+**Decision (supervisor, 13 September 2026): an administrator MAY record a
+removal against a review its author already deleted.** The reasoning is 0015's
+own: the permanent bar in `reviews_removal_is_final` is armed by the EXISTENCE
+of a `review_removals` row rather than by `deleted_at`, so without this an
+author who deletes ahead of a moderator keeps the right to post the same words
+again, and the screen's only answer was "that review is not live". `and
+r.deleted_at is null` is gone from `RECORD_REMOVAL_SQL`.
+
+`public.admin_reviews` returns two timestamps instead of one:
+`removed_by_admin_at` (a `review_removals` row exists — this, and only this, is
+a takedown) and `author_deleted_at`. `/admin/reviews` draws three sections:
+Live, "Removed by an administrator" with the reason and the handle, and "Taken
+down by its author" — which carries the listing, the handle and the date and
+**not the words**, because a retracted review's text is not operator data, the
+same category 0015 took `auth.is_admin()` out of `collections_read` for. The
+Remove form is drawn on a retracted review, because recording a removal against
+one is the only way to stop the words going back up.
+
+And the page says "Showing 100 of N" when there are more, out of a `total`
+column `admin_reviews` computes with `count(*) over ()` rather than from a
+second round trip that could disagree.
+
+**Tested.** `db/test/admin_test.sql` §12 has the author take their own review
+down, asserts the operator's page tells the two apart and that the body is
+null, records a removal against it as the administrator, asserts the reason and
+handle reach the page and the body comes back, and then tries to post the same
+review again as its author — refused 42501 by the trigger, which is the whole
+point. `tests/admin.test.mjs` covers the four states of the pair and the
+"showing N of M" total.
+
+#### F9 — The Money panel's counter is neither "today" nor "since this process started"  [MEDIUM]
+
+> `DailyCap` is a rolling 24-hour window reset lazily inside `take()`/`fits()`,
+> and `count` is a bare getter that does not roll it. So the figure is not
+> "since this process started" (it resets every day), and it is not "today"
+> either (after a quiet stretch it shows an expired window's total until the
+> next paid call).
+>
+> ```
+> day 1, after 7 reader calls   ->  panel shows 7
+> day 2, no call made yet       ->  panel shows 7 (the window expired; nothing has rolled it)
+> day 2, after the first call   ->  panel shows 1
+> ```
+
+**Fixed.** `DailyCap.rolled()` advances the window and answers what is in it
+and when it began; `count` and the new `startedAt` both go through it.
+`paidCallsToday()` returns the four figures, the oldest window start and
+`measured` — whether this process has counted a single paid call. The panel is
+headed "In the last 24 hours, in this process, started &lt;time&gt;", and a
+process that has measured nothing says so in a sentence instead of drawing
+`0 / 0 / 0`, which is the exact thing the page's own header says it never does.
+
+**Tested.** `tests/rate-limit.test.mjs` runs the reviewer's fake-clock sequence
+and asserts 7, then 0 on the next day with no call made, then 1 after the first
+one.
+
+#### F10 — Reason text is stored and shown verbatim including C0 control bytes and bidi overrides  [LOW]
+
+> Every other person-supplied string in this codebase is stripped of
+> C0/C1/U+2028/U+2029 before storage with a CHECK behind it (`0017`,
+> `scripts/scan-control-bytes.mjs`). Phase 8 is the phase that made this string
+> typeable through a screen, and it added neither. The reason is rendered to
+> the author on `/settings`, printed on `/admin/reviews`, and put into the
+> removal email's body.
+
+**Fixed at both ends.** `cleanReason` runs the reason through `cleanText` —
+lib/submit.ts's, shared rather than copied, so the strip and the CHECK cannot
+drift — and `reasonProblem` measures the CLEANED string, so eight bell
+characters are not an eight-character reason. Behind it, `0020` §6 adds
+`review_removals_reason_is_plain_text`, a CHECK on
+`public.has_control_characters(reason)` — 0018's class, which covers C0, DEL,
+C1, U+2028, U+2029, the zero-width joiners and the bidi overrides and isolates.
+
+**Tested.** `db/test/admin_test.sql` §13 inserts the reviewer's own string — a
+bell, a start-of-heading, an escape sequence and a right-to-left override — and
+requires a `check_violation`, then inserts the same sentence with the bytes
+taken out and requires it to land. `tests/admin.test.mjs` drives `cleanReason`
+and `reasonProblem` over the same string.
+
+#### F11 — A second `review_removals` row can be written against an already-removed review, and "Reviews removed" counts rows rather than reviews  [LOW]
+
+> Nothing stops an administrator writing further removal rows for a review that
+> is already down. `admin_words` counts `review_removals` rows per day, so the
+> Words panel's "Reviews removed" over-counts; `MY_REMOVALS_SQL` shows the
+> author every row, so they see one deletion twice; `admin_reviews` shows only
+> the newest.
+
+**Fixed.** A UNIQUE INDEX on `review_removals (review_id)`, and `admin_words`
+counts `distinct rr.review_id`.
+
+The review asked for a *partial* unique index and there is no honest predicate
+to give one: there is no second row that would be legitimate. One review, one
+removal, always — so the index is total, which is strictly stronger and says
+the same thing with nothing left to argue about. The distinct count stays
+anyway, so the number is still right if the index is ever relaxed.
+
+**Tested.** `db/test/admin_test.sql` §14 records a removal, tries a second
+against the same review and requires a `unique_violation`, asserts the Words
+panel did not move on the refused one, and reads `admin_words`'s own source
+back out of `pg_proc` to check it counts distinct reviews.
+
+#### F12 — Coverage: the half of gate item 3 that matters is skipped by default, including in CI  [LOW]
+
+> Gate item 3 asks for a walk "with no session **and with a non-admin
+> session**". The second test skips unless `FOUNDIT_TEST_SESSION` is supplied
+> by hand, which nothing in `package.json` or `.github/workflows/ci.yml` does.
+
+**Fixed.** `tests/links.test.mjs` mints its own throwaway non-administrator
+through the real emailed-code path against the running server, walks every
+admin route with its cookie, checks the session is genuinely signed in (it
+reaches `/settings`) and deletes the account afterwards — the profile as the
+application role under the throwaway's own claim, which is the path
+`profiles_delete` exists for, and the account as `foundit_auth`, the only role
+that may see `auth_core` at all. **If a server is answering and the session
+cannot be minted, it fails with a sentence rather than skipping.**
+
+One shortcut is stated rather than hidden: the test writes the six digits it is
+about to use into `auth_core.verification` itself, hashed with the
+application's own `hashSignInCode`. The stored value is HMAC-SHA256 under
+`BETTER_AUTH_SECRET` (0013, and the Phase 6 review is why), so recovering a
+code would mean a million hashes per run — four seconds, measured. Everything
+else is real: Better Auth issues the row, verifies the code, creates the
+session and signs the cookie, and the cookie is what the walk carries. The only
+thing the test supplies is what an inbox would supply. The address is always
+`@example.invalid` and `AUTH_DEV_CODE_TO_LOG=1` means no message leaves the
+process.
+
+The Phase 7 signed-in walk had the same skip and no longer has it either: it
+uses `FOUNDIT_TEST_SESSION` when one is supplied and a minted ordinary account
+otherwise, asserting in the second case that a listing somebody else maintains
+is the not-found page — "not yours" and "not there" are one answer — which is
+worth asserting on its own.
+
+**And CI starts a server.** `npm run build` moved above the unit tests, a new
+step starts the production build on :3100 and waits for it to answer, the unit
+tests run against it, and a final `if: always()` step stops it and prints its
+log. The walks are assertions in CI now rather than skips, and because it is a
+production build rather than `next dev`, the status line is real and F3 is
+checked there too. The per-route timeout is 60 seconds and every route is
+warmed once before anything is asserted, because `next dev` compiles a route on
+its first request and the supervisor watched a ten-second first response under
+the reviewer's load.
+
+#### The three from the review's margins
+
+- **`node eval/run.mjs` with no connection string exits 2.** The reviewer
+  reported exit 0 and measured 1 (the pipeline's, not the process's), but the
+  point stands either way: a step that measured nothing must never be able to
+  look like a step that passed, and it must be tellable from a flag that was
+  typed wrong. `EXIT.NO_CONNECTION = 2` replaces `CONSTRAINT_VIOLATION`, which
+  was declared and never returned by anything, so the number was free. The
+  refusal now names `--env-file` first, because that is the usual cause.
+- **`RECORD_REMOVAL_SQL` takes `for update` on the review.** Two administrators
+  pressing Remove on the same review at the same moment used to run both
+  inserts; the second one's UPDATE then touched zero rows and left an extra
+  `review_removals` row behind, pointing at a review somebody else had already
+  taken down. The lock makes the second transaction wait and F11's unique index
+  refuses its row outright — the lock is about ordering, the index is about the
+  rule.
+- **`docs/product-decisions.md` §10 says what `last_at` is.** It is a
+  `timestamptz` in the function and a day on the page, because the renderer is
+  what makes it a day; the sentence and the reason are in §10 now.
+
+#### Overclaims in this file, corrected
+
+The review reproduced everything else in the Phase 8 "What is proved" table.
+These ten did not hold, and every one of them is corrected above the line as
+well as listed here.
+
+| The claim that was here | The verdict | What it says now |
+| --- | --- | --- |
+| "`/admin` and `/admin/reviews` as a signed-out stranger: the not-found page, with the root title — **byte for byte what `/definitely-not-a-route` answers**." | **False.** The title matched; the response did not. `/admin` answered **200**, `/definitely-not-a-route` answered **404**, and `HEAD /admin` answered 200 with no body at all | True now, and checked with GET and HEAD against a production build. F3 |
+| "Every admin function refuses everybody else … every call must raise 42501 and **any other SQLSTATE is a failure**" | **False for one.** `admin_catalogue_counts(2147483647)` raised **22008** to a signed-out stranger. True for the no-argument call the suite made | Four calls per function per identity, with every argument filled. F6 |
+| "Every /admin route refuses a stranger and a signed-in non-admin … with no cookie **and with a non-administrator's session**" | **Half unrun.** The non-admin walk skipped unless `FOUNDIT_TEST_SESSION` was set, which nothing set | The test mints its own, and fails rather than skipping. CI starts a server. F12 |
+| `app/admin/actions.ts`: "the sentence is the same one a review that was already down produces, because 'not allowed' and 'not there' are one answer" | **False.** `problem=refused` vs `problem=gone`, to a signed-out caller | One sentence, and the admin check runs first. F4 |
+| `0019` §3: "It logs nothing. A log line carrying a slug beside a timestamp, next to a web server's access log carrying an address beside the same timestamp, is the join this product does not make." | **True of the function, false of the request.** The beacon POSTed to `/tools/<slug>`, so the slug was in the access log's request line beside the IP | `POST /o`, with the slug in the body. F5 |
+| "The click is counted at last" / "Nothing anywhere gains a write on `public.tools.open_count`. It moves through `public.record_tool_open` and through no other statement." | **True only while `foundit_owner` is a superuser.** On the researched server layout it moved through nothing at all, silently | The counters window, a non-superuser owner everywhere, and a test that proves the window is load-bearing. F1 |
+| §2(a) "is the check that survives a future edit: somebody adding 'and which handle typed it' to a demand panel … this fails before the screen is written" | **False.** Two functions that did exactly that passed §2(a) and §2(b) verbatim | An allowlist, `tools` on the people list, and no dynamic SQL in any body. F2 |
+| §10 addendum: Catalogue = "the listings added **and by which handle**"; People = "listings added" | **Reported the current maintainer.** A claim moved a listing's "Added by" and moved the count between handles | `submitted_by` for both, and a separate labelled column for the maintainer. F7 |
+| `/admin/reviews`: "No review has ever been taken down. Every one that is will stay on this list, **with the reason and who wrote it**" | **False for author deletions**, which landed in the same list with neither | Three sections, and a retracted review's words are not shown. F8 |
+| Money panel "Since this process started" | **Neither that nor "today"** | "In the last 24 hours, in this process, started &lt;time&gt;", and a sentence where nothing has been measured. F9 |
+
+#### What the review could not test, and what happened to it
+
+- **Whether `/admin` returns 404 under `next start`.** Run: it does, and the
+  four statuses are in the gate output. The reviewer could not, because a dev
+  server was up and the brief forbids `npm run build` while one is.
+- **Whether `foundit_owner` is a superuser on the real server.** Settled by
+  making it not one everywhere: the development container, CI, and
+  `docs/development.md`'s instructions for the server. F1 was not a trap.
+- **Middle-click on the outbound link.** Still reasoned rather than observed:
+  Chrome dispatches `auxclick` for button 1, so a middle click opens the tool
+  and counts nothing. Unchanged by the move to `/o` — the handler is the same
+  React `click`.
+- **Re-identifying a searcher by correlating time columns.** `last_at` is still
+  a `timestamptz` in the function and still rendered through `day()`, and §10
+  now says so and says why, which is the one sentence the reviewer asked for.
+- **Two administrators removing the same review concurrently.** `for update` and
+  a unique index, above.
+
+#### Known weaknesses this review removed
+
+Two bullets below the line are gone rather than reworded, because they were
+descriptions of defects rather than of decisions:
+
+- *"`open_count` counts clicks, not people, and nothing bounds it … Rate-limiting
+  it would mean reading the visitor's address on a path whose whole design is
+  that it reads nothing about the visitor."* It is bounded now, by the bucket
+  that already existed, and nothing new is stored. It still counts clicks
+  rather than people, which is the honest part and is kept.
+- *"The Money panel cannot know a month to date … The panel is headed 'Since
+  this process started'."* The first half is still true; the heading was wrong
+  and is fixed.
+
 
 ## Tried and rejected
 
