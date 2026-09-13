@@ -62,6 +62,29 @@ begin
 end;
 $$;
 
+/**
+ * THE OWNER'S WINDOW (db/migrations/0020_phase8_review.sql §2).
+ *
+ * `foundit_owner` has been NOSUPERUSER NOBYPASSRLS since 13 September 2026 —
+ * which is what research/08 §9.3 has always said the server would be — so the
+ * owner is subject to every policy in `public` exactly as the application is.
+ * That IS the change: an owner statement reaching past a policy used to be a
+ * silent no-op and is now an error.
+ *
+ * A test suite is one of the three things that legitimately reaches past a
+ * policy as the owner. It plants fixtures no function could plant, and it
+ * counts rows the person who wrote them would not be allowed to see. Every
+ * call below is one of those, each with its own reason written beside it, and
+ * the window is closed again on the next line.
+ */
+create or replace function pg_temp.owner_window(p_open boolean)
+returns void language plpgsql as $$
+begin
+  perform set_config('foundit.definer',
+                     case when p_open then 'on' else 'off' end, true);
+end;
+$$;
+
 create or replace function pg_temp.review_of(p_slug text, p_author text)
 returns bigint language sql stable as $$
   select r.id from public.reviews r
@@ -830,7 +853,14 @@ begin
   insert into public.review_removals (review_id, admin_id, reason)
   values (other_rid, 'dev_admin', 'A note about another person''s review, kept on purpose.');
   reset role;
+  -- The owner's window (0020 §2): review_removals has a read policy and an
+  -- insert policy and no UPDATE policy at all, by design — a removal is not
+  -- edited. Re-pointing the row is the fixture, not the subject, and without
+  -- the window it is an UPDATE that touches nothing and says nothing, which is
+  -- exactly the silence this phase went looking for.
+  perform pg_temp.owner_window(true);
   update public.review_removals set admin_id = 'dev_person' where review_id = other_rid;
+  perform pg_temp.owner_window(false);
   set role foundit_app;
 
   select count(*) into before_reviews     from public.reviews     where author_id = 'dev_person';
@@ -875,11 +905,17 @@ begin
   -- another person's saved lists, so "an admin sees none" is true whether the
   -- rows are gone or not, and the question here is whether they are gone.
   reset role;
+  -- "Past row-level security altogether" is what this paragraph has always
+  -- claimed, and since 13 September 2026 the owner has to say so: without the
+  -- 0020 §2 window these two counts are zero whether the rows are there or
+  -- not, and both checks pass on a database that deleted nothing.
+  perform pg_temp.owner_window(true);
   select count(*) into n from public.collections where owner_id = 'dev_person';
   if n > 0 then perform pg_temp.fail('their collections survived'); end if;
   select count(*) into n from public.collection_items ci
     left join public.collections c on c.id = ci.collection_id where c.id is null;
   if n > 0 then perform pg_temp.fail('saved items were orphaned rather than deleted'); end if;
+  perform pg_temp.owner_window(false);
   set role foundit_app;
 
   select count(*) into n from public.tool_claims where claimant_id = 'dev_person';

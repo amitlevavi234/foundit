@@ -39,6 +39,29 @@ begin
 end;
 $$;
 
+/**
+ * THE OWNER'S WINDOW (db/migrations/0020_phase8_review.sql §2).
+ *
+ * `foundit_owner` has been NOSUPERUSER NOBYPASSRLS since 13 September 2026 —
+ * which is what research/08 §9.3 has always said the server would be — so the
+ * owner is subject to every policy in `public` exactly as the application is.
+ * That IS the change: an owner statement reaching past a policy used to be a
+ * silent no-op and is now an error.
+ *
+ * A test suite is one of the three things that legitimately reaches past a
+ * policy as the owner. It plants fixtures no function could plant, and it
+ * counts rows the person who wrote them would not be allowed to see. Every
+ * call below is one of those, each with its own reason written beside it, and
+ * the window is closed again on the next line.
+ */
+create or replace function pg_temp.owner_window(p_open boolean)
+returns void language plpgsql as $$
+begin
+  perform set_config('foundit.definer',
+                     case when p_open then 'on' else 'off' end, true);
+end;
+$$;
+
 create or replace function pg_temp.likes(p_slug text)
 returns integer language sql stable as $$
   select like_count from public.tools where slug::text = p_slug;
@@ -55,6 +78,14 @@ $$;
 do $$
 declare bad text;
 begin
+  -- The owner's window, because this check is the whole point of the suite:
+  -- count the rows BEHIND each counter. tool_likes_read is
+  -- `user_id = auth.uid() or auth.is_admin()` and collection_items_read is
+  -- the owner of the collection, so an owner with no claim now counts zero
+  -- likes on every listing and reports every counter as wrong. There is no
+  -- identity that can see all of them, and there should not be one.
+  perform pg_temp.owner_window(true);
+
   select string_agg(format('%s (like_count %s, rows %s)', t.slug, t.like_count, c.likes), ', ')
     into bad
     from public.tools t
@@ -65,6 +96,8 @@ begin
                where r.tool_id = t.id and r.deleted_at is null) as reviews
     ) c on true
    where t.like_count <> c.likes or t.save_count <> c.saves or t.review_count <> c.reviews;
+
+  perform pg_temp.owner_window(false);
 
   if bad is not null then
     perform pg_temp.fail('a counter already disagrees with its rows: ' || bad);

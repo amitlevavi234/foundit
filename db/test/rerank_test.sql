@@ -57,6 +57,29 @@ begin
 end;
 $$;
 
+/**
+ * THE OWNER'S WINDOW (db/migrations/0020_phase8_review.sql §2).
+ *
+ * `foundit_owner` has been NOSUPERUSER NOBYPASSRLS since 13 September 2026 —
+ * which is what research/08 §9.3 has always said the server would be — so the
+ * owner is subject to every policy in `public` exactly as the application is.
+ * That IS the change: an owner statement reaching past a policy used to be a
+ * silent no-op and is now an error.
+ *
+ * A test suite is one of the three things that legitimately reaches past a
+ * policy as the owner. It plants fixtures no function could plant, and it
+ * counts rows the person who wrote them would not be allowed to see. Every
+ * call below is one of those, each with its own reason written beside it, and
+ * the window is closed again on the next line.
+ */
+create or replace function pg_temp.owner_window(p_open boolean)
+returns void language plpgsql as $$
+begin
+  perform set_config('foundit.definer',
+                     case when p_open then 'on' else 'off' end, true);
+end;
+$$;
+
 /** A well-formed judgement over two candidates. */
 create or replace function pg_temp.judgement()
 returns jsonb language sql immutable as $$
@@ -107,11 +130,30 @@ begin
     perform pg_temp.fail('row-level security is not enabled AND forced on query_reranks');
   end if;
 
+  -- EXACTLY ONE POLICY, AND IT IS THE DEFINER WINDOW (0020 §2). The design
+  -- was no policy at all, which refused one role too many: `foundit_owner`
+  -- became NOSUPERUSER NOBYPASSRLS on 13 September 2026 and this cache's own
+  -- SECURITY DEFINER writers run AS the owner, so every judgement this
+  -- product pays for silently failed to cache. TO foundit_owner, which no
+  -- application role is a member of, and gated on a setting rather than on
+  -- `true`.
   select count(*) into n from pg_policies
    where schemaname = 'public' and tablename = 'query_reranks';
-  if n <> 0 then
+  if n <> 1 then
     perform pg_temp.fail(
-      format('query_reranks has %s policy/policies; it must have none at all', n));
+      format('query_reranks has %s policy/policies; it must have exactly one, and that '
+             'one is the 0020 definer window', n));
+  end if;
+
+  select count(*) into n from pg_policies
+   where schemaname = 'public' and tablename = 'query_reranks'
+     and policyname = 'query_reranks_definer'
+     and roles::text = '{foundit_owner}'
+     and qual like '%foundit.definer%'
+     and with_check like '%foundit.definer%';
+  if n <> 1 then
+    perform pg_temp.fail('the one policy on query_reranks is not the definer window: it '
+                         'must be scoped TO foundit_owner and gated on foundit.definer');
   end if;
 
   select count(*) into n
@@ -276,8 +318,19 @@ $$;
 reset role;
 
 -- Put a row in under another model, as the owner, and check it is invisible.
+--
+-- The suite opens 0020 §2's window by hand to do it, and says so: since
+-- 13 September 2026 foundit_owner is NOSUPERUSER NOBYPASSRLS and is subject to
+-- this table's one policy like anybody else. There is no function that writes
+-- a judgement under a retired model — store_query_rerank refuses one, which is
+-- what §7 just proved — so the fixture has to be the owner saying plainly that
+-- it is reaching past a policy.
+select set_config('foundit.definer', 'on', false);
+
 insert into public.query_reranks (query_norm, candidates_hash, judgement, rerank_model)
 values ('a stale sentence', pg_temp.hash('set-one'), pg_temp.judgement(), 'a-retired-model');
+
+select set_config('foundit.definer', 'off', false);
 
 set local role foundit_app;
 do $$
@@ -340,6 +393,9 @@ end
 $$;
 reset role;
 
+-- The owner counts the rows the application just logged. search_events_read is auth.is_admin(), so without the 0020 §2 window the owner sees none of them and this reads as five searches that were never recorded.
+select pg_temp.owner_window(true);
+
 do $$
 declare r record;
 begin
@@ -362,6 +418,8 @@ begin
   end if;
 end
 $$;
+select pg_temp.owner_window(false);
+
 
 -- ===========================================================================
 -- 9. The catalogue's write belongs to foundit_embed alone.
@@ -495,14 +553,22 @@ begin
   end if;
 
   -- And a generated row must name both models, as a property of the TABLE.
+  --
+  -- The owner's window (0020 §2) is open for this one statement, because the
+  -- subject is the CHECK and nothing else: the owner maintains no listing, so
+  -- tool_problems_write refuses the insert first and the CHECK never runs. A
+  -- 42501 here would look exactly like a pass.
+  perform pg_temp.owner_window(true);
   begin
     insert into public.tool_problems (tool_id, statement, source)
     values ((select id from public.tools where status = 'published' order by id limit 1),
             'A generated row with no models named at all', 'generated');
+    perform pg_temp.owner_window(false);
     perform pg_temp.fail('a generated row with no models was accepted');
   exception
     when check_violation then null;
   end;
+  perform pg_temp.owner_window(false);
 end
 $$;
 

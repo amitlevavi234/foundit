@@ -63,6 +63,29 @@ begin
 end;
 $$;
 
+/**
+ * THE OWNER'S WINDOW (db/migrations/0020_phase8_review.sql §2).
+ *
+ * `foundit_owner` has been NOSUPERUSER NOBYPASSRLS since 13 September 2026 —
+ * which is what research/08 §9.3 has always said the server would be — so the
+ * owner is subject to every policy in `public` exactly as the application is.
+ * That IS the change: an owner statement reaching past a policy used to be a
+ * silent no-op and is now an error.
+ *
+ * A test suite is one of the three things that legitimately reaches past a
+ * policy as the owner. It plants fixtures no function could plant, and it
+ * counts rows the person who wrote them would not be allowed to see. Every
+ * call below is one of those, each with its own reason written beside it, and
+ * the window is closed again on the next line.
+ */
+create or replace function pg_temp.owner_window(p_open boolean)
+returns void language plpgsql as $$
+begin
+  perform set_config('foundit.definer',
+                     case when p_open then 'on' else 'off' end, true);
+end;
+$$;
+
 -- Did that statement raise, and with which SQLSTATE? Returns the SQLSTATE, or
 -- 'NONE' when nothing was raised, so a test can assert the refusal rather than
 -- merely that something went wrong.
@@ -103,6 +126,15 @@ declare
   v_prob  bigint;
   v_vec   halfvec(512);
 begin
+  -- The owner's window (0020 §2), for the fixtures and nothing else. Since
+  -- 13 September 2026 foundit_owner is NOSUPERUSER NOBYPASSRLS, so
+  -- `tools_insert` — `auth.uid() is not null and submitted_by = auth.uid() and
+  -- status = 'draft'` — applies to the owner too, and none of it is true of a
+  -- suite planting a draft that already names its owner and its maker. The
+  -- window is closed before the first assertion, so every check below runs
+  -- against the policies as the application meets them.
+  perform pg_temp.owner_window(true);
+
   insert into public.tools
     (slug, name, url, summary, pricing, platforms, languages, flags,
      status, claimable, submitted_by, owner_id, made_by_owner)
@@ -143,6 +175,8 @@ begin
   insert into t7
   select 'claimable', id from public.tools
    where claimable and owner_id is null order by id limit 1;
+
+  perform pg_temp.owner_window(false);
 end
 $$;
 
@@ -621,6 +655,22 @@ declare
 begin
   reset role;
 
+  -- THE OWNER'S WINDOW IS OPEN FOR THE WHOLE OF THIS BLOCK (0020 §2).
+  --
+  -- public.embedding_jobs has row-level security forced and one policy — the
+  -- window — because its only legitimate callers are the four definer
+  -- functions that queue and drain it. This section is the fifth thing that
+  -- looks at it: a test standing in for the worker, reading the queue and
+  -- emptying it between edits. It interleaves owner statements with
+  -- `set role foundit_app`, and the window is inert for those, because the
+  -- policy is scoped TO foundit_owner and the application role is not one.
+  --
+  -- What stops a definer function added later from relying on this window
+  -- being open instead of carrying its own SET clause is not this file: it is
+  -- db/test/admin_test.sql §11, which enumerates every function that has the
+  -- clause and fails on any that is not on the list.
+  perform pg_temp.owner_window(true);
+
   -- Publishing queued the summary and the statement.
   select count(*) into n from public.embedding_jobs
    where kind = 'tool' and ref_id = v_mine;
@@ -704,6 +754,7 @@ begin
   if n <> 1 then
     perform pg_temp.fail('an unchanged statement lost its embedding across an edit');
   end if;
+  perform pg_temp.owner_window(false);
   set role foundit_app;
 end
 $$;
@@ -721,6 +772,13 @@ declare
   bad   text;
 begin
   reset role;
+
+  -- The owner's window (0020 §2), open for this block for the same reason §7
+  -- opens it: the block stands in for the embedding worker, reading the queue
+  -- and the draft rows the worker's own definer functions read, and the owner
+  -- maintains none of the listings involved. Inert while current_user is
+  -- foundit_app or foundit_embed.
+  perform pg_temp.owner_window(true);
 
   -- Every grant foundit_embed does NOT have. This is 0005's table, re-checked
   -- because 0017 is the migration that gave that role a new function.
@@ -856,6 +914,7 @@ begin
   select count(*) into n from public.embedding_jobs where id = v_job;
   if n <> 0 then perform pg_temp.fail('a retired job is still in the table'); end if;
 
+  perform pg_temp.owner_window(false);
   set role foundit_app;
 end
 $$;
@@ -906,10 +965,17 @@ begin
 
   -- and the CHECK behind it: that listing cannot be MADE claimable either,
   -- by anybody, including the owner role.
+  --
+  -- The owner's window (0020 §2) is open for that one statement, because the
+  -- subject is the CHECK: without it the owner is filtered by tools_update
+  -- first, the UPDATE touches nothing, no SQLSTATE is raised at all, and a
+  -- silent no-op reads exactly like the refusal this is looking for.
   reset role;
+  perform pg_temp.owner_window(true);
   if pg_temp.refused(format('update public.tools set claimable = true where id = %s', v_mine)) <> '23514' then
     perform pg_temp.fail('a person-added listing could be made claimable');
   end if;
+  perform pg_temp.owner_window(false);
   set role foundit_app;
   perform pg_temp.be('dev_person');
 
@@ -1257,13 +1323,27 @@ begin
     perform pg_temp.fail('a write policy evaluates to true: ' || bad);
   end if;
 
-  -- The three new tables have no write policy at all, which is stronger than
-  -- a hard one.
+  -- The three function-only tables have exactly ONE write policy each, and it
+  -- is the owner's window from 0020 §2.
+  --
+  -- They used to have none at all, which was stronger and was also wrong: the
+  -- functions that are their only legitimate writers run AS foundit_owner,
+  -- and foundit_owner stopped being a superuser on 13 September 2026. With no
+  -- policy, `public.queue_embedding` queued nothing, `log_search_event_tools`
+  -- recorded nothing and `reassign_tool_owner` wrote no record of a listing
+  -- changing hands — all three silently, all three on every database this
+  -- will ever run on. So a policy, and one that names the window rather than
+  -- a role or `true`: anything else on these three tables is still the
+  -- failure this check was written for.
   select string_agg(format('%s.%s', tablename, policyname), ', ') into bad
     from pg_policies
    where schemaname = 'public'
      and tablename in ('embedding_jobs', 'search_event_tools', 'ownership_changes')
-     and cmd in ('INSERT', 'UPDATE', 'DELETE', 'ALL');
+     and cmd in ('INSERT', 'UPDATE', 'DELETE', 'ALL')
+     and not (policyname = tablename || '_definer'
+              and roles::text = '{foundit_owner}'
+              and coalesce(qual, '') like '%foundit.definer%'
+              and coalesce(with_check, '') like '%foundit.definer%');
   if bad is not null then
     perform pg_temp.fail('a write policy appeared on a function-only table: ' || bad);
   end if;
@@ -1743,6 +1823,10 @@ declare
   v_text text;
 begin
   reset role;
+  -- The owner's window (0020 §2): this block reads and empties the queue
+  -- directly, which is the worker's job and not the owner's, and
+  -- public.embedding_jobs has one policy and it is the window.
+  perform pg_temp.owner_window(true);
   delete from public.embedding_jobs;
 
   -- Three is the ceiling, so three go in...
@@ -1791,6 +1875,7 @@ begin
   end if;
 
   delete from public.embedding_jobs;
+  perform pg_temp.owner_window(false);
   set role foundit_app;
 end
 $$;

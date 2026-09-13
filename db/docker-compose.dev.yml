@@ -7,12 +7,25 @@
 # named volume. That is deliberate: `docker compose down -v` deletes named
 # volumes permanently, and it is a command people run casually.
 #
-# Three roles live in here, and the differences between them are the point:
+# FIVE ROLES LIVE IN HERE, and the differences between them are the point:
 #
-#   foundit_owner  owns the schema and runs migrations. Superuser in this
-#                  container, which means BYPASSRLS, which means every
-#                  row-level security policy in the database is switched off
-#                  for it. Nothing but a migration should ever connect as it.
+#   postgres       the cluster's superuser, and the ONLY superuser. It exists
+#                  to initialise the cluster and to do the two jobs a
+#                  non-superuser cannot: create the `vector` extension, which
+#                  is not a trusted extension, and load db/seed/dev_seed.sql
+#                  past FORCE ROW LEVEL SECURITY. Nothing else ever connects
+#                  as it — not the application, not the tests, not a
+#                  migration.
+#   foundit_owner  owns the schemas and runs migrations. **NOSUPERUSER,
+#                  NOBYPASSRLS**, matching research/08 §9.3 and the server it
+#                  will run on. That is a change made on 13 September 2026 and
+#                  the Phase 8 review is why: `public.record_tool_open` moved
+#                  no counter at all on a database whose owner is not a
+#                  superuser, and the suite could not see it because the suite
+#                  ran as one. `public.tools` is FORCE ROW LEVEL SECURITY, so
+#                  the owner is subject to the same policies as everybody
+#                  else, and now it is subject to them HERE as well as on the
+#                  server.
 #   foundit_app    what the application, the eval harness and the tests
 #                  connect as. Owns nothing, no superuser, no BYPASSRLS. It
 #                  gets its grants from db/migrations/0001_init.sql and
@@ -31,69 +44,27 @@
 #                  in auth_core and this role holds nothing in public. See
 #                  0013_accounts.sql.
 #
-# All four passwords are throwaway literals on purpose, and that is the only kind
+# WHY POSTGRES_USER IS `postgres` AND NOT `foundit_owner`. PostgreSQL refuses
+# to take SUPERUSER away from the role initdb bootstrapped with —
+# "the bootstrap superuser must have the SUPERUSER attribute" — so a container
+# initialised as foundit_owner can never have a non-superuser owner, whatever
+# is written afterwards. The bootstrap role therefore has to be somebody else.
+#
+# foundit_owner keeps the password it has always had, so DATABASE_URL_OWNER in
+# an existing .env.local is unchanged by any of this; what changed is the two
+# attributes the role no longer carries.
+#
+# All five passwords are throwaway literals on purpose, and that is the only kind
 # of password that ever belongs in a tracked file: this database holds
 # invented seed data, listens on 127.0.0.1 only, and can be deleted at any
 # time. The server's credentials are generated on the server and live in a
 # root-only file there. See docs/development.md.
-configs:
-  dev_roles_sql:
-    # Runs once, on an empty ./db/.data, before any migration.
-    #
-    # 0001_init.sql creates foundit_app if it does not already exist, and it
-    # creates it with no password, so on its own there is no way to connect
-    # as the application role. Development then measures everything as the
-    # owner — a BYPASSRLS superuser — which is how a baseline came to be
-    # recorded at roughly a third of the latency the application will see.
-    # Creating the role here, with a password, means 0001 finds it and leaves
-    # it alone.
-    #
-    # No grants here. What foundit_app may do is decided by the migrations,
-    # which are the same files that run on the server; a grant that existed
-    # only in development would be a difference between the two environments
-    # that nothing tests.
-    #
-    # If your ./db/.data already exists, this file will not run — Postgres
-    # only executes /docker-entrypoint-initdb.d on first initialisation. Set
-    # the passwords on the running container instead:
-    #
-    #   docker exec -i foundit-dev-db psql -U foundit_owner -d foundit \
-    #     -c "alter role foundit_app login password 'local_development_only_app'" \
-    #     -c "alter role foundit_embed login password 'local_development_only_embed'" \
-    #     -c "alter role foundit_auth login password 'local_development_only_auth'"
-    #
-    # foundit_embed is created by 0005_embed_role.sql and foundit_auth by
-    # 0013_accounts.sql, both without a password, and for the same reason: a
-    # migration is a tracked file that runs on the production host, so it must
-    # never set one.
-    content: |
-      do $$
-      begin
-        if exists (select 1 from pg_roles where rolname = 'foundit_app') then
-          alter role foundit_app login noinherit password 'local_development_only_app';
-        else
-          create role foundit_app login noinherit password 'local_development_only_app';
-        end if;
-
-        if exists (select 1 from pg_roles where rolname = 'foundit_embed') then
-          alter role foundit_embed login noinherit password 'local_development_only_embed';
-        else
-          create role foundit_embed login noinherit password 'local_development_only_embed';
-        end if;
-
-        if exists (select 1 from pg_roles where rolname = 'foundit_auth') then
-          alter role foundit_auth login noinherit password 'local_development_only_auth';
-        else
-          create role foundit_auth login noinherit password 'local_development_only_auth';
-        end if;
-      end
-      $$;
 services:
   db:
     image: pgvector/pgvector:pg17
     container_name: foundit-dev-db
     environment:
-      POSTGRES_USER: foundit_owner
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: local_development_only
       POSTGRES_DB: foundit
     ports:
@@ -103,11 +74,14 @@ services:
       - "127.0.0.1:5433:5432"
     volumes:
       - ./.data:/var/lib/postgresql/data
-    configs:
-      - source: dev_roles_sql
-        target: /docker-entrypoint-initdb.d/10-dev-roles.sql
+      # db/dev-roles.sql, run ONCE by the entrypoint on an empty ./db/.data,
+      # as the `postgres` superuser, before any migration. It is a mounted
+      # file rather than an inline `configs:` block because Docker Compose
+      # interpolates `$` in config content: `do $$ ... $$` reached PostgreSQL
+      # as `do $ ... $` and the container refused to start.
+      - ./dev-roles.sql:/docker-entrypoint-initdb.d/10-dev-roles.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U foundit_owner -d foundit"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d foundit"]
       interval: 5s
       timeout: 5s
       retries: 10

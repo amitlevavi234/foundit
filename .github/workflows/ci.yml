@@ -81,7 +81,18 @@ jobs:
           # second set. There is nothing here worth protecting: the database
           # holds the invented development catalogue, it is reachable only
           # from this runner, and it is destroyed when the job ends.
-          POSTGRES_USER: foundit_owner
+          #
+          # POSTGRES_USER IS `postgres` AND NOT `foundit_owner`, AND THAT IS
+          # THE PHASE 8 REVIEW'S F1. The image creates POSTGRES_USER as the
+          # bootstrap superuser, and PostgreSQL refuses to take SUPERUSER away
+          # from the role initdb bootstrapped with — so a container started as
+          # foundit_owner has a superuser owner for ever, and a superuser
+          # bypasses every row-level security policy in the schema. CI was
+          # therefore testing a database that does not exist anywhere: on it,
+          # `public.record_tool_open` counted clicks that would have counted
+          # nothing on the server, and six other SECURITY DEFINER functions
+          # wrote rows they would have written nowhere.
+          POSTGRES_USER: postgres
           POSTGRES_PASSWORD: local_development_only
           POSTGRES_DB: foundit
         ports:
@@ -89,17 +100,28 @@ jobs:
           # connection string below reads exactly like the local one.
           - 5433:5432
         options: >-
-          --health-cmd "pg_isready -U foundit_owner -d foundit"
+          --health-cmd "pg_isready -U postgres -d foundit"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
 
     env:
+      # THE SUPERUSER, and the only step that uses it is the one below that
+      # creates the roles, hands the schemas to the owner and creates the
+      # `vector` extension — the three things a non-superuser cannot do.
+      # Nothing else in this workflow may name it: not the migrations, not the
+      # suites, not the eval, not the application.
+      DATABASE_URL_SUPER: postgresql://postgres:local_development_only@127.0.0.1:5433/foundit
       # Two roles, and the difference between them is a security boundary.
       # DATABASE_URL_OWNER runs migrations and the SQL suites; DATABASE_URL is
       # the application role that owns nothing and has no BYPASSRLS, which is
       # the only honest thing to measure search quality against. There is no
       # fallback between them, here or anywhere else.
+      #
+      # foundit_owner is NOSUPERUSER NOBYPASSRLS as of 13 September 2026, which
+      # is what research/08 §9.3 has always said the server would be. It is
+      # subject to every policy in `public` exactly as the application is, so
+      # what this workflow measures is what the server will do.
       DATABASE_URL_OWNER: postgresql://foundit_owner:local_development_only@127.0.0.1:5433/foundit
       DATABASE_URL: postgresql://foundit_app:local_development_only_app@127.0.0.1:5433/foundit
       # The embedding job's own role. It holds EXECUTE on two functions and no
@@ -134,8 +156,8 @@ jobs:
 
       - name: Check PostgreSQL has vector, pg_trgm and citext
         run: |
-          psql "$DATABASE_URL_OWNER" -qXAt -c "select version()"
-          missing=$(psql "$DATABASE_URL_OWNER" -qXAt -c "
+          psql "$DATABASE_URL_SUPER" -qXAt -c "select version()"
+          missing=$(psql "$DATABASE_URL_SUPER" -qXAt -c "
             select string_agg(want, ', ')
             from unnest(array['vector','pg_trgm','citext']) as want
             where want not in (select name from pg_available_extensions)")
@@ -146,44 +168,60 @@ jobs:
           fi
           echo "vector, pg_trgm and citext are all available."
 
-      - name: Create the application, embedding and authentication roles
-        # Exactly what db/docker-compose.dev.yml creates on a fresh data
-        # directory, and for the same reason: the migrations create both roles
-        # with no password if they do not already exist, and a role that
-        # cannot log in means everything gets measured as the owner, which
-        # bypasses every row-level security policy in the schema. So the roles
-        # are created first, with passwords, and the migrations leave them
-        # alone.
+      - name: Create the roles, hand the schemas to the owner, install the extensions
+        # db/dev-roles.sql, VERBATIM — the same file the development container
+        # mounts into /docker-entrypoint-initdb.d. It used to be a copy of that
+        # file pasted into this one, and a copy is a thing that drifts: the
+        # point of running CI against the same bootstrap is that "what CI tests
+        # is what development runs" stays true of the roles and not only of the
+        # image.
         #
-        # No grants here. What either role may do is decided by the
-        # migrations, which are the same files that run on the server.
+        # As the SUPERUSER, because three of the things in it need one:
+        # creating `vector` (which is not a trusted extension), handing the
+        # database and schema public to foundit_owner, and granting SET on the
+        # `foundit.definer` parameter that 0020 §2 attaches to twenty-odd
+        # SECURITY DEFINER functions. Nothing after this step names
+        # DATABASE_URL_SUPER.
         run: |
-          psql "$DATABASE_URL_OWNER" -v ON_ERROR_STOP=1 -qX <<'SQL'
-          do $$
-          begin
-            if exists (select 1 from pg_roles where rolname = 'foundit_app') then
-              alter role foundit_app login noinherit password 'local_development_only_app';
-            else
-              create role foundit_app login noinherit password 'local_development_only_app';
-            end if;
-
-            if exists (select 1 from pg_roles where rolname = 'foundit_embed') then
-              alter role foundit_embed login noinherit password 'local_development_only_embed';
-            else
-              create role foundit_embed login noinherit password 'local_development_only_embed';
-            end if;
-
-            if exists (select 1 from pg_roles where rolname = 'foundit_auth') then
-              alter role foundit_auth login noinherit password 'local_development_only_auth';
-            else
-              create role foundit_auth login noinherit password 'local_development_only_auth';
-            end if;
-          end
-          $$;
-          SQL
+          psql "$DATABASE_URL_SUPER" -v ON_ERROR_STOP=1 -qX -f db/dev-roles.sql
           psql "$DATABASE_URL" -qXAt -c "select 'foundit_app can log in: ' || current_user"
           psql "$DATABASE_URL_EMBED" -qXAt -c "select 'foundit_embed can log in: ' || current_user"
           psql "$DATABASE_URL_AUTH" -qXAt -c "select 'foundit_auth can log in: ' || current_user"
+          psql "$DATABASE_URL_OWNER" -qXAt -c "select 'foundit_owner can log in: ' || current_user"
+
+      - name: Check the schema owner is NOT a superuser
+        # THE PHASE 8 REVIEW'S F1, AS A STEP OF ITS OWN.
+        #
+        # `public.record_tool_open` updated `public.tools` — FORCE ROW LEVEL
+        # SECURITY — outside 0014's counters window, so it matched no policy
+        # and updated zero rows. An UPDATE that matches nothing is a success,
+        # so nothing was raised and nothing was logged, and the one number
+        # Phase 8 gave a maker would have been 0 on every listing for ever.
+        # It passed because foundit_owner was a superuser here and in the
+        # development container, and superusers bypass row-level security
+        # entirely.
+        #
+        # Six more SECURITY DEFINER functions had the same defect and were
+        # found the moment this stopped being true. So it is checked, loudly,
+        # before anything is measured: every suite below is meaningless on a
+        # database whose owner is not the one the server will have.
+        run: |
+          psql "$DATABASE_URL_SUPER" -qXAt -v ON_ERROR_STOP=1 <<'SQL'
+          do $$
+          declare r record;
+          begin
+            select rolsuper, rolbypassrls into r from pg_roles where rolname = 'foundit_owner';
+            if r.rolsuper or r.rolbypassrls then
+              raise exception
+                'foundit_owner is rolsuper=% rolbypassrls=%; it must be f and f, or every '
+                'row-level security policy in this schema is switched off for every '
+                'SECURITY DEFINER function in it and this workflow is testing a database '
+                'that exists nowhere', r.rolsuper, r.rolbypassrls;
+            end if;
+            raise notice 'foundit_owner: rolsuper=% rolbypassrls=%', r.rolsuper, r.rolbypassrls;
+          end
+          $$;
+          SQL
 
       - name: Apply every migration and load the development catalogue
         run: node db/apply.mjs --seed
@@ -281,11 +319,73 @@ jobs:
         continue-on-error: true
         run: node eval/run.mjs --read-query
 
+      - name: Build the web app
+        # `npm run build` if package.json has a build script, and a printed
+        # sentence if it does not. Written this way so that nobody has to
+        # remember to come back and wire the build in on the day the web app
+        # lands — remembering is the failure this whole workflow exists to stop.
+        #
+        # IT RUNS BEFORE THE UNIT TESTS NOW, because the step below walks a
+        # server and a server needs something to serve. See it.
+        run: |
+          if node -e "process.exit((require('./package.json').scripts || {}).build ? 0 : 1)"; then
+            npm run build
+          else
+            echo "No build script in package.json yet. Nothing to build."
+          fi
+
+      - name: Start the built application, so the route walks actually walk
+        # THE PHASE 8 REVIEW'S F12. tests/links.test.mjs walks every /admin
+        # route with no session and with a non-administrator's session, which
+        # is half of Phase 8's gate item 3 — and both walks skipped when no
+        # server was answering, so in CI they had never run at all. A skip that
+        # looks like a pass is the failure mode this whole workflow exists to
+        # avoid, so CI starts a server and the walks become assertions.
+        #
+        # A PRODUCTION BUILD AND NOT `next dev`, deliberately: under `next dev`
+        # a Server Component cannot set a status code, so `notFound()` answers
+        # 200 and the walk can only check the body. Against `next start` the
+        # status line is real, and the test says which of the two it saw.
+        #
+        # The base URL is BETTER_AUTH_URL because that is the one variable that
+        # already says where this deployment answers, and it is what
+        # tests/links.test.mjs reads.
+        env:
+          BETTER_AUTH_SECRET: a_throwaway_ci_secret_for_a_container_that_lives_two_minutes
+          BETTER_AUTH_URL: http://127.0.0.1:3100
+          AUTH_DEV_CODE_TO_LOG: '1'
+          PORT: '3100'
+        run: |
+          npm run start > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:3100/"; then
+              echo "the application is answering on :3100"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the application never answered on :3100. Its log:"
+          cat server.log
+          exit 1
+
       - name: Run the application's unit tests
         # Whatever package.json's "test:unit" script points at, as soon as
         # there is a tests/ folder for it to point at. Written this way so a
         # suite cannot be added and left running nowhere, which is exactly
         # what happened to db/test/search_events_test.sql.
+        #
+        # The three environment variables are the ones tests/links.test.mjs
+        # needs to walk the server above and to mint its own throwaway
+        # non-administrator through the emailed-code path: where the server is,
+        # the key its sign-in codes are hashed under, and the authentication
+        # role that may see auth_core. AUTH_DEV_CODE_TO_LOG=1 means no message
+        # is ever sent anywhere, and the address it signs in is
+        # @example.invalid, which could not be delivered to if one were.
+        env:
+          BETTER_AUTH_SECRET: a_throwaway_ci_secret_for_a_container_that_lives_two_minutes
+          BETTER_AUTH_URL: http://127.0.0.1:3100
+          AUTH_DEV_CODE_TO_LOG: '1'
         run: |
           if [ -d tests ] && node -e "process.exit((require('./package.json').scripts || {})['test:unit'] ? 0 : 1)"; then
             npm run test:unit
@@ -294,17 +394,14 @@ jobs:
             echo "running by itself the day there is one of each."
           fi
 
-      - name: Build the web app
-        # `npm run build` if package.json has a build script, and a printed
-        # sentence if it does not. Written this way so that nobody has to
-        # remember to come back and wire the build in on the day the web app
-        # lands — remembering is the failure this whole workflow exists to stop.
+      - name: Stop the application
+        # Always, so a failing walk does not leave the runner holding a port
+        # and the server's own log is printed where somebody reading a red X
+        # will find it.
+        if: always()
         run: |
-          if node -e "process.exit((require('./package.json').scripts || {}).build ? 0 : 1)"; then
-            npm run build
-          else
-            echo "No build script in package.json yet. Nothing to build."
-          fi
+          if [ -f server.pid ]; then kill "$(cat server.pid)" 2>/dev/null || true; fi
+          if [ -f server.log ]; then echo '--- the application log ---'; cat server.log; fi
 
       - name: Keep the evaluation report
         # Always, including when the run above failed — a failed run is

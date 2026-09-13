@@ -54,6 +54,30 @@
 
 begin;
 
+-- ===========================================================================
+-- THE OWNER'S WINDOW (db/migrations/0020_phase8_review.sql §2), open for the
+-- whole of this file and closed on its last line.
+--
+-- Every table in `public` is FORCE ROW LEVEL SECURITY, and since 13 September
+-- 2026 `foundit_owner` is NOSUPERUSER NOBYPASSRLS — which is what research/08
+-- §9.3 has always said the server would be. So the owner is subject to
+-- `tools_insert` ("submitted_by = auth.uid() and status = 'draft'"),
+-- `profiles_insert` ("id = auth.uid()") and every other policy here, none of
+-- which is true of a file loading 224 listings that belong to nobody.
+--
+-- Before that change this file worked because the owner was a superuser and
+-- superusers ignore policies. That was the Phase 8 review's F1 wearing a
+-- different hat: the seed did not know it was reaching past a policy, and on
+-- the researched server layout it would have failed on its first insert.
+--
+-- This is development data and nothing else. It is never loaded on a server —
+-- db/apply.mjs only reads it under `--seed`, and its own header says "nothing
+-- in this file should ever reach a production database" — so what the window
+-- buys here is a file that says out loud what it is doing rather than one that
+-- depends on an attribute nobody wrote down.
+-- ===========================================================================
+select set_config('foundit.definer', 'on', true);
+
 -- --- the editorial taxonomy -----------------------------------------------
 insert into public.categories (slug, name, description, sort_order) values
   ('money',         'Money',         'Splitting, tracking and sending money',            1),
@@ -1979,5 +2003,11 @@ from public.collections c
 join public.tools t on t.slug::text in ('tabsplit', 'receiptly', 'splitwise', 'organic-maps')
 where c.slug::text = 'trip-to-greece'
 on conflict do nothing;
+
+-- Shut again, explicitly rather than at the commit: a file that returns with
+-- the window still open hands it to whatever runs next on the same connection,
+-- and the next thing along is not necessarily this one (0014's reasoning about
+-- `foundit.counters`, applied here).
+select set_config('foundit.definer', 'off', true);
 
 commit;

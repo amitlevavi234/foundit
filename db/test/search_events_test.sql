@@ -58,6 +58,29 @@ begin
 end;
 $$;
 
+/**
+ * THE OWNER'S WINDOW (db/migrations/0020_phase8_review.sql §2).
+ *
+ * `foundit_owner` has been NOSUPERUSER NOBYPASSRLS since 13 September 2026 —
+ * which is what research/08 §9.3 has always said the server would be — so the
+ * owner is subject to every policy in `public` exactly as the application is.
+ * That IS the change: an owner statement reaching past a policy used to be a
+ * silent no-op and is now an error.
+ *
+ * A test suite is one of the three things that legitimately reaches past a
+ * policy as the owner. It plants fixtures no function could plant, and it
+ * counts rows the person who wrote them would not be allowed to see. Every
+ * call below is one of those, each with its own reason written beside it, and
+ * the window is closed again on the next line.
+ */
+create or replace function pg_temp.owner_window(p_open boolean)
+returns void language plpgsql as $$
+begin
+  perform set_config('foundit.definer',
+                     case when p_open then 'on' else 'off' end, true);
+end;
+$$;
+
 -- The normalization the trigger and log_search_event both use. Written out
 -- again here on purpose: a test that reuses the code under test proves only
 -- that the code equals itself.
@@ -238,6 +261,9 @@ $$;
 
 reset role;
 
+-- The owner reads back what the application just wrote. search_events_read is auth.is_admin(), so the owner sees nothing at all without the 0020 §2 window — and what is being checked here is the row, not who may read it.
+select pg_temp.owner_window(true);
+
 do $$
 declare v record;
 begin
@@ -274,6 +300,8 @@ begin
   end if;
 end
 $$;
+select pg_temp.owner_window(false);
+
 
 -- ===========================================================================
 -- 3. The 200-character cap, which lived only inside log_search_event.
@@ -290,6 +318,9 @@ end
 $$;
 
 reset role;
+
+-- Again the owner reading back its own fixture; see above.
+select pg_temp.owner_window(true);
 
 do $$
 declare v record;
@@ -348,6 +379,8 @@ begin
   end if;
 end
 $$;
+select pg_temp.owner_window(false);
+
 
 -- ===========================================================================
 -- 4. The backstop. The CHECK constraints are unreachable while the trigger is

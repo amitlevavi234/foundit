@@ -105,11 +105,35 @@ begin
     perform pg_temp.fail('row-level security is not enabled AND forced on query_readings');
   end if;
 
+  -- EXACTLY ONE POLICY, AND IT IS THE DEFINER WINDOW (0020 §2).
+  --
+  -- The design was no policy at all: with row-level security forced, that
+  -- refuses everybody who is subject to policies and needs no `true` anywhere
+  -- to say so. It refused one role too many. `foundit_owner` became
+  -- NOSUPERUSER NOBYPASSRLS on 13 September 2026 — which is what the server
+  -- has always been — and the cache's own SECURITY DEFINER writers run AS the
+  -- owner, so every reading this product pays for silently failed to cache
+  -- and every cache read silently missed. The policy below is the door those
+  -- functions come through and nobody else does: TO foundit_owner, which no
+  -- application role is a member of and none may SET ROLE to, gated on a
+  -- setting that only the functions 0020 §2 names can turn on.
   select count(*) into n from pg_policies
    where schemaname = 'public' and tablename = 'query_readings';
-  if n <> 0 then
+  if n <> 1 then
     perform pg_temp.fail(
-      format('query_readings has %s policy/policies; it must have none at all', n));
+      format('query_readings has %s policy/policies; it must have exactly one, and that '
+             'one is the 0020 definer window', n));
+  end if;
+
+  select count(*) into n from pg_policies
+   where schemaname = 'public' and tablename = 'query_readings'
+     and policyname = 'query_readings_definer'
+     and roles::text = '{foundit_owner}'
+     and qual like '%foundit.definer%'
+     and with_check like '%foundit.definer%';
+  if n <> 1 then
+    perform pg_temp.fail('the one policy on query_readings is not the definer window: it '
+                         'must be scoped TO foundit_owner and gated on foundit.definer');
   end if;
 
   select count(*) into n
@@ -402,9 +426,20 @@ reset role;
 -- Age both rows past the ttl. The owner does this directly because the point is
 -- what query_reading DOES with an old row, and there is no function that makes
 -- a row old — nor should there be.
+--
+-- THE SUITE OPENS 0020 §2's WINDOW BY HAND TO DO IT, and says so. Since
+-- 13 September 2026 foundit_owner is NOSUPERUSER NOBYPASSRLS, so the owner is
+-- subject to this table's one policy like anybody else; the window is what the
+-- cache's own functions open, and a fixture that ages a row is the owner
+-- stating plainly that it is reaching past a policy rather than discovering
+-- that it silently did nothing.
+select set_config('foundit.definer', 'on', false);
+
 update public.query_readings
    set created_at = now() - public.reading_refusal_ttl() - interval '1 minute'
  where query_norm in ('someone to fix the leak', 'a tool to split a bill');
+
+select set_config('foundit.definer', 'off', false);
 
 set local role foundit_app;
 

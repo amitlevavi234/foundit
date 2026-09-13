@@ -60,6 +60,29 @@ begin
 end;
 $$;
 
+/**
+ * THE OWNER'S WINDOW (db/migrations/0020_phase8_review.sql §2).
+ *
+ * `foundit_owner` has been NOSUPERUSER NOBYPASSRLS since 13 September 2026 —
+ * which is what research/08 §9.3 has always said the server would be — so the
+ * owner is subject to every policy in `public` exactly as the application is.
+ * That IS the change: an owner statement reaching past a policy used to be a
+ * silent no-op and is now an error.
+ *
+ * A test suite is one of the three things that legitimately reaches past a
+ * policy as the owner. It plants fixtures no function could plant, and it
+ * counts rows the person who wrote them would not be allowed to see. Every
+ * call below is one of those, each with its own reason written beside it, and
+ * the window is closed again on the next line.
+ */
+create or replace function pg_temp.owner_window(p_open boolean)
+returns void language plpgsql as $$
+begin
+  perform set_config('foundit.definer',
+                     case when p_open then 'on' else 'off' end, true);
+end;
+$$;
+
 -- A deterministic unit vector with a 1 in one position. Two of these are
 -- orthogonal, so "nearest by meaning" below is arithmetic rather than luck,
 -- and no API call is needed to test the plumbing.
@@ -108,12 +131,28 @@ begin
     perform pg_temp.fail('row-level security is not enabled AND forced on query_embeddings');
   end if;
 
+  -- EXACTLY ONE POLICY, AND IT IS THE DEFINER WINDOW (0020 §2). The design
+  -- was NO policy — with RLS forced that refuses everybody who is subject to
+  -- policies and needs no `true` anywhere to say so — and it refused one role
+  -- too many: `foundit_owner` became NOSUPERUSER NOBYPASSRLS on 13 September
+  -- 2026, which is what the server has always been, and this cache's own
+  -- SECURITY DEFINER writers run AS the owner.
   select count(*) into n from pg_policies
    where schemaname = 'public' and tablename = 'query_embeddings';
-  if n <> 0 then
-    perform pg_temp.fail(n || ' policy/policies on query_embeddings. The design is NO policy: '
-                      || 'with RLS forced that refuses everybody who is subject to policies, '
-                      || 'and it needs no `true` anywhere to say so');
+  if n <> 1 then
+    perform pg_temp.fail(n || ' policy/policies on query_embeddings; there must be exactly '
+                      || 'one, and that one is the 0020 definer window');
+  end if;
+
+  select count(*) into n from pg_policies
+   where schemaname = 'public' and tablename = 'query_embeddings'
+     and policyname = 'query_embeddings_definer'
+     and roles::text = '{foundit_owner}'
+     and qual like '%foundit.definer%'
+     and with_check like '%foundit.definer%';
+  if n <> 1 then
+    perform pg_temp.fail('the one policy on query_embeddings is not the definer window: it '
+                      || 'must be scoped TO foundit_owner and gated on foundit.definer');
   end if;
 
   select count(*) into n
@@ -354,6 +393,9 @@ set role foundit_app;
 -- ===========================================================================
 reset role;
 
+-- Two listings and their vectors, planted as the owner. There is no function that creates a published listing with a hand-built orthogonal unit vector on it — publish_tool is the maker's path and store_problem_embedding is the embedding job's — so the owner's window (0020 §2) is opened for the fixture and closed again immediately.
+select pg_temp.owner_window(true);
+
 do $$
 declare v_paid bigint; v_free bigint;
 begin
@@ -376,6 +418,8 @@ begin
          (v_free, 'zzqqxx the free one', pg_temp.unit(4), public.embedding_model(), now());
 end
 $$;
+select pg_temp.owner_window(false);
+
 
 set role foundit_app;
 
@@ -889,6 +933,9 @@ returns halfvec language sql immutable as $$
     from generate_series(0, 511) as i;
 $$;
 
+-- The same fixture, for the relevance floor: two listings whose vectors are chosen arithmetic rather than a model's output. The owner's window (0020 §2) is open for the two inserts and closed on the next line.
+select pg_temp.owner_window(true);
+
 do $$
 declare v_paid bigint; v_near bigint; v_w real;
 begin
@@ -920,6 +967,8 @@ begin
           public.embedding_model(), now());
 end
 $$;
+select pg_temp.owner_window(false);
+
 
 set role foundit_app;
 
