@@ -552,7 +552,14 @@ test('they refuse without their env file, by name', (t) => {
     const result = spawnSync('bash', [join(ROOT, script), ...args], {
       encoding: 'utf8',
       cwd: ROOT,
-      env: { ...process.env, FOUNDIT_ENV_DIR: missing },
+      // A CONTAINER NOTHING ANSWERS TO, so the two backup scripts' `fail` has
+      // nowhere to write its `infra.ops_events` row. Since F9 every failure
+      // records one, which is the point of F9 — and a test suite that left two
+      // rows in the development database's operations log on every run would
+      // be putting noise on the dashboard's own panel to prove a refusal that
+      // has nothing to do with recording.
+      env: { ...process.env, FOUNDIT_ENV_DIR: missing,
+        FOUNDIT_DB_CONTAINER: 'foundit-no-such-container' },
     });
     assert.equal(result.status, code, `${script} exited ${result.status}, expected ${code}`);
     assert.match(result.stderr, message, `${script} did not say which file is missing`);
