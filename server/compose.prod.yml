@@ -1,0 +1,225 @@
+# ===========================================================================
+# Foundit in production. Two services and no third.
+#
+#   app      the Next.js server, bound to 127.0.0.1:3000, which is the address
+#            `cloudflared` dials (server/setup/08-tunnel.sh). Nothing on this
+#            machine listens on a public port and nothing here changes that.
+#   worker   the same image with a different command: scripts/embed-worker.mjs,
+#            holding the Phase 7 advisory lock, reading DATABASE_URL_EMBED and
+#            no other connection string.
+#
+# POSTGRESQL IS NOT HERE. It is already a service on the host, started by
+# server/setup/09-postgres-service.sh, with its own compose project, its own
+# bind-mounted data directory and its own memory limit. research/10 §6.5's
+# compose file puts the database beside the app; doing that here would create a
+# SECOND PostgreSQL, and the commonest way a Dockerised database is lost is
+# exactly this kind of accidental duplicate. The app reaches the existing one
+# over the host's loopback.
+#
+# CADDY IS NOT HERE EITHER, and docs/product-decisions.md §13 (13 September
+# 2026) is the decision. research/10 §5 writes a Caddyfile that terminates TLS
+# on a public port; this host has no public port, Cloudflare terminates TLS at
+# the edge, and `cloudflared` connects to 127.0.0.1:3000. There is no
+# certificate on this machine and nothing for ACME to do. What Caddy would also
+# have done — the security headers — middleware.ts does instead, which is where
+# research/10 itself says a CSP belongs.
+#
+# NO SECRET IS IN THIS FILE. Every credential comes from a root-only env file
+# under ${FOUNDIT_ENV_DIR}, which is /root/.foundit on the host (mode 0600,
+# root:root, created by server/setup/09-postgres-service.sh and filled by the
+# owner in 9b). scripts/scan-secrets.sh scans this file on every commit and
+# tests/deploy.test.mjs asserts there is no `environment:` key here holding a
+# password.
+#
+#   docker compose -f server/compose.prod.yml config       validate
+#   server/deploy.sh sha-1a2b3c4                           deploy
+#   server/rollback.sh                                     undo
+# ===========================================================================
+name: foundit
+
+# Two ceilings and a log that cannot fill the disk, shared by both services.
+# research/10 §6.3: the json-file driver's defaults are `max-size: -1` and
+# `max-file: 1`, which is "grow until the 40 GB disk is full".
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: *logging
+
+services:
+  app:
+    <<: *hardening
+    # ONE IMAGE, NAMED BY DIGEST-BEARING TAG AND NOT BY `latest`. deploy.sh
+    # refuses any tag that is not `sha-<hex>`, so what is running is always
+    # traceable to a commit. `:?` rather than a default: a compose file that
+    # quietly falls back to `latest` is a compose file that can deploy
+    # something nobody chose.
+    image: ${FOUNDIT_IMAGE_REPO:-ghcr.io/amitlevavi234/foundit}:${IMAGE_TAG:?IMAGE_TAG must be set — server/deploy.sh sets it, and refuses anything that is not sha-<hex>}
+    container_name: foundit-app
+    pull_policy: missing
+
+    # 127.0.0.1 EXPLICITLY. The daemon-wide default is set in
+    # server/setup/04-docker.sh and this repeats it, because research/07 §2.4
+    # is right that Docker publishes past ufw: a `ports:` line that forgets the
+    # address opens the application to the internet with `ufw status` still
+    # reading "deny incoming".
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    networks:
+      # See the `networks:` block at the foot of this file. This is how the app
+      # reaches PostgreSQL: by container name on the database project's own
+      # bridge, not over the host's loopback — 5432 is published to 127.0.0.1
+      # OF THE HOST, and 127.0.0.1 inside a container is the container.
+      - database
+
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # Every interface OF THE CONTAINER, which is the container. The
+      # publication above is what decides who can reach it.
+      HOSTNAME: "0.0.0.0"
+      # 4 GB machine, shared with PostgreSQL's 2 GB limit and cloudflared.
+      NODE_OPTIONS: "--max-old-space-size=640"
+      # research/10 §7.2: the single highest-value line in the monitoring
+      # section. It turns "the site is throwing errors" into "it started at
+      # sha-1a2b3c4", which is a tag deploy.sh can roll back to.
+      SENTRY_RELEASE: ${IMAGE_TAG}
+      SENTRY_ENVIRONMENT: production
+
+    # DATABASE_URL, DATABASE_URL_AUTH, BETTER_AUTH_SECRET, BETTER_AUTH_URL,
+    # GOOGLE_*, RESEND_API_KEY, EMAIL_FROM, OPENAI_API_KEY, SENTRY_DSN and the
+    # rate-limit ceilings. Root-only, 0600, never in this file and never in a
+    # layer.
+    env_file:
+      - path: ${FOUNDIT_ENV_DIR:-/root/.foundit}/app.env
+        required: true
+
+    healthcheck:
+      # No curl in the image, so node asks itself. `/healthz` is one `select 1`
+      # on the app's own pool with a 2s ceiling (app/healthz/route.ts).
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # research/10 §3.2: poll every 3s while it boots, do not call it
+      # unhealthy for 40s, then settle. A deploy sees "healthy" in about 5s
+      # instead of waiting out a 30s interval.
+      start_period: 40s
+      start_interval: 3s
+
+    # research/10 §3.1: Next drains in-flight requests and pending `after()`
+    # callbacks on SIGTERM, and recommends 10–30s to do it in.
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+
+    # research/10 §6.1 and §6.2. The app may use a little swap — a build spike
+    # absorbed is better than a container killed — and PostgreSQL, which is in
+    # the other compose project, may not.
+    mem_limit: 900m
+    memswap_limit: 1300m
+    mem_reservation: 384m
+    cpus: 2.0
+
+    # Next writes its ISR cache and its own temporary files; both go to RAM
+    # rather than to a writable image layer, so nothing an attacker drops in
+    # the container survives a restart (research/07 §6.5).
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /app/.next/cache:size=128m,mode=0700,uid=1001,gid=1001
+
+  worker:
+    <<: *hardening
+    image: ${FOUNDIT_IMAGE_REPO:-ghcr.io/amitlevavi234/foundit}:${IMAGE_TAG:?IMAGE_TAG must be set — server/deploy.sh sets it, and refuses anything that is not sha-<hex>}
+    container_name: foundit-worker
+
+    # THE SAME IMAGE, A DIFFERENT COMMAND. Not a second build and not a second
+    # repository: the worker's code is `scripts/embed-worker.mjs` in this
+    # repository and it has to be the code the app was built from, or a
+    # statement the app just wrote is embedded by a worker that reads its
+    # schema differently.
+    command: ["node", "scripts/embed-worker.mjs", "--loop"]
+
+    # NO PUBLISHED PORT AT ALL. It answers nothing; it takes work from a table.
+    # A health check would have to invent something to ask it.
+
+    networks:
+      - database
+
+    environment:
+      NODE_ENV: production
+      SENTRY_RELEASE: ${IMAGE_TAG}
+      SENTRY_ENVIRONMENT: production
+
+    # A DIFFERENT ENV FILE, HOLDING ONE CONNECTION STRING AND ONE KEY.
+    # `foundit_embed` has EXECUTE on two functions and no privilege on any
+    # table (db/migrations/0005_embed_role.sql), and the worker refuses to run
+    # as anything else. Handing it app.env would hand a batch job the
+    # application's role, the session secret and the mail key for no reason at
+    # all — and env_file is the only place that boundary can be drawn, because
+    # it is one image.
+    env_file:
+      - path: ${FOUNDIT_ENV_DIR:-/root/.foundit}/embed.env
+        required: true
+
+    # EXACTLY ONE WORKER RUNS, AND THE DATABASE IS WHAT ENFORCES IT.
+    # `scripts/embed-worker.mjs` takes a session-level advisory lock at
+    # start-up and exits 4 if another holds it (docs/development.md, "Exactly
+    # one of these runs"). `container_name` above stops compose starting a
+    # second under this project; the lock stops a second started any other way
+    # — by hand, by a systemd unit, by a deploy that overlapped.
+    #
+    # `restart: unless-stopped` from the anchor plus exit 4 means a duplicate
+    # would restart for ever, so:
+    restart: on-failure:3
+
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+
+    mem_limit: 512m
+    memswap_limit: 512m
+    mem_reservation: 128m
+    cpus: 1.0
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+
+networks:
+  # THE DATABASE PROJECT'S OWN NETWORK, JOINED RATHER THAN RECREATED.
+  #
+  # server/setup/09-postgres-service.sh writes a compose file named
+  # `foundit-db`, so its default bridge is `foundit-db_default` and the
+  # container on it is `foundit-dev-db`. DATABASE_URL in app.env therefore
+  # names `foundit-dev-db:5432`, not `127.0.0.1:5432`: the port publication in
+  # that file is `127.0.0.1:5432:5432`, which is the HOST's loopback, and a
+  # container's own loopback is the container. An app configured for
+  # 127.0.0.1 fails with ECONNREFUSED at start-up, `/healthz` never goes
+  # green, and deploy.sh rolls back — loudly, which is the right direction,
+  # but the reason belongs written down here rather than discovered at 2 a.m.
+  #
+  # `external: true` because this project does not own that network and must
+  # never create, rename or remove it. If it is absent, compose says so by
+  # name and nothing starts, which is better than starting an app that cannot
+  # reach its database.
+  database:
+    external: true
+    name: ${FOUNDIT_DB_NETWORK:-foundit-db_default}
+
+# No `volumes:`. Nothing in this project keeps state — the state is in
+# PostgreSQL, in the other compose project, on a bind mount that this file
+# cannot reach and `docker compose down -v` here cannot touch.

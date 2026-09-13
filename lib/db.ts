@@ -561,3 +561,59 @@ export function logSearchEvent(event: SearchEvent): void {
     // that is already there.
   });
 }
+
+/**
+ * Is the database answering? One `select 1`, on the application's own pool.
+ *
+ * THE WHOLE OF WHAT `/healthz` ASKS, and deliberately no more. It is what
+ * `docker compose`'s healthcheck and `server/deploy.sh` wait for, so it has to
+ * mean "this container can serve a page" and nothing larger: a check that
+ * counted rows would go red when a table was being vacuumed, and a check that
+ * only proved the process was listening would stay green through a database
+ * outage and let a deploy that cannot reach PostgreSQL be declared healthy.
+ *
+ * TWO SECONDS, and not the pool's five. A container health check that waits
+ * as long as a page would is a health check that cannot tell a slow database
+ * from a dead one inside the interval Docker gives it; the probe is allowed to
+ * give up sooner than a visitor's request is.
+ *
+ * IT RESOLVES `false` RATHER THAN THROWING. The caller is a route that must
+ * answer 503 rather than crash, and the error carries the connection string.
+ *
+ * THE TIMEOUT IS A RACE AND NOT `query_timeout`, because the ceiling has to
+ * cover `pool.connect()` as well as the query: a pool whose eight connections
+ * are all checked out by pages waiting on a database that has stopped
+ * answering would leave the probe waiting on `connectionTimeoutMillis` — five
+ * seconds — before the query it would then time out even started. The whole
+ * check is bounded, or it is not bounded.
+ */
+export async function databaseAnswers(timeoutMs = 2_000): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const gaveUp = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+    // Do not hold the process open for this. A health check must never be the
+    // reason a container refuses to shut down.
+    timer.unref?.();
+  });
+
+  const asked = (async () => {
+    let client: pg.PoolClient | undefined;
+    try {
+      client = await getPool().connect();
+      await client.query('select 1');
+      return true;
+    } catch {
+      // Nothing is logged and nothing is re-raised: the message can carry the
+      // password, and the answer a probe needs is one bit.
+      return false;
+    } finally {
+      client?.release();
+    }
+  })();
+
+  try {
+    return await Promise.race([asked, gaveUp]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

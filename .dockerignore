@@ -1,0 +1,46 @@
+# What must never reach a build context, and therefore never reach a layer.
+#
+# The first block is the one that matters: an `.env` copied into the builder
+# stage is in that stage's filesystem for ever, and `docker history` and
+# `docker save` both hand it to anybody with the image. `COPY . .` in the
+# Dockerfile is what makes this file load-bearing rather than a tidiness
+# measure, and tests/deploy.test.mjs asserts these lines are here.
+
+# --- credentials -----------------------------------------------------------
+.env
+.env.local
+.env.production
+.env.*.local
+**/*.pem
+**/*.key
+**/id_ed25519*
+**/id_rsa*
+secrets/
+
+# --- git, which carries every version of every file above -------------------
+.git
+.github
+.gitignore
+
+# --- things the build makes for itself --------------------------------------
+node_modules
+.next
+out
+build
+dist
+*.tsbuildinfo
+
+# --- things no server needs ------------------------------------------------
+docs
+design
+research
+eval/results
+eval/recordings
+tests
+db/test
+db/seed
+db/.data
+server
+*.log
+*.pdf
+README.md
