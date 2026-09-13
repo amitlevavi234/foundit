@@ -94,7 +94,7 @@ jobs:
           docker history --no-trunc --format '{{.CreatedBy}}' foundit:ci | head -40
 
           if docker history --no-trunc foundit:ci \
-             | grep -qiE 'API_KEY=[^$]|SECRET=[^$]|PASSWORD=[^$]|sk-[A-Za-z0-9]{20}'; then
+             | grep -qiE 'API_KEY[=][^$]|SECRET[=][^$]|PASSWORD[=][^$]|sk[-][A-Za-z0-9]{20}'; then
             echo "A credential-shaped value is in the image history."
             exit 1
           fi

@@ -531,6 +531,109 @@ breach. Two candidates are under research: running the Supabase stack ourselves,
 plain Postgres with Auth.js and hand-wired row-level security. **Whichever wins, the
 authorization boundary stays inside the database.** That is not negotiable.
 
+### Addendum, 13 September 2026: there is no reverse proxy, and there was never going to be one
+
+The paragraph above says "a reverse proxy in Docker Compose", and `research/10`
+§5 goes on to write a complete Caddyfile for it: automatic HTTPS, ports 80 and
+443 published, a `trusted_proxies` list of Cloudflare's ranges refreshed
+weekly, and a block of security headers. **Phase 9a did not build any of it,
+and the reason is that the host it was written for does not exist.**
+
+`server/setup/08-tunnel.sh` runs `cloudflared` as a service. It dials **out** to
+Cloudflare and traffic comes back down that connection to `http://localhost:3000`.
+`server/setup/03-host-hardening.sh` opens nothing but SSH in ufw, with a comment
+saying why: "Nothing for 80 or 443: the Cloudflare tunnel dials out, so nothing
+listens." So on this machine:
+
+* **There is no public port for ACME to answer on**, which removes the entire
+  reason `research/10` §5.1 chose Caddy — its automatic HTTPS is a default
+  rather than a configuration, and there is no certificate here to get.
+* **There is no origin IP worth hiding behind a CIDR allow-list**, because
+  there is nothing listening on it. The firewall rule the research spends a
+  section on is a weaker version of what a tunnel gives for nothing.
+* **A proxy in front of the app would be a third container** doing TLS
+  termination for a connection that arrives already terminated, on a 4 GB
+  machine shared with PostgreSQL.
+
+So `server/compose.prod.yml` binds the app to `127.0.0.1:3000` — exactly where
+`server/placeholder/compose.yml` binds the holding page today, which is what
+makes the switch in 9b one line of tunnel ingress rather than a new topology.
+
+**The two things Caddy would have done still have to be done, and are.**
+
+1. **The security headers and the Content-Security-Policy** are set by
+   `middleware.ts`, with a nonce minted per request. That is not a workaround:
+   `research/10` says it itself, at line 1016 — *"Set it in `next.config.js`
+   with a per-request nonce where the app knows its own script inventory, not
+   in the proxy where it does not."* `tests/headers.test.mjs` reads them off a
+   running server and `tests/csp.test.mjs` loads every route in a real browser
+   with the policy enforced.
+
+2. **Reading the visitor's real address.** Caddy would have been configured
+   with `trusted_proxies` and `client_ip_headers Cf-Connecting-Ip`, so the app
+   could trust the header. Without it, that guarantee has to come from the
+   tunnel — and it does, in exactly one direction: every request that reaches
+   this process came down the tunnel, and Cloudflare overwrites
+   `cf-connecting-ip` on every one. `lib/visitor.ts` has said so since Phase 3
+   and is unchanged; what is new is that this addendum is where the claim is
+   written down as a hosting decision rather than as a comment in a library.
+
+**One thing is lost and is worth naming.** `research/10` §3.3(c) uses Caddy's
+`lb_try_duration 10s` as a shock absorber over the one-to-six-second gap while
+a container is swapped, so a deploy looks like a slow page load rather than a
+502. There is nothing in front of the app to do that here, so a deploy is a few
+seconds of `cloudflared` failing to connect and Cloudflare showing its own
+error page. That is accepted for the reason §3.4 accepts bounded downtime: the
+deploy window is chosen, the gap is seconds, it is automatic, and
+`server/deploy.sh` puts the previous image back when health does not come. What
+is never acceptable is *unbounded* downtime, and that is what the rollback is
+for.
+
+### Addendum, 13 September 2026: the field measurement is Cloudflare's, and it is cookieless
+
+Phase 9a's gate asks for Core Web Vitals "reported from the browser through the
+same scrubbed channel or Cloudflare's cookieless Web Analytics — choose one, say
+why".
+
+**Cloudflare Web Analytics.** Three reasons, in order:
+
+1. **It stores no client-side state at all.** Cloudflare's own wording, quoted
+   in `research/11` §5.2: *"We don't use any client-side state (like cookies or
+   localStorage) for analytics purposes"*, and it does not track a visitor over
+   time by IP or User-Agent either. This product has spent two phases arranging
+   not to need a consent banner — no analytics cookie, no third-party
+   embed, a referrer policy of `no-referrer` so the search query never leaves
+   with a navigation — and reporting vitals through anything that identified a
+   visit would have spent that.
+
+2. **Reporting them through Sentry would mean reporting a URL.** A vitals beacon
+   carries the page it measured, and on `/results` the page is the sentence
+   somebody typed. `lib/sentry-scrub.ts` would cut the query string off, which
+   would leave a measurement of "some search" — true, useless, and a mechanism
+   through which the same channel could carry more later. Zero is a better
+   guarantee than a scrubber.
+
+3. **It measures INP, and nothing in a lab can.** Interaction to Next Paint
+   needs a person interacting. `scripts/vitals.mjs` measures LCP, CLS and Total
+   Blocking Time against a production build with Lighthouse, and TBT is a lab
+   proxy for INP rather than INP.
+
+**What it costs.** One `<script defer src>` from `static.cloudflareinsights.com`
+and a beacon POST to `cloudflareinsights.com`, both of which the CSP has to
+allow by host, and neither of which exists without a site token. And it is
+weaker than a product analytics tool at funnels and events — which this product
+does not have and is not going to.
+
+**The one non-obvious consequence.** Cloudflare injects that script at the edge
+on a proxied zone, automatically. An edge-injected tag arrives after the
+response has left this process, so it cannot carry that request's nonce, and
+`'strict-dynamic'` blocks it — silently. So automatic injection stays **off**
+(`server/cloudflare/README.md` §4) and `app/layout.tsx` renders the same script
+from the same host with the nonce, only when `NEXT_PUBLIC_CF_BEACON_TOKEN` is
+set. The token is a public site identifier that appears in the page source of
+every site using one; it is not a secret and `scripts/scan-secrets.sh` is not
+asked to treat it as one.
+
 ## 14. The site chrome tells the truth about what is built (decided 11 September 2026)
 
 The header and the footer are on every screen, and seven of the nine links in them went

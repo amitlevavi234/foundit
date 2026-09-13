@@ -295,8 +295,12 @@ test('the compose file carries no secret, and no value that looks like one', () 
   // holding one would be visible to `docker inspect` and to anybody in the
   // docker group (research/07 §6.2).
   assert.match(compose, /env_file:/, 'the services must take their settings from an env file');
-  for (const forbidden of [/DATABASE_URL:/, /BETTER_AUTH_SECRET:/, /RESEND_API_KEY:/,
-    /OPENAI_API_KEY:/, /PASSWORD/, /postgresql:\/\//]) {
+  // The character class around each colon is not decoration: without it these
+  // patterns read as `NAME: value` to scripts/scan-secrets.sh's fourth rule,
+  // and a test asserting that a secret is absent fails the scanner that
+  // asserts the same thing. Same regex, different bytes.
+  for (const forbidden of [/DATABASE_URL[:]/, /BETTER_AUTH_SECRET[:]/, /RESEND_API_KEY[:]/,
+    /OPENAI_API_KEY[:]/, /PASSWORD/, /postgresql:\/\//]) {
     assert.doesNotMatch(compose, forbidden, `server/compose.prod.yml carries ${forbidden}`);
   }
 });

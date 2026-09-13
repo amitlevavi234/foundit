@@ -86,6 +86,11 @@ export const RESERVED_HANDLES: readonly string[] = [
   'copyright',
   'foundit',
   'guidelines',
+  // `healthz` is the container's health check (app/healthz/route.ts, Phase
+  // 9a). It is a route under `app/`, so a person called @healthz would have a
+  // profile page nobody could reach — and `docker compose`'s healthcheck would
+  // be asking them how they are.
+  'healthz',
   'help',
   'maker',
   'moderator',

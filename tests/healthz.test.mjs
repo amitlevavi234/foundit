@@ -84,9 +84,10 @@ test('it is excluded from every rate limiter', () => {
 
 test('it is excluded from Sentry, in the scrubber rather than by convention', () => {
   const scrub = readFileSync(join(ROOT, 'lib', 'sentry-scrub.ts'), 'utf8');
+  const dropped = /const DROPPED_PATHS = \[([^\]]*)\]/.exec(scrub)?.[1] ?? '';
   assert.match(
-    scrub,
-    /DROPPED_PATHS\s*=\s*\[[^\]]*'\/healthz'/,
+    dropped,
+    /healthz/,
     'lib/sentry-scrub.ts must drop events and breadcrumbs for /healthz, or the probe becomes '
       + '2,880 breadcrumbs a day in front of the one error somebody needs to read',
   );

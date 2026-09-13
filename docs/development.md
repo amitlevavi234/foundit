@@ -889,6 +889,140 @@ early traffic.
    Going straight to `p=reject` is how people silently blackhole their own
    sign-in emails.
 
+## Building the image, and running the production stack locally
+
+Everything in `server/` runs on this machine as well as on the host, which is
+the whole reason Phase 9a could prove any of it. Every path in those scripts is
+a variable with the server's value as its default, so the difference between
+here and there is four environment variables and no edited file.
+
+### The image
+
+```bash
+docker build -t ghcr.io/amitlevavi234/foundit:sha-$(git rev-parse --short=7 HEAD) .
+```
+
+Three minutes cold, under one warm. It is `node:26-alpine`, multi-stage, and
+what comes out is about 370 MB running as uid 1001 with no shell script in
+front of it. `.dockerignore` is what keeps `.env.local` out of the build
+context, and `COPY . .` is why that file is load-bearing rather than tidiness:
+a layer cannot be un-published.
+
+### The compose file
+
+`server/compose.prod.yml` needs four things that are not true on a laptop, and
+each is a variable:
+
+```bash
+export IMAGE_TAG=sha-$(git rev-parse --short=7 HEAD)
+export FOUNDIT_IMAGE_REPO=127.0.0.1:5000/foundit   # or ghcr.io/amitlevavi234/foundit
+export FOUNDIT_ENV_DIR=/some/throwaway/dir         # holds app.env, embed.env, migrate.env
+export FOUNDIT_DB_NETWORK=db_default               # what db/docker-compose.dev.yml calls its bridge
+
+docker compose -f server/compose.prod.yml config     # validates; prints every env file
+docker compose -f server/compose.prod.yml up -d --wait app
+curl -s http://127.0.0.1:3000/healthz                # {"ok":true}
+docker compose -f server/compose.prod.yml down
+```
+
+**`config` prints the CONTENTS of every env file it reads**, which is why
+`server/deploy.sh` never runs it and `tests/deploy.test.mjs` asserts that no
+script in `server/` does. Run it by hand when you want to check the file;
+never in anything whose output goes to a log.
+
+**`DATABASE_URL` in that env file must name the container, not `127.0.0.1`.**
+`db/docker-compose.dev.yml` publishes 5433 on the HOST's loopback, and a
+container's own loopback is the container. Use
+`postgresql://foundit_app:…@foundit-dev-db:5432/foundit`.
+
+### The deploy, and its rollback
+
+`server/deploy.sh` pulls, so it needs a registry. A local one is thirty
+seconds:
+
+```bash
+docker run -d --name foundit-local-registry --network db_default \
+  -p 127.0.0.1:5000:5000 registry:2
+docker tag  ghcr.io/amitlevavi234/foundit:sha-abc1234 127.0.0.1:5000/foundit:sha-abc1234
+docker push 127.0.0.1:5000/foundit:sha-abc1234
+
+FOUNDIT_BASE=/some/throwaway/dir/srv bash server/deploy.sh sha-abc1234
+```
+
+`FOUNDIT_BASE` is where it writes `state/current_tag`, `state/deploy.log` and
+the pre-migration dumps; on the host it is `/srv/foundit`.
+
+**To prove the rollback rather than trusting it**, build an image that starts
+and answers 503:
+
+```dockerfile
+FROM 127.0.0.1:5000/foundit:sha-abc1234
+CMD ["node","-e","require('http').createServer((q,s)=>{s.writeHead(503);s.end('{\"ok\":false}')}).listen(3000,'0.0.0.0')"]
+```
+
+Tag it `sha-badbad0`, push it, and deploy it. `deploy.sh` waits, gives up, puts
+the previous tag back, writes `ROLLED BACK` to `state/deploy.log` and exits 75
+— and `state/current_tag` still names the good one, because it is written only
+after health comes.
+
+### The backups, against a directory instead of R2
+
+`server/backup/` takes its settings from `$FOUNDIT_ENV_DIR/backup.env`, and the
+repository is either a bucket or a directory depending on which variable is
+set. Locally it is a directory, which exercises the whole chain with no R2
+account and no credential:
+
+```bash
+printf 'BACKUP_REPO_PATH=/some/throwaway/dir/repo\nBACKUP_KEEP_DAYS=14\n' \
+  > "$FOUNDIT_ENV_DIR/backup.env"
+
+bash server/backup/pg-dump-offsite.sh   # dumps, proves it readable, files it
+bash server/backup/verify-restore.sh    # restores it into foundit_verify and counts
+```
+
+The second one takes the **newest artefact out of the repository** — not the
+file just written — rebuilds it into `foundit_verify`, compares every table's
+row count with the source, runs a real `<=>` query and a real full-text query,
+and writes one row through `infra.record_ops_event`. It drops the scratch
+database on the way out, including when it fails.
+
+Read what it wrote:
+
+```bash
+docker exec foundit-dev-db psql -U postgres -d foundit \
+  -c "select kind, ok, at, detail from infra.ops_events order by at desc limit 5"
+```
+
+That is what the dashboard's Backups panel draws. It says "NOT ENCRYPTED" every
+time it runs here, loudly, because `DUMP_AGE_RECIPIENT` is unset — correct on a
+machine holding invented data, and a launch blocker on the server.
+
+### Measuring the pages
+
+```bash
+npm run build
+npm start                                     # in another terminal
+node --env-file=.env.local scripts/vitals.mjs --runs=3
+```
+
+Lighthouse, in the Chrome already on this machine, mobile preset — 4x CPU
+slowdown and simulated slow 4G. **A production build, never `next dev`**, which
+compiles on the first request and ships an unminified bundle. It throws the
+first measurement away, because the first navigation in a freshly-launched
+browser reliably comes back with no trace at all.
+
+The numbers go in `eval/baselines.md`, and they are a comparison against that
+row rather than absolutes: two runs on the same build differ by a few per cent.
+
+### The headless browser the tests use
+
+`tests/csp.test.mjs` and `scripts/vitals.mjs` both drive the Chrome that is
+already installed, through `chrome-launcher` and the DevTools protocol
+(`tests/browser.mjs`). There is no Puppeteer and no Playwright, and no second
+copy of Chromium downloaded at install time. Both **skip, loudly**, when there
+is no Chrome or no server answering — a skip that reads as a pass is the
+failure this repository's suite is built to avoid, so they say which it was.
+
 ## Rules that are not negotiable
 
 - No real password, key or token in any file git tracks. Ever. That includes

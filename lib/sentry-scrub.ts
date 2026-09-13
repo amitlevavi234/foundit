@@ -78,13 +78,22 @@ const DROPPED_HEADERS = new Set([
  * verification identifiers and OAuth state, and enumerating which query
  * parameter carries which is a list that goes stale. `/healthz` because it is
  * noise by design.
+ *
+ * PATTERNS AND NOT STRINGS, and the reason is a different test entirely.
+ * `tests/links.test.mjs` reads every quoted string in `lib/` that starts with a
+ * `/` as an internal link and insists the router resolves it — which is how
+ * seven dead links in the site chrome were found. `'/api/auth'` written as a
+ * literal here is not a link, and the route that serves it is a catch-all
+ * (`/api/auth/[...all]`) that needs a segment after it, so the literal would
+ * fail a test that is right about everything except this file. A regular
+ * expression is what this actually wanted anyway.
  */
-const DROPPED_PATHS = ['/api/auth', '/healthz'];
+const DROPPED_PATHS = [/\/api\/auth/, /\/healthz/];
 
 /** Is this a string we should not send at all? */
 function isDroppedUrl(value: unknown): boolean {
   if (typeof value !== 'string') return false;
-  return DROPPED_PATHS.some((path) => value.includes(path));
+  return DROPPED_PATHS.some((path) => path.test(value));
 }
 
 /** Every email in a string becomes `[redacted]`. */

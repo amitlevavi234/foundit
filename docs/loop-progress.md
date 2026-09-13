@@ -3665,6 +3665,155 @@ descriptions of defects rather than of decisions:
   production builds and timings in this section were taken in a copy of the
   tree at `%TEMP%`, against the same database.
 
+## Phase 9a — hardening, provable here — **built; item 10, the adversarial review, is the supervisor's**
+
+Nine of the ten gate items. No agent touched the live server, `main`, the
+tunnel, Cloudflare's account, R2 or Sentry's account, and nothing in this
+section needed any of them: every path in `server/` is a variable whose default
+is the server's value, so the whole chain — build, deploy, roll back, back up,
+restore, verify — was exercised here, against the development database, a local
+registry and a filesystem repository standing in for R2.
+
+| | What landed | Where |
+| --- | --- | --- |
+| The image | `node:26-alpine`, multi-stage, `USER foundit` at uid 1001, exec-form `CMD` so node is PID 1 and gets SIGTERM. 369 MB. One `COPY` of the standalone directory rather than three, because `scripts/postbuild-standalone.mjs` already packages the browser assets at `next build` time | `Dockerfile`, `.dockerignore` |
+| Two services and no third | app and the embed worker: same image, different command, **different env file**. PostgreSQL is already a service on that host, and a second one here is the commonest way a Dockerised database is lost. No Caddy — see the addendum in §13 | `server/compose.prod.yml` |
+| `/healthz` | one `select 1` on the app's own pool, raced against a two-second timer that covers checking a connection OUT as well as the query. 503 and not 200-with-a-false. No session, no cookie, no limiter, no breadcrumb, no write | `app/healthz/route.ts`, `lib/db.ts` |
+| A deploy that undoes itself | idempotent (the same tag, already healthy, is not a deploy), `pg_dump` **before** the migrations and `pg_restore -l` to prove it readable, migrations as `foundit_owner` out of the image being deployed, and the previous tag back when health never comes. Refuses root, refuses any tag that is not `sha-<hex>`, and opens no env file — so it cannot print one | `server/deploy.sh`, `server/rollback.sh`, `server/common.sh` |
+| A workflow that cannot reach the server | builds and pushes on a tag, `packages: write` and nothing else, no SSH key at all. research/10 §2.5's own workflow holds one; this reverses the direction and the host pulls | `.github/workflows/release.yml` |
+| The image is built on every change | and its history and filesystem greped for a credential, its compose file validated, and a container from it asked `/` and `/healthz` — in CI, not only on a laptop | `.github/workflows/ci.yml` |
+| Backups, proved by restoring | a nightly `pg_dump` that proves its own archive readable before filing it, and a verification that takes the **newest artefact out of the repository**, rebuilds it into `foundit_verify`, compares every table's row count against the source, runs a real `<=>` query and a real full-text query, and writes one row through `infra.record_ops_event` — on failure as well as on success | `server/backup/` |
+| Errors reach somebody, with the sentence taken out | `lib/sentry-scrub.ts`: a pure module with no imports that removes the user, rebuilds the request from the method and the path, drops cookies and `Authorization`, redacts addresses by regex, and removes any value whose KEY is one of the names the typed sentence travels under | `lib/sentry-scrub.ts`, three `Sentry.init` call sites, `app/global-error.tsx` |
+| A policy a browser enforces | a nonce per request, `'strict-dynamic'`, no `unsafe-inline` in `script-src`, plus the four headers of item 38 and two more | `middleware.ts` |
+| Every limit in one table | and the two write paths that had none — reviewing and saving | `.env.example`, `lib/rate-limit.ts` |
+| The edge, click by click | four Cache Rules with the bypass first, one rate-limiting rule, Full (strict), and Web Analytics with automatic injection **off** | `server/cloudflare/` |
+| Forty items, one at a time | 24 evidenced here, 10 tagged 9b, 6 genuinely not applicable; none dropped and none ticked by assertion | `docs/launch-checklist.md` |
+| The runbook | six steps with evidence boxes, and the line about step 4 | `docs/launch-runbook.md` |
+
+### The vitals table
+
+Lighthouse, mobile preset (4x CPU, simulated slow 4G), against a production
+build, median of three runs per page. The full row and its weaknesses are in
+`eval/baselines.md`.
+
+```
+page              score  LCP ms  CLS     TBT ms  SpeedIdx  TTFB ms  JS kB
+----------------  -----  ------  ------  ------  --------  -------  -----
+/                 79     1546    0.000   816!    1855      42       174
+/results?q=…      65     4015!   0.000   1014!   1725      41       176
+/browse           71     3266!   0.000   1114!   1560      55       174
+/tools/receiptly  71     3213!   0.000   1018!   1385      53       176
+/top              79     2463    0.000   750!    2037      54       174
+```
+
+**CLS is 0.000 everywhere**, which is the one unambiguously good number here:
+nothing shifts after it paints. **TBT is over on every page**, and the cause is
+the size of the JavaScript rather than the amount of it that runs — 174 kB
+compressed is the App Router's client runtime plus React, and almost none of it
+is ours. On a 4x-slowed CPU that is 750–1100 ms of blocking; a four-times-faster
+phone sees a quarter of it.
+
+**The two that regressed from Phase 6's "every page is dynamic": `/browse` and
+`/tools/[slug]`.** These are the two pages whose HTML is identical for every
+signed-out visitor and which would otherwise be cacheable at the edge for a
+minute — and they are the two worst LCPs after `/results`, at 3266 ms and
+3213 ms. Because they are `force-dynamic`, Next sends `private, no-store`, and
+Cache Rule 3 respects the origin on purpose, so it caches neither. Every visit
+to a tool page is a round trip even when the bytes have not changed in a week.
+`/results` is not on that list: it is dynamic because a search is dynamic, and
+caching it would mean caching what somebody typed.
+
+Fixing it means rendering the session-dependent part of the header inside a
+`<Suspense>` boundary — a public shell with a personal island — which is a
+change to the chrome on every screen in the product. Not a hardening phase's
+work; written down so the next person measuring these knows where the ceiling
+comes from.
+
+### Six things this phase found by running rather than by reading
+
+1. **The worker's command was `--loop`, a flag that has never existed.** The
+   container printed a usage message and exited 1, three times, and
+   `restart: on-failure:3` then stopped trying. Nothing in the compose file
+   could have caught it; starting it did. It is also why `deploy.sh` now waits
+   on the **app** only and reports the worker loudly instead: a worker that
+   cannot start must not roll back a working site.
+
+2. **`127.0.0.1` inside a container is the container.** The database publishes
+   `127.0.0.1:5432` on the HOST's loopback, so an app configured that way fails
+   at start-up, `/healthz` never goes green, and the deploy rolls back. The
+   right direction to fail in and a poor way to learn it, so the compose file
+   joins the database project's own bridge and says why.
+
+3. **`pg_restore -l /dev/stdin` fails on a perfectly good dump.** pg_restore
+   seeks in the file it is given and the container's `/dev/stdin` is a pipe, so
+   it reports "did not find magic string in file header" — a readability check
+   that fails on every healthy backup, which is worse than no check at all. No
+   file argument at all is the fix.
+
+4. **Windows 11 ships a `sudo` that is switched off by default.**
+   `command -v sudo` finds it and it then exits with an error message on the
+   first docker call. So `server/common.sh` decides by ASKING — `docker info`,
+   then `sudo -n true` — rather than by looking for a binary.
+
+5. **`foundit_owner` cannot set `is_admin` without the definer window.** Known
+   since the Phase 8 review, and met again here while proving the Backups
+   panel: `UPDATE 0`, no error, no warning. `docs/development.md` already said
+   so; this is the second time that paragraph has earned its place.
+
+6. **A comment stripper eats `https://*.ingest.sentry.io`.** `//*` opens a
+   block comment as far as a regular expression is concerned, so a test that
+   strips comments before reading the CSP found no Sentry host in it.
+   `tests/headers.test.mjs` reads the one expression that becomes the header
+   instead, which is both narrower and correct.
+
+### What is deferred to 9b — ten items, plus two gaps
+
+`docs/launch-checklist.md` carries the list with its evidence column. In one
+line each: the model provider's hard monthly cap; the four root-only env files;
+the server's region; the Cloudflare rate-limiting rule; the R2 bucket's access
+policy and lifecycle rule; GitHub secret scanning and push protection; **the
+privacy notice, which is a launch blocker**; the five DPAs; the incident note
+template; and Dependabot.
+
+And two gaps that are not "not applicable" and must not be read as ticked:
+
+* **There is no data-export endpoint** (item 33). Deletion works end to end;
+  portability does not, and GDPR's portability right is live the moment there
+  is an account in the EU.
+* **There is no `db/seed/prod_seed.sql`.** `dev_seed.sql` is the invented
+  catalogue and must never reach production, so as things stand the site
+  launches with an empty one. Step 3 of the runbook makes that a decision
+  rather than a discovery.
+
+### Known weaknesses of what did land
+
+* **Sentry costs about 60 kB of shared bundle and 101 kB of middleware.** The
+  vitals row above was measured WITH it, which is the honest measurement
+  because it is what ships — but it is the largest single thing this phase
+  added to every page, in exchange for errors reaching somebody at all. If TBT
+  ever has to come down, this is the first place to look.
+* **The scrubber cannot scrub free text.** An exception message that quotes the
+  input survives it. Every structural route out is closed by the NAME of the
+  field; this one is closed by the application never building such a message —
+  asserted over the files the sentence passes through — and by a 300-code-point
+  cap. It is written as a test rather than as a comment so that it cannot
+  quietly stop being true.
+* **`NO_NAVSTART`.** Lighthouse's first navigation in a freshly-launched
+  browser reliably comes back with no trace at all. `scripts/vitals.mjs` throws
+  one measurement away and retries up to three times; a row of dashes in that
+  table is a recording failure rather than a broken page, and the script says
+  which it was.
+* **The 9b runbook has never been executed.** research/10 §10 item 19 makes the
+  same admission about its own deploy script. Every command in it is either one
+  that was run here against a stand-in, or one that could not be.
+* **The rollback's `--restore-database` branch was exercised only as far as the
+  STOP.** The rename was not performed against a real database, deliberately:
+  it renames the live database aside, and doing that to prove it works on the
+  machine the development database lives on is not a proof worth having.
+* **Off the tunnel, every visitor shares one limiter bucket.** Unchanged from
+  Phase 3 and still true. The arrangement that makes the origin unreachable is
+  the tunnel, and verifying that is step 5b of the runbook — which is 9b's.
+
 ## Blocked on Amit
 
 - The Cloudflare Tunnel needs him to authorise `cloudflared` in a browser.

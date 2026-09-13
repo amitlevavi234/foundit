@@ -65,13 +65,24 @@ cd "$(dirname "$0")/.."
 #                                to it but the test's own throwaway account at
 #                                @example.invalid, and AUTH_DEV_CODE_TO_LOG=1
 #                                means no message leaves the process.
+#   CANARY-...                    the values tests/deploy.test.mjs writes into a
+#                                 throwaway env file and then RUNS the deploy
+#                                 and backup scripts against, grepping every
+#                                 line of their output for each one. They are
+#                                 shaped like real credentials on purpose —
+#                                 that is the whole point of the test, because
+#                                 the shapes are what a script's own error
+#                                 messages echo — and the prefix is there so
+#                                 they can be allowed here by pattern rather
+#                                 than one at a time. Nothing outside that file
+#                                 may use the prefix, and nothing does.
 #   k, secret-key-value           the two throwaway values tests/email.test.mjs
 #                                 hands the email client. They are arguments to
 #                                 a stubbed fetch that never leaves the
 #                                 process; the test asserts, among other
 #                                 things, that neither ever appears in a log
 #                                 line or an error.
-ALLOWED_SECRET_LITERALS='a_throwaway_ci_secret_for_a_container_that_lives_two_minutes|local_development_only|local_development_only_app|local_development_only_embed|local_development_only_auth|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|secret-key-value|k|your[-_a-z]*|xxx+|[A-Za-z_]*x{6,}|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
+ALLOWED_SECRET_LITERALS='CANARY-[A-Za-z0-9-]*|a_throwaway_local_secret_for_a_container_that_lives_two_minutes|a_throwaway_ci_secret_for_a_container_that_lives_two_minutes|local_development_only|local_development_only_app|local_development_only_embed|local_development_only_auth|REPLACE_[A-Z_]*|changeme|change-me|pass|password|passwd|examplepass|hunter2|secret|secret-key-value|k|your[-_a-z]*|xxx+|[A-Za-z_]*x{6,}|\*\*\*+|\.\.\.|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_]+%|%[sdq]|postgres|foundit'
 
 # Files whose content is not text we can usefully scan.
 SKIP_PATH_RE='\.(pdf|png|jpg|jpeg|gif|webp|ico|woff2?|ttf|zip|gz)$'

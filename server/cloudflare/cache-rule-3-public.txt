@@ -1,0 +1,6 @@
+(http.request.uri.path eq "/")
+or (starts_with(http.request.uri.path, "/tools/"))
+or (starts_with(http.request.uri.path, "/u/"))
+or (http.request.uri.path in {"/browse" "/top" "/about" "/pricing" "/ranking" "/help"
+     "/guidelines" "/privacy" "/terms" "/cookies" "/copyright" "/security"
+     "/accessibility" "/robots.txt" "/sitemap.xml"})

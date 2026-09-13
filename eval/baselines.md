@@ -1677,3 +1677,115 @@ ceiling (docs/build-phases)  $0.002000 per search — within it, by 8.1x
 
 And the other ceiling, which the first version of this phase did not have:
 spending both daily caps every day for a month is **$4.21**, against $5.
+
+
+---
+
+# The performance baseline (added 13 September 2026, Phase 9a)
+
+Everything above this line is about whether the search finds the right things.
+This section is about how long the page takes, which is a different question
+measured with a different instrument, and it is recorded here because this file
+is where a number goes when somebody will want to compare against it in six
+months.
+
+**How it is measured.** `node --env-file=.env.local scripts/vitals.mjs
+--runs=3`, against `npm start` on a **production build** — never `next dev`,
+which compiles on the first request and ships an unminified bundle. Lighthouse,
+in headless Chrome, mobile preset: **4x CPU slowdown and simulated slow 4G**,
+which is the device worth optimising for and the one a developer's laptop
+flatters you out of. Median of three runs per page.
+
+**What a number here is.** A LAB measurement on one machine: useful as a
+comparison against this row, and close to meaningless as an absolute. Two runs
+on the same build differ by a few per cent; the first run after a browser
+launches is often unusable, which is why the script throws one away before it
+starts. A change of thirty per cent is a change.
+
+**INP is absent and cannot be here.** Interaction to Next Paint needs a person
+interacting. Total Blocking Time is the lab proxy for it and is what the table
+carries. The field measurement of all three is Cloudflare Web Analytics, which
+is cookieless and starts in 9b — `docs/product-decisions.md` §13 has the
+decision and why it is not Sentry.
+
+## Row 1 — Phase 9a, 13 September 2026
+
+Commit `b688efb`, Next 15.5.25, Node 26.7.0, Chrome headless, Windows 11.
+Median of 3 runs per page.
+
+| page | score | LCP ms | CLS | TBT ms | Speed Index | TTFB ms | JS kB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `/` | 79 | 1546 | 0.000 | **816** | 1855 | 42 | 174 |
+| `/results?q=…` | 65 | **4015** | 0.000 | **1014** | 1725 | 41 | 176 |
+| `/browse` | 71 | **3266** | 0.000 | **1114** | 1560 | 55 | 174 |
+| `/tools/receiptly` | 71 | **3213** | 0.000 | **1018** | 1385 | 53 | 176 |
+| `/top` | 79 | 2463 | 0.000 | **750** | 2037 | 54 | 174 |
+
+Bold is over Google's "good" threshold: LCP 2500 ms, CLS 0.1, TBT 200 ms.
+
+### What this row says
+
+**CLS is 0.000 on every page, and that is the one unambiguously good number
+here.** Nothing shifts after it paints: the fonts are loaded through
+`next/font`, every card has its dimensions before its content, and there is no
+advertisement, banner or late-injected anything.
+
+**TBT is over the threshold everywhere, and the cause is the size of the
+JavaScript, not the amount of it that runs.** 174 kB compressed on every page
+is the App Router's client runtime plus React plus this product's own
+components; there is almost nothing in it that is *ours*. On a 4x-slowed CPU,
+parsing and hydrating that is 750–1100 ms of blocking, and a four-times-faster
+phone would see a quarter of it. This is the number to watch and the hardest to
+move.
+
+**LCP is over the threshold on three of five**, and every one of them is a page
+whose largest element is a grid of cards that cannot be painted before the
+database has answered. TTFB is 40–55 ms — the database is a loopback hop away —
+so the time is going on the simulated network fetching the chunks, not on the
+server.
+
+### The two that regressed from "every page is dynamic"
+
+Phase 6 made every page in the product `force-dynamic`, because the site header
+reads a session and a cached page would show one person's header to another.
+That was right and is not being revisited here. What it cost, named:
+
+**`/browse` and `/tools/[slug]`.** These two are the pages whose HTML is
+*identical for every signed-out visitor* — a list of catalogue cards and one
+listing — and which would otherwise be static, or at least cacheable at the
+edge for a minute. They are also the two worst LCPs in the table after
+`/results`, at 3266 ms and 3213 ms. Because they are `force-dynamic`, Next
+sends `private, no-cache, no-store` on both, and `server/cloudflare/README.md`'s
+cache rule 3 therefore caches neither: the rule respects the origin's header on
+purpose, so it degrades safely rather than caching something personal. The
+result is that every visit to a tool page is a round trip to Falkenstein even
+when the bytes have not changed in a week.
+
+`/results` is not on that list although it is the slowest page here: it is
+dynamic because a search is dynamic, not because of Phase 6, and caching it
+would mean caching what somebody typed.
+
+`/` and `/top` are on the same footing as the other two and are under the
+threshold, so naming four would be naming a decision rather than a regression.
+
+**What would fix it, and why it is not fixed here.** The header would have to
+render the session-dependent part in a `<Suspense>` boundary — a public shell
+with a personal island — so the page could be cached at the edge with the
+island filled in per request. That is a change to the chrome on every screen in
+the product, and Phase 9a is a hardening phase: it is written down here so that
+the next person measuring these numbers knows what the ceiling is and where it
+comes from.
+
+### Weaknesses of this row, stated
+
+* One machine, one browser, one run of three. The variance between individual
+  runs is ten to twenty per cent on TBT.
+* `localhost`, so TTFB is the loopback and not the tunnel. The real TTFB from a
+  browser in Europe will be tens of milliseconds higher, and Cloudflare's edge
+  will absorb some of it for the assets.
+* `/results` was measured with a **warm** sentence — one the fixture has
+  already embedded. A first-ever sentence waits on two model calls and is much
+  slower; that latency is measured by `FOUNDIT_TIMELINE=1` and belongs to the
+  search, not to the page.
+* Sentry adds to the shared bundle. The row above is measured WITH it, which is
+  the honest measurement because it is what will ship.
