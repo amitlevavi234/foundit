@@ -26,6 +26,7 @@
     "test:all": "node eval/scoring.test.mjs && node --test tests/*.test.mjs && bash db/test.sh && node eval/run.mjs --baseline"
   },
   "dependencies": {
+    "@sentry/nextjs": "^10.74.0",
     "better-auth": "^1.7.4",
     "next": "^15.5.0",
     "pg": "^8.13.0",
@@ -39,8 +40,10 @@
     "@types/pg": "^8.11.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "chrome-launcher": "^1.2.1",
     "eslint": "^9.0.0",
     "eslint-config-next": "^15.5.0",
+    "lighthouse": "^13.4.1",
     "typescript": "^5.0.0"
   },
   "overrides": {
