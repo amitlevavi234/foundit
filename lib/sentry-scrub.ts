@@ -19,27 +19,41 @@
  * WHAT IS REMOVED, in the order it is applied:
  *
  *   1. the request BODY, entirely — a Server Action's arguments are in it, and
- *      a search, a review and a sign-in code are all Server Actions;
+ *      a search, a review and a sign-in code are all Server Actions. On an
+ *      event that is `event.request.data`, dropped by omission; on a breadcrumb
+ *      it is `body`, `input`, `arguments`, `request_body` and `response_body`,
+ *      dropped by name;
  *   2. the QUERY STRING of every URL, everywhere, not only on /results. The
  *      brief asks for /results and `q` anywhere; this is stricter and easier to
  *      prove, and no query string this application uses is worth keeping in an
  *      error report;
  *   3. every COOKIE, and the `Authorization`, `Cookie`, `Set-Cookie`,
- *      `X-Nonce` and forwarded-address headers;
+ *      `X-Nonce` and forwarded-address headers — in `event.request.headers`
+ *      AND in any breadcrumb field whose name ends in `headers`, which is
+ *      where a fetch integration puts a `set-cookie` it saw;
  *   4. the USER object, entirely — `sendDefaultPii: false` already stops the
  *      SDK adding one, and this stops our own code adding one by hand later;
  *   5. any EMAIL ADDRESS, by regex, anywhere in the strings of the event —
  *      messages, exception values, breadcrumb text, extra, tags, and the path
  *      of a URL;
- *   6. any breadcrumb whose URL contains `/api/auth`, dropped outright,
- *      because Better Auth's routes carry codes and tokens in ways that are
- *      not worth enumerating one at a time;
- *   7. any event or breadcrumb for `/healthz`, dropped, because it runs 2,880
+ *   6. EVERY DYNAMIC PATH SEGMENT, replaced by `[redacted]`. A slug is public
+ *      and a handle is public, but the rule is worth being able to state in
+ *      one sentence — NO PATH PARAMETER REACHES SENTRY — rather than as a list
+ *      of which ones happen to be harmless this month. See `REDACTED_PARENTS`;
+ *   7. any event or breadcrumb whose URL contains `/api/auth` or `/c/`,
+ *      dropped outright. Better Auth's routes carry codes and tokens in ways
+ *      that are not worth enumerating one at a time, and `/c/<token>` IS a
+ *      permission: the share link has no owner check behind it, so the token
+ *      in the path is the whole of the authorisation and it travels in every
+ *      breadcrumb of that navigation as well as in `request.url`;
+ *   8. any event or breadcrumb for `/healthz`, dropped, because it runs 2,880
  *      times a day and would bury the one error somebody needs to read.
  *
  * WHAT IS DELIBERATELY KEPT: the exception type, the stack, the HTTP method,
- * the status code, the release tag and the PATH of the URL with its query
- * gone. That is what makes a report useful, and none of it is about a person.
+ * the status code, the release tag and the SHAPE of the URL — its path with
+ * every parameter replaced and its query gone. `/tools/[redacted]` says which
+ * page threw, which is what makes a report useful, and none of it is about a
+ * person.
  * ======================================================================== */
 
 /**
@@ -76,8 +90,18 @@ const DROPPED_HEADERS = new Set([
  *
  * `/api/auth` because Better Auth's own routes carry six-digit codes,
  * verification identifiers and OAuth state, and enumerating which query
- * parameter carries which is a list that goes stale. `/healthz` because it is
- * noise by design.
+ * parameter carries which is a list that goes stale.
+ *
+ * `/c/` because THE ADDRESS IS THE PERMISSION. app/c/[token]/page.tsx says so
+ * in its own header: there is no owner check on that page and no `is_public`
+ * flag behind it — the token out of the URL is set as a transaction-local
+ * setting and `collections_read` compares it to the column. A capability in a
+ * path segment is a secret in a path segment, and `scrubUrl` below would
+ * replace it, but a breadcrumb trail through that navigation carries it in
+ * `from`, `to` and every fetch beside them. Dropping the whole event is the
+ * version of this rule that cannot be got round by a field nobody thought of.
+ *
+ * `/healthz` because it is noise by design.
  *
  * PATTERNS AND NOT STRINGS, and the reason is a different test entirely.
  * `tests/links.test.mjs` reads every quoted string in `lib/` that starts with a
@@ -88,7 +112,7 @@ const DROPPED_HEADERS = new Set([
  * fail a test that is right about everything except this file. A regular
  * expression is what this actually wanted anyway.
  */
-const DROPPED_PATHS = [/\/api\/auth/, /\/healthz/];
+const DROPPED_PATHS = [/\/api\/auth/, /\/c\//, /\/healthz/];
 
 /** Is this a string we should not send at all? */
 function isDroppedUrl(value: unknown): boolean {
@@ -116,16 +140,58 @@ export function capText(value: string): string {
 }
 
 /**
- * A URL with its query string and fragment removed, and its path scrubbed.
+ * The segments of this application's routes that are followed by a PARAMETER.
+ *
+ * `app/c/[token]`, `app/u/[handle]`, `app/tools/[slug]`, `app/maker/[slug]`,
+ * `app/maker/[slug]/edit`, `app/saved/[collection]` — so the segment after
+ * `c`, `u`, `tools`, `maker` or `saved` is something a visitor put in the
+ * address, and none of those reaches Sentry.
+ *
+ * MOST OF THEM ARE PUBLIC, AND THE LIST IS STILL THE WHOLE PATH. A slug is on
+ * every result card and a handle is on every review; only the share token is a
+ * secret, and that one is dropped outright by `DROPPED_PATHS` above. What this
+ * buys is a rule that can be stated in one sentence and checked in one test —
+ * "no path parameter reaches Sentry" — instead of a judgement about each new
+ * dynamic route, made by whoever adds it, in a hurry.
+ *
+ * tests/sentry.test.mjs reads `app/` and fails if a dynamic segment is added
+ * under a parent that is not on this list.
+ */
+const REDACTED_PARENTS = new Set(['c', 'u', 'tools', 'maker', 'saved']);
+
+/** Every segment that follows one of `REDACTED_PARENTS`, replaced. */
+function redactSegments(path: string): string {
+  if (!path.includes('/')) return path;
+  const parts = path.split('/');
+  for (let i = 1; i < parts.length; i += 1) {
+    if (parts[i] === '') continue;
+    if (REDACTED_PARENTS.has((parts[i - 1] ?? '').toLowerCase())) parts[i] = REDACTED;
+  }
+  return parts.join('/');
+}
+
+/**
+ * A URL with its query string and fragment removed, its dynamic segments
+ * replaced and its path scrubbed.
  *
  * Works on an absolute URL and on a bare path, because an event carries both
- * shapes depending on which integration produced it. Anything unparseable is
- * cut at the first `?` and scrubbed, which is the safe direction.
+ * shapes depending on which integration produced it. An absolute one is parsed
+ * so that a HOST called `tools` cannot be mistaken for the route segment;
+ * anything unparseable is cut at the first `?` and treated as a path, which is
+ * the safe direction.
  */
 export function scrubUrl(value: unknown): string {
   if (typeof value !== 'string') return '';
   const cut = value.split('#')[0]!.split('?')[0]!;
-  return scrubText(cut);
+  try {
+    const parsed = new URL(cut);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return scrubText(parsed.origin + redactSegments(parsed.pathname));
+    }
+  } catch {
+    // Not an absolute URL. It is a path, which is the commoner shape here.
+  }
+  return scrubText(redactSegments(cut));
 }
 
 /**
@@ -149,6 +215,7 @@ const SENSITIVE_KEYS = new Set([
   'q', 'query', 'querystring', 'query_string', 'search', 'searchtext', 'search_text',
   'sentence', 'statement', 'statements', 'text', 'prompt', 'input',
   'body', 'data', 'arguments', 'args', 'payload', 'formdata',
+  'request_body', 'requestbody', 'response_body', 'responsebody', 'raw',
   'email', 'emailaddress', 'address', 'password', 'token', 'cookie', 'cookies',
   'authorization', 'secret', 'apikey', 'api_key', 'dsn', 'session',
 ]);
@@ -287,8 +354,18 @@ export function scrubBreadcrumb(input: unknown): Unknown | null {
   if (data) {
     const out: Unknown = {};
     for (const [key, value] of Object.entries(data)) {
+      const name = key.toLowerCase();
       if (key === 'url' || key === 'to' || key === 'from') out[key] = scrubUrl(value);
-      else if (key === 'body' || key === 'input' || key === 'arguments') continue;
+      // ANY FIELD WHOSE NAME ENDS IN `headers`, THROUGH THE HEADER RULE. The
+      // Phase 9a review's F20: `DROPPED_HEADERS` was applied in exactly one
+      // place — `event.request.headers` — so a fetch integration that records
+      // `response_headers` put a `set-cookie` carrying a live session token
+      // into a breadcrumb, past a module whose header says every cookie is
+      // removed. `@sentry/node` does not record those today; the header is
+      // what a maintainer reads before adding an integration that does.
+      else if (name.endsWith('headers')) out[key] = scrubHeaders(value);
+      // The BODY, under any of the names an integration gives it.
+      else if (SENSITIVE_KEYS.has(name)) continue;
       else out[key] = scrubDeep(value);
     }
     crumb.data = out;

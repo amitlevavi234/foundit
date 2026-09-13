@@ -20,7 +20,7 @@
 // ===========================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -45,6 +45,72 @@ const read = (path) => readFileSync(join(ROOT, path), 'utf8');
  */
 const readCode = (path) =>
   read(path).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+/* ---------------------------------------------------------------------------
+ * The free-text guard, which is the one route out that a scrubber cannot close
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The files the typed sentence passes through.
+ *
+ * ELEVEN SINCE THE PHASE 9a REVIEW, not eight. `lib/constraints.ts`,
+ * `lib/accounts.ts` and `lib/maker.ts` all see text a person typed — a
+ * constraint answer, a review body, a listing's own statements — and were not
+ * on the list, so a message built out of one of them in any of the three would
+ * not have been looked at.
+ */
+const CARRIERS = ['lib/results.ts', 'lib/reading.ts', 'lib/rerank.ts', 'lib/embeddings.ts',
+  'lib/reader-model.ts', 'lib/db.ts', 'lib/sql.ts', 'app/results/page.tsx',
+  'lib/constraints.ts', 'lib/accounts.ts', 'lib/maker.ts'];
+
+/**
+ * The names the typed sentence travels under in this codebase.
+ *
+ * Six became fifteen. The six were the ones somebody remembered; `q` is the
+ * name it has in the URL, on the form field and in half the signatures in
+ * lib/results.ts, and it was not among them.
+ */
+const TYPED_NAMES = ['q', 'query', 'sentence', 'sentenceText', 'searchText', 'search_text',
+  'text', 'input', 'statement', 'statements', 'raw', 'body', 'phrase', 'typed', 'payload'];
+
+const NAME_ALTERNATION = TYPED_NAMES.join('|');
+
+/**
+ * Every `new Error(…)` / `console.error|warn|log(…)` argument list in a source
+ * file, WHOLE — to the matching close paren rather than to the first one.
+ *
+ * `([^)]*)` was the third hole: `console.error(String(error.code) + ' on ' + q)`
+ * was examined as far as `String(error.code` and no further, so everything
+ * after the first nested call was invisible to the guard.
+ */
+function builtMessages(source) {
+  const out = [];
+  const opener = /(?:new Error\s*\(|console\.(?:error|warn|log)\s*\()/g;
+  let match;
+  while ((match = opener.exec(source)) !== null) {
+    let depth = 1;
+    let i = match.index + match[0].length;
+    const start = i;
+    for (; i < source.length && depth > 0; i += 1) {
+      const ch = source[i];
+      if (ch === '(') depth += 1;
+      else if (ch === ')') depth -= 1;
+    }
+    out.push(source.slice(start, depth === 0 ? i - 1 : source.length));
+  }
+  return out;
+}
+
+/** Does one argument list put a typed-input identifier into a string? */
+function carriesTypedInput(built) {
+  // Interpolated: `${q}`, `${query.trim()}`, `${a ? b : sentence}`.
+  if (new RegExp(String.raw`\$\{[^}]*\b(${NAME_ALTERNATION})\b[^}]*\}`).test(built)) return true;
+  // Concatenated, either side of the `+`. This is the brief's own example and
+  // the shape the review's probe used, and it used to pass.
+  if (new RegExp(String.raw`\+\s*\b(${NAME_ALTERNATION})\b`).test(built)) return true;
+  if (new RegExp(String.raw`\b(${NAME_ALTERNATION})\b\s*(?:\.\w+\(\))?\s*\+`).test(built)) return true;
+  return false;
+}
 
 /* ---------------------------------------------------------------------------
  * The three things that must never travel
@@ -196,6 +262,163 @@ test('/healthz is dropped, so the probe does not bury the one real error', () =>
   assert.equal(scrubEvent({ request: { url: 'http://127.0.0.1:3000/healthz' } }), null);
 });
 
+/* ---------------------------------------------------------------------------
+ * The capability in a path segment — Phase 9a review, F1
+ * ------------------------------------------------------------------------ */
+
+/** A share token of the shape app/c/[token] actually carries. */
+const SHARE_TOKEN = '6f3a91c0b2e14d77';
+
+test('a share token in the path is a secret, and the whole event goes', () => {
+  // THE ADDRESS IS THE PERMISSION. app/c/[token]/page.tsx has no owner check
+  // and no `is_public` flag behind it: the token out of the URL is compared to
+  // the column, and a wrong token returns no rows. So `/c/<token>` in
+  // `request.url` is a credential in an error report — which the scrubber used
+  // to keep, deliberately, because it kept the PATH and dropped only the
+  // query.
+  assert.equal(
+    scrubEvent({
+      request: { url: `https://foundit.tools/c/${SHARE_TOKEN}`, method: 'GET' },
+      transaction: `/c/${SHARE_TOKEN}`,
+    }),
+    null,
+    'an event for a /c/ route must be dropped entirely, not scrubbed',
+  );
+  // The transaction alone is enough to drop it: a render error on that route
+  // arrives with no `request` at all.
+  assert.equal(scrubEvent({ transaction: `/c/${SHARE_TOKEN}` }), null);
+
+  // And every breadcrumb of that navigation, because the token is in `from`
+  // and `to` as well as in the fetch that followed it.
+  for (const crumb of [
+    { category: 'navigation', data: { from: '/saved', to: `/c/${SHARE_TOKEN}` } },
+    { category: 'fetch', data: { url: `https://foundit.tools/c/${SHARE_TOKEN}?_rsc=ab12` } },
+    { category: 'navigation', data: { from: `/c/${SHARE_TOKEN}`, to: '/' } },
+  ]) {
+    assert.equal(scrubBreadcrumb(crumb), null, `a /c/ breadcrumb survived: ${JSON.stringify(crumb)}`);
+  }
+
+  // A crumb that is carried INSIDE an event is dropped there too, so the
+  // event-level rule and the breadcrumb-level rule cannot disagree.
+  const carried = scrubEvent({
+    transaction: '/saved',
+    breadcrumbs: [{ category: 'navigation', data: { to: `/c/${SHARE_TOKEN}` } }],
+  });
+  assert.ok(!JSON.stringify(carried).includes(SHARE_TOKEN), 'a token survived inside breadcrumbs');
+});
+
+test('no path parameter reaches Sentry, on any route that has one', () => {
+  // THE RULE, STATED ONCE: every segment that is a parameter becomes
+  // `[redacted]`, whether or not that particular parameter is a secret. A slug
+  // is on every result card and a handle is on every review; the reason to
+  // redact them anyway is that "which of these is safe" is a judgement somebody
+  // has to make again every time a dynamic route is added, and this is a rule
+  // a test can hold.
+  assert.equal(scrubUrl('https://foundit.tools/tools/receiptly'), 'https://foundit.tools/tools/[redacted]');
+  assert.equal(scrubUrl('/u/amit'), '/u/[redacted]');
+  assert.equal(scrubUrl('/maker/receiptly/edit'), '/maker/[redacted]/edit');
+  assert.equal(scrubUrl('/saved/weekend-reading'), '/saved/[redacted]');
+  // The pages with no parameter are untouched, or the reports stop being
+  // worth reading.
+  assert.equal(scrubUrl('/results?q=anything'), '/results');
+  assert.equal(scrubUrl('/browse'), '/browse');
+  assert.equal(scrubUrl('/saved'), '/saved');
+  assert.equal(scrubUrl('https://foundit.tools/top'), 'https://foundit.tools/top');
+
+  // Both fields, on an event of the shape a throw in a Server Component makes.
+  const event = scrubEvent({
+    request: { url: 'https://foundit.tools/tools/receiptly?q=tax', method: 'GET' },
+    transaction: '/tools/receiptly',
+  });
+  assert.equal(event.request.url, 'https://foundit.tools/tools/[redacted]');
+  assert.equal(event.transaction, '/tools/[redacted]');
+
+  // A HOST is not a segment. `scrubUrl` parses an absolute URL rather than
+  // splitting it, so a machine called `tools` cannot redact its own path.
+  assert.equal(scrubUrl('https://tools/healthy'), 'https://tools/healthy');
+});
+
+test('every dynamic route in app/ has its parent on the redaction list', () => {
+  // THE HALF THAT SURVIVES A NEW ROUTE. The list in lib/sentry-scrub.ts is
+  // five strings; this reads the route tree the way the router does and fails
+  // when a sixth dynamic segment appears under a parent nobody added.
+  const parents = new Set();
+  const stack = [join(ROOT, 'app')];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { stack.push(path); continue; }
+      if (!/^(page|route)\.(tsx?|jsx?|mjs)$/.test(entry.name)) continue;
+      const segments = path
+        .slice(join(ROOT, 'app').length)
+        .replace(/\\/g, '/')
+        .split('/')
+        .filter(Boolean)
+        .slice(0, -1)
+        .filter((s) => !(s.startsWith('(') && s.endsWith(')')))
+        .filter((s) => !s.startsWith('@'));
+      // A route the scrubber drops OUTRIGHT needs no segment rule, and proving
+      // that it is dropped is the stronger assertion. `/api/auth/[...all]` is
+      // the only one of these today.
+      const concrete = `/${segments.map((s) => (s.startsWith('[') ? 'x' : s)).join('/')}`;
+      if (scrubEvent({ request: { url: `https://foundit.tools${concrete}` } }) === null) continue;
+
+      segments.forEach((segment, i) => {
+        if (!segment.startsWith('[')) return;
+        parents.add(i === 0 ? '' : segments[i - 1]);
+      });
+    }
+  }
+
+  const source = read('lib/sentry-scrub.ts');
+  const listed = /const REDACTED_PARENTS = new Set\(\[([^\]]*)\]\)/.exec(source)?.[1] ?? '';
+  const known = new Set([...listed.matchAll(/'([^']+)'/g)].map((m) => m[1]));
+  for (const parent of parents) {
+    assert.ok(
+      known.has(parent),
+      `app/ has a dynamic segment under "${parent || '(the root)'}" and REDACTED_PARENTS in `
+        + 'lib/sentry-scrub.ts does not list it, so that parameter would reach Sentry verbatim',
+    );
+  }
+  assert.ok(parents.size >= 4, `only ${parents.size} dynamic parents found — the walk is broken`);
+});
+
+test('a breadcrumb carries no header and no body, whatever they are called', () => {
+  // F20. `DROPPED_HEADERS` was applied in exactly one place —
+  // `event.request.headers` — so a fetch integration recording response
+  // headers put a live session cookie into a breadcrumb, past a module header
+  // saying every cookie is removed.
+  const crumb = scrubBreadcrumb({
+    category: 'fetch',
+    data: {
+      url: 'https://foundit.tools/api/session',
+      status_code: 200,
+      response_headers: { 'set-cookie': COOKIE, 'content-type': 'text/html' },
+      request_headers: { authorization: TOKEN, 'cf-connecting-ip': '203.0.113.45' },
+    },
+  });
+  const serialised = JSON.stringify(crumb);
+  assert.ok(!serialised.includes('9f2c1ab'), 'a session token survived in a breadcrumb header');
+  assert.ok(!serialised.includes('eyJ'), 'a bearer token survived in a breadcrumb header');
+  assert.ok(!serialised.includes('203.0.113.45'), 'an address survived in a breadcrumb header');
+  assert.equal(crumb.data.status_code, 200, 'the status code is what makes the crumb worth having');
+  assert.equal(crumb.data['content-type'], undefined, 'headers stay under their own key');
+  assert.equal(crumb.data.response_headers['content-type'], 'text/html', 'and the harmless ones stay');
+
+  // And the request body, under each of the names an integration gives it.
+  for (const key of ['body', 'input', 'arguments', 'request_body', 'response_body']) {
+    const one = scrubBreadcrumb({
+      category: 'fetch',
+      data: { url: 'https://api.openai.com/v1/embeddings', method: 'POST', [key]: `{"input":"${SENTENCE}"}` },
+    });
+    assert.ok(
+      !JSON.stringify(one).includes('receipts'),
+      `a breadcrumb's \`${key}\` carried the typed sentence off the machine`,
+    );
+  }
+});
+
 test('the scrubber does not fall over on the shapes an SDK actually sends', () => {
   // An error handler that throws inside `beforeSend` loses the event and, in
   // some SDK versions, the process's error handling with it.
@@ -238,19 +461,57 @@ test('the one route out that a scrubber cannot close, and what closes it instead
   // Two: nothing in the search path builds such a message. These are the
   // files the typed sentence passes through, and none of them may put it into
   // an Error, a console line or a thrown string.
-  const carriers = ['lib/results.ts', 'lib/reading.ts', 'lib/rerank.ts', 'lib/embeddings.ts',
-    'lib/reader-model.ts', 'lib/db.ts', 'lib/sql.ts', 'app/results/page.tsx'];
-  for (const file of carriers) {
+  //
+  // THE GUARD USED TO HAVE THREE HOLES AND THE PHASE 9a REVIEW FOUND ALL THREE.
+  // It matched only `${…}` interpolation, so `new Error('bad query: ' + q)` —
+  // the commonest spelling, and the one the review's own probe used — passed.
+  // It knew six identifier names, so `q`, `raw`, `body` and `sentenceText`
+  // passed. And `([^)]*)` stopped at the first `)`, so anything after a nested
+  // call in the same argument was never examined. A guard that will not catch
+  // the regression it exists for is worse than no guard, because it stops
+  // anybody looking.
+  for (const file of CARRIERS) {
     const source = read(file)
       .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-    for (const [, built] of source.matchAll(/(?:new Error\(|console\.(?:error|warn|log)\()([^)]*)/g)) {
-      assert.doesNotMatch(
-        built,
-        /\$\{[^}]*\b(query|sentence|searchText|text|input|statement)\b[^}]*\}/,
-        `${file} builds a log line or an error out of the typed sentence:\n    ${built.trim().slice(0, 160)}`,
+    for (const built of builtMessages(source)) {
+      assert.ok(
+        !carriesTypedInput(built),
+        `${file} builds a log line or an error out of the typed sentence:\n    ${built.trim().slice(0, 200)}`,
       );
     }
+  }
+});
+
+test('the free-text guard catches the spellings it used to miss', () => {
+  // THE GUARD'S OWN TEST. Every one of these is a real way to put a typed
+  // sentence into an error message, and every one of them passed the version
+  // of this check that shipped in Phase 9a.
+  for (const line of [
+    "new Error('bad query: ' + q)",
+    'new Error("while ranking " + sentence)',
+    'console.error(`ranking failed for ${q}`)',
+    "console.warn('reader said no to ' + searchText)",
+    "console.log('body was ' + body)",
+    'new Error(`${raw} could not be read`)',
+    "console.error(String(error.code) + ' on ' + sentenceText)",
+    "new Error('statement: ' + statement)",
+  ]) {
+    const [built] = builtMessages(line);
+    assert.ok(built !== undefined, `the scanner found no message at all in: ${line}`);
+    assert.ok(carriesTypedInput(built), `the guard would not catch: ${line}`);
+  }
+
+  // And the shapes the codebase actually uses, which must keep passing — a
+  // guard that fires on an error code is a guard somebody deletes.
+  for (const line of [
+    'console.error(`the reranker was unavailable (${reason}); the search order stands`)',
+    "new Error('DATABASE_URL is not set. It is the foundit_app connection string.')",
+    'console.error(`[timeline] ${label}  ${line}`)',
+    "console.error('a maker\\'s write failed (' + (code || 'unknown') + ')')",
+  ]) {
+    const [built] = builtMessages(line);
+    assert.ok(!carriesTypedInput(built ?? ''), `the guard fires on an innocent line: ${line}`);
   }
 });
 
