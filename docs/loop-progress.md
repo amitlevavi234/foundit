@@ -4301,6 +4301,243 @@ CSP walk over 42 routes with a per-response nonce and `connect-src` and
 table, `mem_limit: 900m` with 113 MB used after a full walk, and every
 found-by-running note except the first, whose safeguard did not work (F4).
 
+## Owner feedback, round 1 — twelve items from the first walk-through (14 September 2026)
+
+Amit used the site on his own laptop for the first time and sent twelve items.
+Item 11 (cookies) and item 12 (who sees the dashboard) were answered by the
+supervisor and needed no code. Item 13 (a homepage redesign) is explicitly not
+part of this round and nothing here touches the homepage or the mascot.
+
+### Items 4, 5, 6 and 7 were one bug, and it was not in our code
+
+**What he saw.** Save and Like on `/tools/anki` answered **500**. The dev
+server's log:
+
+```
+POST /tools/anki?q=… 500
+TypeError: Invalid URL, input: 'null'
+```
+
+and one of his searches arrived as
+`GET /results?q=need+to+edit+PDF+free%0D%0A` — a CRLF on the end of his
+sentence, i.e. Enter had inserted a newline instead of submitting.
+
+**The cause.** `next/dist/server/app-render/action-handler.js` opens the Server
+Action path with, verbatim:
+
+```js
+const originDomain = typeof req.headers['origin'] === 'string'
+  ? new URL(req.headers['origin']).host : undefined;
+```
+
+with no `try`. `Origin` carries a SERIALIZED origin and an opaque origin
+serializes to the four characters `null`, so `new URL('null')` throws before
+anything of ours runs. Reproduced on this laptop against `next dev` 15.5.25:
+
+```
+Origin: null                  -> 500   TypeError: Invalid URL
+(no Origin header at all)     -> 303   the action ran
+Origin: http://localhost:3000 -> 303   the action ran
+```
+
+Next already treats a MISSING `Origin` as "an old browser", warns, and runs the
+action — so an unparseable one is not a stricter case than a missing one, it is
+the same case arriving in a shape that crashes.
+
+**Why all four items were the same window.** `next dev` compiles a route's
+client bundle on first request, 15 to 29 seconds in his log. Until it lands the
+page is not hydrated: a Server Action form posts as a plain navigational form
+(which is the request shape that carries the header Next cannot parse),
+`onKeyDown` does not exist, and a button held shut by a `useState` is never
+opened.
+
+**The fixes, and all four are "do not depend on hydration".**
+
+1. `middleware.ts` normalises an `Origin` that is missing or unparseable to the
+   request's own origin before Next sees it — unless `Sec-Fetch-Site` says
+   `cross-site`, which gets a syntactically valid origin that can never match
+   our host so Next refuses it with its own message instead of throwing. A
+   genuine cross-site POST always carries a real `Origin`; behind all of it the
+   session cookie is `SameSite=Lax`, which is what actually stops one carrying
+   a session.
+2. **Item 7**: the search field is a single-line `<input>` instead of a
+   `<textarea>`, so Enter submits with or without script. The sentence is
+   capped at 200 characters and has never needed a newline. The character count
+   stays and is the only thing left in that component that needs script.
+3. **Item 6**: the add flow's Continue is `disabled` no longer, the
+   `<noscript>` duplicate is gone with it, and `components/RequiredTick.tsx` is
+   a server component again. The `required` checkbox and the Server Action's
+   own refusal were already two layers; the `disabled` attribute was the only
+   one that needed a client bundle to get out of the way.
+
+**The test.** `tests/no-script.test.mjs` reads the action id out of the
+rendered HTML and posts Save, Like, Review and the add flow the way an
+unhydrated browser posts them — **no `Next-Action` header**, and three origin
+cases: none at all, `Origin: null`, and a cross-site one that must still be
+refused. It asserts a 303 and reads the row back out of the database.
+
+It posts `multipart/form-data` and not `application/x-www-form-urlencoded`,
+which is a deliberate departure from the brief. Next 15.5 does not support
+urlencoded actions and says so in its own source
+(`server-action-request-meta.js`: *"We don't actually support URL encoded
+actions, and the action handler will bail out if it sees one"*); measured here,
+a urlencoded POST of a real action id answers 200 and writes nothing. What a
+browser sends is what Next asks for in the markup it renders,
+`encType="multipart/form-data"`, and the test asserts that too — so a test
+that posted urlencoded and expected a 303 would be asserting something no
+browser can produce and guarding nothing.
+
+### Item 3 — speed, which was two different things
+
+**On this laptop** it was `next dev` compiling each route once. `npm run dev`
+is now `node scripts/dev.mjs`, which prints four lines saying so before it
+starts, and `docs/development.md` opens with a "Start the app" section that
+says it too.
+
+**In production it was real, and it was one import.** `node
+scripts/chunks.mjs` — written for this, no new dependency, read out of Next's
+own manifest — answered "why is TBT about a second on a page that does almost
+nothing" in one line:
+
+```
+chunk                                           raw kB   gzip kB  routes
+--------------------------------------------  --------  --------  ------
+4218-1617f939e76c4f8b.js                         332.5     102.3  every route (54)
+main-4e583db8156879db.js                         266.1      82.5  (shared or lazy)
+framework-67e87833b9140bb8.js                    213.9      67.3  (shared or lazy)
+```
+
+The first one is Sentry's browser SDK, on all 54 routes, against about 2 kB of
+this site's own client code. `instrumentation-client.ts` imported it
+statically in the entry Next loads first; it loads it at `requestIdleCallback`
+now, skips it entirely when no DSN is configured, and bridges the gap with two
+plain listeners whose catch is replayed into the SDK when it arrives.
+`app/global-error.tsx` imports it dynamically for the same reason. **First Load
+JS: 163 kB -> 106 kB.**
+
+**The vitals, before and after, same machine, same command**
+(`npm run build`, `npm start`, `node --env-file=.env.local scripts/vitals.mjs
+--runs=3`; the "before" is this branch with every other item already in, so the
+difference is the perf work alone):
+
+```
+BEFORE
+page              runs  score  LCP ms  CLS     TBT ms  SpeedIdx  TTFB ms  JS kB
+----------------  ----  -----  ------  ------  ------  --------  -------  -----
+/                 3/3   75     3057!   0.000   751!    1818      34       174
+/results?q=…      3/3   72     3359!   0.000   793!    1612      62       177
+/browse           3/3   77     2854!   0.000   777!    1222      27       175
+/tools/receiptly  3/3   73     2881!   0.000   931!    1474      44       177
+/top              3/3   80     3054!   0.000   511!    2028      44       178
+
+AFTER
+page              runs  score  LCP ms  CLS     TBT ms  SpeedIdx  TTFB ms  JS kB
+----------------  ----  -----  ------  ------  ------  --------  -------  -----
+/                 3/3   82     2633!   0.000   575!    1264      39       117
+/results?q=…      3/3   83     2700!   0.000   459!    1847      52       120
+/browse           3/3   83     2598!   0.000   571!    1190      34       118
+/tools/receiptly  3/3   81     2551!   0.000   607!    1149      26       120
+/top              3/3   89     2269    0.000   337!    2007      47       121
+```
+
+Every score up, JS down by a third, TBT down by 30 to 40 per cent, LCP down by
+300 to 660 ms, and `/top` inside the LCP threshold for the first time. TBT is
+still over 200 ms everywhere and this does not claim otherwise.
+
+**Part (i) of the item asked for the signed-out render to be static or
+ISR-cached "so TTFB is a cache hit", and that is the one thing here that was
+not done. Two reasons, and the measurement is the first of them.**
+
+TTFB on a production build is **26 to 62 ms** on every page, before and after.
+It is not what is slow: `lib/db.ts` already caches every catalogue read for
+sixty seconds, so the server is answering from memory and spending its time
+rendering rather than querying. ISR would take perhaps 30 ms off a 2600 ms LCP.
+
+And it is not available. In Next 15.5 without Partial Prerendering, ONE dynamic
+API anywhere in the tree makes the whole route dynamic — including inside a
+`<Suspense>` boundary. `components/SiteHeader.tsx` reads the session on every
+page and `app/layout.tsx` reads `headers()` for the CSP nonce. The only way to
+an ISR-cached signed-out render is to move the session read into the browser,
+which costs a client component on every page (against the TBT finding above)
+and a visible flash from "Sign in" to the account menu. Enabling experimental
+PPR to avoid that is not a change to make in a round of bug fixes.
+
+**Part (iii)**, `/results`, measured rather than assumed:
+
+```
+cached sentence     ttfb 19-22 ms, complete 55-118 ms      (well under 300 ms)
+uncached sentence   ttfb 29 ms, complete 2.3 s
+streaming           first byte 152 ms, with the person's question in it;
+                    the answer arrives 1.7 s later
+```
+
+The shell — header, the question bubble, the read constraints and the search
+dock — is in the first chunk, and the `<Suspense>` boundary around `Answer`
+was already there and is doing what it says.
+
+### Item 1 — the site is English
+
+Three summaries rewritten (`morfix`, `dicta-nakdan`, `almaany`), re-embedded
+for 46 prompt tokens, and the three now-dead fixture keys pruned so the fixture
+matches the catalogue exactly again. Fifteen Hebrew and Arabic `tool_problems`
+statements KEPT, because they are what lets a Hebrew or Arabic sentence find
+those tools by meaning — and filtered out of the five queries that put a
+statement on a page, through a stored generated column
+(`db/migrations/0022_english_only.sql`). Not filtered: the array sent to the
+reranker, which is read by a model and never printed.
+`tests/english.test.mjs` walks every route and sweeps the source.
+
+### Item 2 — the fit scale and the stars
+
+Three bars filled three, two or one beside Strong / Possible / Loose, a one-line
+legend in the owner's words under "How results are ranked", five stars drawn
+filled and empty with the count in words, and "No reviews yet" with no stars at
+all where there are none.
+
+### Items 8, 9 and 10 — the dashboard
+
+Every chart has a title, a period and a caption saying what the number is and
+where it comes from. Reports are recorded as well as emailed
+(`public.reports`, three definer doors, `/admin/reviews` gains a Reported tab
+and a Resolve control). Five new panels: monthly active accounts with a
+thirty-day line, new accounts per day, new listings per day, page views per day
+from an identity-free in-process counter, and money spent from a persisted
+ledger written by the four paid-call paths from the providers' own usage
+fields. Searches that found nothing good is a second series on the searches
+chart. The four-colour series palette was validated rather than chosen — the
+command and its five PASSes are in `styles/tokens.css` beside the values.
+
+### Seven migrations, and three of them are corrections of the other four
+
+`0022_english_only`, `0023_reports`, `0024_dashboard_panels`,
+`0025_reports_review_join`, `0026_reports_read_policy`,
+`0027_reports_target_cast`, `0028_infra_usage`.
+
+An applied migration is never edited, so each defect found after applying one
+is its own file. All three corrections were found by a test rather than by
+reading, and all three are the same class — something the SQL layer does that
+the code did not say out loud:
+
+- **0025**: `admin_reports` selected `reviews.removed_by_admin_at`, a column
+  that does not exist — that figure is `review_removals.created_at`, which is
+  the distinction F8 drew. Caught by `admin_test.sql` §1's positive control.
+- **0027**: the join from a report to a review guarded a cast with
+  `kind = 'review'` in the same ON clause. **A join qualifier is not evaluated
+  in order**; the planner pushed the equality down and the first report about a
+  TOOL took `'anki'::bigint` and raised 22P02. The cast is computed once per
+  row in a MATERIALIZED CTE now, which is also the faster shape.
+- **0026** and **0028** are both the same misunderstanding of the privilege
+  system, in opposite directions. 0023 gave `reports` only the owner's
+  setting-gated window, so the two read-only panels running as the owner saw
+  nothing at all — RLS filters rather than refusing. And 0024 revoked
+  everything on schema `infra` from the application, including USAGE, so the
+  two writers it was granted EXECUTE on could not be NAMED: every page view
+  came back `permission denied for schema infra`, was swallowed by the
+  fire-and-forget writer exactly as designed, and was never counted. **USAGE on
+  a schema is not a data privilege** — with it and nothing else the
+  application still gets `permission denied for table` on both ledgers, and
+  `db/test/panels_test.sql` asserts both halves.
+
 ## Blocked on Amit
 
 - The Cloudflare Tunnel needs him to authorise `cloudflared` in a browser.

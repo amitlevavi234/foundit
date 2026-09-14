@@ -1,5 +1,31 @@
 # Working on Foundit locally
 
+## Start the app
+
+```bash
+npm run dev
+```
+
+**`next dev` compiles each route the first time you ask for it, so the first
+load of a page takes fifteen to thirty seconds on this laptop and every load
+after it is instant.** That is the development server, not the site.
+`npm run dev` prints that sentence before it starts, because the owner used the
+site for the first time on 14 September 2026, waited through it on every page,
+and reported the product as slow — which was half right, and nothing anywhere
+said which half.
+
+The other half was real and is measured separately: see **Measuring the
+pages** below, which refuses to measure a `next dev` server at all.
+
+It matters more than a wait. While a route is compiling its HTML has arrived
+and its client bundle has not, so a Server Action form posts as a plain form,
+an `onKeyDown` handler does not exist yet, and a button held shut by a
+`useState` is never opened. Every one of the owner's four interaction bugs
+lived in that window. They are fixed by **not depending on hydration** rather
+than by making it faster — `tests/no-script.test.mjs` posts Save, Like, Review
+and the add flow as an unhydrated browser posts them and asserts each one
+completes — so this note explains the wait rather than trying to shorten it.
+
 ## Start the database
 
 ```bash
@@ -1133,7 +1159,31 @@ first measurement away, because the first navigation in a freshly-launched
 browser reliably comes back with no trace at all.
 
 The numbers go in `eval/baselines.md`, and they are a comparison against that
-row rather than absolutes: two runs on the same build differ by a few per cent.
+row rather than absolutes. **They do not differ by "a few per cent"** — this
+line used to say that and the Phase 9a review withdrew it: the same bundle
+re-measured on this machine gave 3886 ms where the recorded row said 1546 ms.
+Compare orders rather than figures, and never draw a conclusion from one run.
+
+### Which JavaScript a page actually ships
+
+```bash
+npm run build
+node scripts/chunks.mjs --top=8
+```
+
+Every client chunk, largest first, gzipped — which is what the browser is sent
+and what `vitals.mjs` reports — with the routes that load each one, read out of
+Next's own `app-build-manifest.json`. It refuses to run against a development
+build, whose chunk sizes mean nothing.
+
+It is what answered the owner's "why is TBT about a second on a page that does
+almost nothing" in one line, on 14 September 2026: the largest chunk in the
+build was 102 kB gzipped of Sentry's browser SDK, loaded on every one of the
+54 routes, against 2 kB of this site's own client code.
+`instrumentation-client.ts` loads it at idle now instead, and First Load JS
+went from 163 kB to 106 kB. **Bytes are where to look and they are not the
+finding**: Total Blocking Time is execution rather than download, which is a
+claim the Phase 9a review withdrew once and is worth not making again.
 
 ### The headless browser the tests use
 

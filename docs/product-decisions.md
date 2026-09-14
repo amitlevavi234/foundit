@@ -111,7 +111,43 @@ catalogue is worth policing.
 Nothing waits for approval. A tool is live the moment it is published. There is no
 review queue, no editor role, no approver.
 
-Reports go to the team by email rather than into a queue.
+**Reports are recorded as well as emailed** (supervisor, 14 September 2026 —
+the owner's item 9). This section used to say "reports go to the team by email
+rather than into a queue", and the operator dashboard said so honestly: the
+Words panel read "Reports received — Not recorded". An email is a fine way to
+tell somebody and a poor way to know how many there were, which are still open,
+or whether the one about a listing last month was ever dealt with.
+
+A report is now both. `/report` writes one to `public.reports` and sends the
+email in the same action — the row first, so the email can carry its id, and
+the email whether or not the row was written, because a report reaching nobody
+because the database was busy is the worst outcome available here.
+
+- **What can be reported**: a review, a listing, or a profile. One reason,
+  eight to five hundred characters; optional details.
+- **You do not need an account.** A sign-in wall in front of "this listing is
+  wrong" is a wall in front of the reports most worth having. A signed-out
+  report has no reporter; a signed-in one has the reporter's profile id, read
+  inside the database from `auth.uid()` and never passed in.
+- **Bounded**: five per address per hour, ten per account per day. Both gate
+  the email as well as the row.
+- **The person reported on is not told**, and nothing comes down because it was
+  reported. A report is an accusation until somebody has read it, and mailing
+  somebody every time a stranger accuses them of something makes the accusation
+  the punishment. Removing a review is a separate control, needs its own
+  reason, and does tell the author.
+- **`/admin/reviews` has three tabs**: Reported (every review with a report
+  nobody has resolved, newest first, with the reasons), All, and Removed. A
+  Resolve control on a report records who closed it and when, with an optional
+  note — optional because most reports are closed by looking and finding it
+  fine.
+- **Nothing in `reports` names a search.** No query text, no address, no
+  session, and §10's rule is extended in the same commit: `db/test/admin_test.sql`
+  now lists `reports` on its people side, so a later panel that joined a report
+  to a search event would fail the suite.
+
+Still deliberately deferred: the moderation QUEUE with states and assignment.
+Reported is a list an operator reads, not a workflow.
 
 **Deliberately deferred** (designed, not built): the moderation queue, reviewing an
 outside edit, requesting changes, merging duplicates, and a public change history.
@@ -126,6 +162,30 @@ no account) are shown as met or unmet on each result.
 
 The results page is a conversation: the person can add more detail and re-run the
 match rather than starting over.
+
+**The bands carry a scale, and the stars are stars** (the owner's item 2,
+14 September 2026). He read a page of results and could not tell what either
+number meant.
+
+- **The fit bands are drawn as three bars, filled three, two or one**, beside
+  the word: Strong, Possible, Loose. A word has a meaning and no position, so
+  "Possible" did not read as one notch below "Strong" rather than as a
+  different kind of thing. Under "How results are ranked" there is a one-line
+  legend in the owner's own words — **does exactly this / does part of it /
+  same area** — and it appears only on a page the reranker judged, because on
+  an unjudged page the bands name a LOCATION and a location is not a point on
+  a fit scale. `lib/results.ts`'s `MatchBand` has no `steps` field, so it
+  cannot be drawn on one by accident.
+- **A rating is five stars, drawn filled and empty, with the count in words.**
+  It was one coral star, the average, and the count in brackets — `4.0 (1)` —
+  and the bracket did not say what it counted or what the number was out of.
+  Five stars answer the second by being five; "1 review" answers the first.
+- **With no reviews there are no stars at all**, and it says "No reviews yet".
+  Five empty stars is a rating of zero drawn in the shape of a rating, and
+  nobody has given this one.
+
+Neither is a percentage and neither is going to be one until there are pairs a
+person has judged to calibrate against; `/ranking` says what that would take.
 
 **Amended 11 September 2026, after the owner's review of the live results page.**
 Two changes, both his, and neither alters the rule above.
@@ -386,6 +446,74 @@ roll the window it was not "today" either: after a quiet stretch it showed an
 expired window's total until the next paid call. It is headed "In the last 24
 hours, in this process, started &lt;time&gt;" now, and a process that has made
 no paid call says so in a sentence rather than drawing `0 / 0 / 0`.
+
+### Five more panels, and two of them needed a writer (the owner's item 10, 14 September 2026)
+
+The owner read the dashboard and asked for monthly active accounts, new
+accounts per day, new tools per day, visits, and money spent so far. Three of
+those the schema could already answer and nothing drew them; two of them
+nothing anywhere was writing down.
+
+**Every chart now has a title, a period and a caption.** That is item 8 and it
+is the reason the rest of this section exists: the page had one chart — thirty
+`<span>`s with an inline height, `aria-hidden`, no title and no caption — and
+the owner asked what it was. It is "searches per day for thirty days", and that
+sentence was nowhere on the page. A caption says what the number is and where
+it comes from, because a dashboard figure a person cannot source is a figure
+they have to trust rather than read.
+
+**Monthly active accounts** is `count(*) from profiles where last_seen_day >=
+today - 29`, drawn as a number with a thirty-day line beside it. The line is
+labelled **"accounts seen that day"** and not "daily active accounts", because
+they are not the same thing: `last_seen_day` holds ONE date per account, so
+somebody who came on Tuesday and again on Friday appears on Friday and nowhere
+else. That also makes the line sum to exactly the figure above it, and
+`db/test/panels_test.sql` asserts the two are equal rather than trusting the
+arithmetic.
+
+**New accounts per day** and **new listings per day**, as bars. The second is
+two series — added and published — because they are different days for
+anything that came through the add flow and the same day for everything seeded,
+and a chart of either alone would be missing half of what happened.
+
+**Visits: page views per day, counted with no identity.** An integer in the
+Node process keyed on the day, flushed once a minute through a definer into
+`infra.page_views_daily`, which is `(day, views, updated_at)` and has no fourth
+column to ask for. Never a cookie, never an address, never a path. `/healthz`,
+`/o`, requests for a page somebody is already on, prefetches and static files
+are all excluded. The caption says **"page views, not people — unique visitors
+come from Cloudflare Web Analytics once live"**, because one person reading
+four pages is four. A day before the counter existed is drawn hatched rather
+than as a zero.
+
+**Money spent so far** is a persisted ledger, `infra.spend_ledger (day, kind,
+requests, input_tokens, output_tokens, usd)`, written by the four paid-call
+paths from the PROVIDER'S OWN usage fields and priced with `lib/prices.ts`. The
+panel shows month-to-date and since-the-first-row, with a thirty-day stacked
+bar, and keeps the worst-case-at-caps line beside them because the two answer
+different questions: one is what happened and the other is what could. Caption:
+**"recorded by this deployment from the provider's usage fields; earlier
+development spend is not in it"**. The reader's cached-input rate is not
+modelled, so its figure is an upper bound rather than an understatement. **A
+failure to record must never fail a search**: every write is fire-and-forget
+with a logged warning.
+
+**Searches that found nothing good** is a second series on the searches chart,
+side by side and never stacked — it is a SUBSET of the first, and stacking a
+subset on its own superset draws a column taller than the number of searches
+there were.
+
+All of it comes through `admin_*` definer functions, each of which checks
+`auth.is_admin()` as its first statement, and each of which was added to
+`db/test/admin_test.sql`'s allowlist with its exact column shape in the same
+commit — which is what makes "search text and a person are never joined" a rule
+rather than a filter. **Nothing draws a 0 where the truth is "not recorded"**:
+both new ledgers start at their first row and both panels ask when that was.
+
+**Who sees the dashboard** is unchanged: `app/admin/layout.tsx` answers
+everybody who is not an administrator with the not-found page, every panel
+refuses them again in the database, and the flag is not writable by any
+application statement.
 
 ## 11. Paid accounts, later (added 10 September 2026)
 
@@ -750,7 +878,46 @@ stack one per line on a phone.
 
 `tests/markup.test.mjs` holds all thirteen to the same three rules — the route exists, it
 renders `UnwrittenPage`, and it is `noindex` — so one of them cannot quietly grow policy
-nobody agreed to.
+nobody agreed to. **`/report` left that list on 14 September 2026**, because it
+is now a form that files a report rather than a page describing one (§5).
+
+### The site is English, and the catalogue is not (the owner's item 1, 14 September 2026)
+
+The owner used the site for the first time and found Hebrew and Arabic on it:
+three tool summaries opened with a phrase in another script, and fifteen
+`tool_problems` statements were in one. Foundit's interface is English and
+nothing on it offers another language, so a Hebrew sentence in the middle of an
+English page reads as a defect, and is one.
+
+**The three summaries are rewritten in English** (`morfix`, `dicta-nakdan`,
+`almaany`), in `db/seed/dev_seed.sql` and in the embedding fixture, and the
+three vectors re-recorded.
+
+**The fifteen statements stay in the database and are never rendered.** They
+are not decoration: `public.tool_problems` is what the vector leg searches, and
+they exist so that somebody typing a Hebrew or Arabic sentence finds Morfix or
+Almaany by MEANING — which is the product working exactly as designed, for the
+person most likely to need that listing. Deleting them would make the catalogue
+worse at the one job it has, in order to tidy an English page.
+
+So the filter is on RENDERING and never on retrieval. `search_doc` and
+`embedding` are untouched and every function that RANKS still sees every
+statement; `db/migrations/0022_english_only.sql` adds a STORED GENERATED column,
+`non_english_script`, and the five queries that put a statement's text on a page
+filter on it — Browse, the homepage strip, the tool page, the maker dashboard,
+and "Why this?" on results. Generated rather than set by the seed, because
+three of the four writers of that table are not the seed and a column somebody
+has to remember to set is a column somebody will forget.
+
+The one place it is deliberately NOT filtered is the array of statements sent
+to the reranker: a model reading a Hebrew statement about a Hebrew dictionary
+is the vector leg's whole point, and nothing it returns is text on a page.
+
+`tests/english.test.mjs` walks every route on a production server and fails on
+a character in U+0590–U+06FF anywhere in the HTML, and sweeps `app/`,
+`components/` and `lib/` for the same range with a documented allow-list of the
+five files where such a character is a MATCHER or a PROMPT rather than
+something rendered.
 
 ## 15. The typed sentence now leaves our server (added 11 September 2026)
 
