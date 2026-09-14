@@ -383,7 +383,7 @@ test('no route prints a Hebrew or Arabic character, signed in as its maker', asy
     // rather than hardcoded: `morfix` is the one today, and a seed that
     // renamed it would otherwise make this test pass by testing nothing.
     const { rows } = await asOwner(
-      `select t.id, t.slug::text as slug, t.owner_id
+      `select t.id, t.slug::text as slug, t.owner_id, t.updated_at
          from public.tools t
          join public.tool_problems tp on tp.tool_id = t.id
         where tp.non_english_script
@@ -446,10 +446,26 @@ test('no route prints a Hebrew or Arabic character, signed in as its maker', asy
 
     assert.deepEqual(offenders, [], WHY_IT_MATTERS + offenders.join('\n  '));
   } finally {
-    // The catalogue goes back exactly as it was, whatever happened above.
+    /* THE CATALOGUE GOES BACK EXACTLY AS IT WAS, whatever happened above —
+     * and `updated_at` is part of "exactly".
+     *
+     * `tools_touch` is a BEFORE UPDATE trigger that stamps `updated_at = now()`
+     * whenever `owner_id` changes, so putting the owner back is a second stamp
+     * rather than an undo. That leaves `embedded_at < updated_at`, which
+     * `db/test/vectors_test.sql` reads — correctly — as "this summary is stale
+     * the moment it is written, so the embedding job would never converge",
+     * and the SQL suite then fails for a test in a different directory.
+     *
+     * The second statement restores the timestamp, and it does NOT fire the
+     * trigger: `updated_at` is not one of the sixteen columns in its WHEN
+     * clause. */
     if (listing) {
       await asOwner('update public.tools set owner_id = $1 where id = $2', [
         listing.owner_id,
+        listing.id,
+      ]);
+      await asOwner('update public.tools set updated_at = $1 where id = $2', [
+        listing.updated_at,
         listing.id,
       ]);
     }
