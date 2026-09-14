@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
 
+import { Bars, ChartFrame, Line, RecordedBars, endLabels } from '@/components/AdminCharts';
 import { BackLink } from '@/components/BackLink';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
@@ -11,7 +12,6 @@ import {
   CATALOGUE_DAYS,
   DASHBOARD_DAYS,
   LIST_LIMIT,
-  type DemandDay,
   type OpsEvent,
   type Sentence,
 } from '@/lib/admin-sql';
@@ -116,6 +116,22 @@ const n = (value: number) => NUMBER.format(value);
 const money = (value: number) =>
   value < 0.01 && value > 0 ? '<$0.01' : `$${value.toFixed(2)}`;
 
+/**
+ * The chart palette, named once.
+ *
+ * Colour follows the SERIES and never its rank: `reader` is violet on the
+ * Money chart whatever it is worth today, and a filter that changed the
+ * number of series would not repaint the survivors. The four were validated
+ * rather than chosen — see the block beside them in styles/tokens.css for the
+ * command and its five PASSes.
+ */
+const SERIES = {
+  one: 'var(--c-chart-1)',
+  two: 'var(--c-chart-2)',
+  three: 'var(--c-chart-3)',
+  four: 'var(--c-chart-4)',
+} as const;
+
 function Section({
   title,
   period,
@@ -158,24 +174,11 @@ function Stat({
   );
 }
 
-/** Thirty days of a count, as thirty columns. No library, no canvas, no axis. */
-function Bars({ days, pick }: { days: DemandDay[]; pick: (d: DemandDay) => number }) {
-  const peak = Math.max(1, ...days.map(pick));
-  return (
-    <div className="admbars" aria-hidden="true">
-      {days.map((d) => {
-        const value = pick(d);
-        return (
-          <span
-            key={d.day}
-            className={value === 0 ? 'none' : undefined}
-            style={{ height: `${Math.max(2, Math.round((value / peak) * 100))}%` }}
-          />
-        );
-      })}
-    </div>
-  );
-}
+/* `Bars` WAS HERE, and it was thirty `<span>`s with an inline height and an
+ * `aria-hidden` on the box — no title, no period, no caption and nothing a
+ * screen reader could read. The owner looked at it and asked what it was
+ * (item 8). It is components/AdminCharts.tsx now, with five others beside it,
+ * and every one of them is a `<figure>` that says what it is. */
 
 function Sentences({ rows, empty }: { rows: Sentence[]; empty: string }) {
   if (rows.length === 0) return <p className="admnote">{empty}</p>;
@@ -279,6 +282,28 @@ export default async function AdminDashboard() {
   const removed = data.words.reduce((sum, w) => sum + w.removed, 0);
   const period = `Last ${DASHBOARD_DAYS} days`;
 
+  /* --- the owner's item 10: five more panels, and the figures beside them ---
+   *
+   * MONTHLY ACTIVE ACCOUNTS IS THE SUM OF THE DAILY SERIES and is deliberately
+   * not a second query. `profiles.last_seen_day` is one date per account, so
+   * every account falls in exactly one of the thirty buckets and the sum IS
+   * `count(*) from profiles where last_seen_day >= today - 29`. Two statements
+   * could drift by a row written between them; one cannot.
+   * db/test/panels_test.sql asserts the equality against the table rather than
+   * taking this paragraph's word for it. */
+  const monthlyActive = data.active.reduce((sum, a) => sum + a.seen, 0);
+  const pageViews = data.views.reduce((sum, v) => sum + v.views, 0);
+  const viewsRecorded = data.views.some((v) => v.recording);
+  const newTools = data.newTools.reduce((sum, t) => sum + t.published, 0);
+  const spendRecorded = data.spendTotals.firstDay !== null;
+
+  const demandEnds = endLabels(data.demand);
+  const activeEnds = endLabels(data.active);
+  const signupEnds = endLabels(data.signups);
+  const toolEnds = endLabels(data.newTools);
+  const viewEnds = endLabels(data.views);
+  const spendEnds = endLabels(data.spend);
+
   return (
     <div className="page">
       <SiteHeader />
@@ -315,14 +340,45 @@ export default async function AdminDashboard() {
               sub="Distinct, after grouping by normalised text"
             />
           </div>
-          <Bars days={data.demand} pick={(d) => d.searches} />
-          <p className="admnote">
-            A search “found nothing good” when the reranker ran on it and judged nothing on the
-            page at 2 or 3 (§17). Since the ranking change that threshold is also what decides
-            what is shown at all, so on a judged search this now means <strong>the page was
-            empty</strong>. A search nobody judged — no key, a timeout, the daily cap — is in
-            neither figure.
-          </p>
+          {/* ITEM 8. The owner asked what this chart was, and the answer —
+              searches per day, for thirty days — was nowhere on the page. It
+              is now the title. The second series is item 10's "searches that
+              found nothing good", side by side rather than stacked: it is a
+              SUBSET of the first, and stacking a subset on its own superset
+              draws a column taller than the number of searches there were. */}
+          <ChartFrame
+            title="Searches per day"
+            period={`${DASHBOARD_DAYS} days to ${day(data.demand[data.demand.length - 1]?.day ?? null)}`}
+            first={demandEnds[0]}
+            last={demandEnds[1]}
+            legend={[
+              { label: 'Searches', color: SERIES.one },
+              { label: 'Found nothing good', color: SERIES.two },
+            ]}
+            caption={
+              <>
+                One bar a day, from <code>search_events</code> — one row per search, with the
+                normalised sentence and no user column, no session column and no foreign key to
+                anything that has one. A search “found nothing good” when the reranker ran on it
+                and judged nothing on the page at 2 or 3 (§17). Since the ranking change that
+                threshold is also what decides what is shown at all, so on a judged search the
+                second bar now means <strong>the page was empty</strong>. A search nobody judged —
+                no key, a timeout, the daily cap — is in neither series.
+              </>
+            }
+          >
+            <Bars
+              series={[
+                { label: 'Searches', color: SERIES.one, values: data.demand.map((d) => d.searches) },
+                {
+                  label: 'Found nothing good',
+                  color: SERIES.two,
+                  values: data.demand.map((d) => d.nothingGood),
+                },
+              ]}
+              zeroNote="A day with no bar is a day with no search."
+            />
+          </ChartFrame>
           <Sentences
             rows={data.unmet}
             empty="No search in this window was read and answered by nothing. That is either a catalogue that is covering what people ask, or a reranker that has not run; the judged figure above says which."
@@ -352,6 +408,15 @@ export default async function AdminDashboard() {
               value={n(data.catalogue.ownershipChanged)}
               label="Owners changed"
               sub="Every one of them has a reason on the record"
+            />
+            {/* The window here is CATALOGUE_DAYS and the chart below covers
+                DASHBOARD_DAYS, so this figure says which it is rather than
+                sitting under the section's period and meaning something
+                else. */}
+            <Stat
+              value={n(newTools)}
+              label="Published"
+              sub={`In the last ${DASHBOARD_DAYS} days, which is the chart below`}
             />
           </div>
 
@@ -398,6 +463,48 @@ export default async function AdminDashboard() {
             <Link href="/claim">Claim</Link> rewrote a listing’s history on this page.
           </p>
 
+          {/* ITEM 10: new tools per day. TWO SERIES, because "added" and
+              "published" are different days for every listing that came
+              through the submit flow and the same day for every seeded one —
+              and a chart of either alone would be missing half of what
+              happened. Side by side and not stacked: a listing published today
+              was also added on some day, so stacking them would count it
+              twice. */}
+          <ChartFrame
+            title="New listings per day"
+            period={period}
+            first={toolEnds[0]}
+            last={toolEnds[1]}
+            legend={[
+              { label: 'Added', color: SERIES.one },
+              { label: 'Published', color: SERIES.three },
+            ]}
+            caption={
+              <>
+                From <code>tools.created_at</code> and <code>tools.published_at</code>. They are
+                different days for anything that came through the add flow — a draft is added, and
+                published when its maker finishes it — and the same day for everything the
+                catalogue was seeded with, which is why the two bars sit side by side on the old
+                days and apart on the new ones.
+              </>
+            }
+          >
+            <Bars
+              series={[
+                {
+                  label: 'Added',
+                  color: SERIES.one,
+                  values: data.newTools.map((t) => t.added),
+                },
+                {
+                  label: 'Published',
+                  color: SERIES.three,
+                  values: data.newTools.map((t) => t.published),
+                },
+              ]}
+            />
+          </ChartFrame>
+
           <h3 className="tab" style={{ margin: 0, color: 'var(--c-muted)' }}>
             Published and never matched by a search — the first {LIST_LIMIT}, oldest first
           </h3>
@@ -434,8 +541,69 @@ export default async function AdminDashboard() {
         {/* --- People ------------------------------------------------------ */}
         <Section title="People" period={period}>
           <div className="admrow">
+            {/* ITEM 10: monthly active accounts. It is the SUM of the daily
+                series beside it and cannot disagree with it — every account
+                has exactly one `last_seen_day`, so each one falls in exactly
+                one of the thirty buckets. db/test/panels_test.sql asserts the
+                two are equal rather than trusting the arithmetic. */}
+            <Stat
+              value={n(monthlyActive)}
+              label="Monthly active accounts"
+              sub={`Seen at least once in the last ${DASHBOARD_DAYS} days`}
+            />
             <Stat value={n(signups)} label="Signed up" sub={`In the last ${DASHBOARD_DAYS} days`} />
             <Stat value={n(data.people.length)} label="Accounts shown" sub="Most recently seen first" />
+          </div>
+
+          <div className="admcharts">
+            <ChartFrame
+              title="Accounts seen that day"
+              period={period}
+              first={activeEnds[0]}
+              last={activeEnds[1]}
+              caption={
+                <>
+                  <strong>“Accounts seen that day”, not “daily active accounts”</strong> — they are
+                  not the same thing and the difference is the whole of why this line is worded
+                  like that. <code>profiles.last_seen_day</code> holds ONE date per account,
+                  stamped once a day by the statement that already asks who is signing in, so
+                  somebody who came on Tuesday and again on Friday appears on Friday and nowhere
+                  else. The thirty numbers therefore add up to the figure above, exactly.
+                </>
+              }
+            >
+              <Line
+                values={data.active.map((a) => a.seen)}
+                color={SERIES.one}
+                label="Accounts seen that day"
+              />
+            </ChartFrame>
+
+            <ChartFrame
+              title="New accounts per day"
+              period={period}
+              first={signupEnds[0]}
+              last={signupEnds[1]}
+              caption={
+                <>
+                  One bar a day, counting rows in <code>profiles</code> by{' '}
+                  <code>created_at</code>. An account that has since been deleted is not in it:
+                  0016 removes the row rather than marking it, so a deletion takes the signup with
+                  it and this chart gets shorter. That is the right answer for a figure headed
+                  “accounts”, and it means the total here can fall.
+                </>
+              }
+            >
+              <Bars
+                series={[
+                  {
+                    label: 'New accounts',
+                    color: SERIES.one,
+                    values: data.signups.map((sg) => sg.signups),
+                  },
+                ]}
+              />
+            </ChartFrame>
           </div>
           <div className="admscroll">
             <table className="admtable">
@@ -496,21 +664,88 @@ export default async function AdminDashboard() {
           </p>
         </Section>
 
+        {/* --- Visits ------------------------------------------------------ */}
+        {/* ITEM 10. Nothing was counting this at all before 14 September 2026:
+            the only per-listing number was `tools.open_count`, and the only
+            measurement of the site as a whole was going to be Cloudflare's,
+            once there is a Cloudflare. The counter is an integer in this Node
+            process keyed on the day, flushed once a minute through
+            `infra.add_page_views` — no cookie, no address, no path, nothing
+            that could say who. lib/page-views.ts is the whole of it. */}
+        <Section title="Visits" period={period}>
+          <div className="admrow">
+            <Stat
+              value={viewsRecorded ? n(pageViews) : 'Not recorded'}
+              label="Page views"
+              sub={
+                viewsRecorded
+                  ? `Pages this server rendered in the last ${DASHBOARD_DAYS} days`
+                  : 'Nothing has been counted yet. The counter starts with the first page this build serves, and a 0 here would say pages were counted and there were none.'
+              }
+              unrecorded={!viewsRecorded}
+            />
+          </div>
+
+          <ChartFrame
+            title="Page views per day"
+            period={period}
+            first={viewEnds[0]}
+            last={viewEnds[1]}
+            unrecorded={
+              viewsRecorded
+                ? undefined
+                : 'Nothing was counting on any of these days. The first page this build serves starts it.'
+            }
+            caption={
+              <>
+                <strong>Page views, not people.</strong> One person reading four pages is four.
+                Unique visitors come from Cloudflare Web Analytics once the site is live, which
+                counts them at the edge with no cookie and does not tell us who they are either
+                (§13). A <span className="admhatched">hatched</span> day is one where nothing was
+                counting yet, which is not the same as a day with no visitors and is not drawn as
+                one. Excluded: <code>/healthz</code>, <code>/o</code>, requests for a page
+                somebody is already on, prefetches, and static files.
+              </>
+            }
+          >
+            <RecordedBars days={data.views} color={SERIES.one} label="Page views" />
+          </ChartFrame>
+        </Section>
+
         {/* --- Words ------------------------------------------------------- */}
         <Section title="Words" period={period}>
           <div className="admrow">
             <Stat value={n(reviews)} label="Reviews written" sub={`In the last ${DASHBOARD_DAYS} days`} />
             <Stat value={n(removed)} label="Reviews removed" sub="Each with a reason on the record" />
+            {/* ITEM 9. This said "Not recorded" and was telling the truth:
+                §5 sent reports to an inbox and wrote them down nowhere, so
+                there was no number to show and a 0 would have been a lie. The
+                supervisor's decision of 14 September 2026 reverses that half —
+                a report is now recorded AND emailed — so there is a number. */}
             <Stat
-              value="Not recorded"
+              value={n(data.reports.received)}
               label="Reports received"
-              sub="Reports reach the team by email and are written down nowhere (§5), so there is no number here rather than a zero."
-              unrecorded
+              sub={`In the last ${DASHBOARD_DAYS} days`}
+            />
+            <Stat
+              value={n(data.reports.open)}
+              label="Reports open"
+              sub="Unresolved right now, at any age — a backlog has no window"
             />
           </div>
           <p className="admnote">
-            <Link href="/admin/reviews">Every review, newest first</Link> — and the control that
-            takes one down, which needs a reason of at least eight characters and tells the author.
+            <Link href="/admin/reviews?tab=reported">Reported</Link> is the queue: every review
+            with a report nobody has resolved, newest first, with the reasons.{' '}
+            <Link href="/admin/reviews">Every review</Link> is the other two tabs. The control that
+            takes one down needs a reason of at least eight characters and tells the author.
+          </p>
+          <p className="admnote">
+            <strong>“Received” and “open” count different windows on purpose.</strong>{' '}
+            Received is a rate and belongs to the {DASHBOARD_DAYS} days this panel is headed with;
+            open is a backlog and has no window at all — a report filed a year ago and never
+            resolved is still open, and a figure that hid it inside thirty days would be the
+            opposite of what the number is for. Nothing in <code>reports</code> names a search: no
+            query text, no address, no session.
           </p>
         </Section>
 
@@ -554,12 +789,94 @@ export default async function AdminDashboard() {
               <Stat value={bytes(data.databaseBytes)} label="Database" sub="pg_database_size, right now" />
             </div>
           )}
+          {/* ITEM 10: money spent so far. The copy this replaces said "there
+              is no month-to-date figure to show that would not be a guess",
+              and it was right — nothing was writing spend down.
+              `infra.spend_ledger` (0024) is written by the four paid-call
+              paths from the PROVIDER'S OWN usage fields, so the figures below
+              are a record rather than an estimate. The worst case stays,
+              because the two answer different questions: one is what happened
+              and the other is what could. */}
+          <div className="admrow">
+            <Stat
+              value={spendRecorded ? money(data.spendTotals.monthToDate) : 'Not recorded'}
+              label="Month to date"
+              sub={
+                spendRecorded
+                  ? 'Recorded by this deployment, from the providers’ usage fields'
+                  : 'Nothing has been recorded yet. The ledger starts at its first paid call, and a $0.00 here would say calls were priced and came to nothing.'
+              }
+              unrecorded={!spendRecorded}
+            />
+            <Stat
+              value={spendRecorded ? money(data.spendTotals.allTime) : '—'}
+              label="Since the first row"
+              sub={
+                spendRecorded
+                  ? `${n(data.spendTotals.requests)} paid requests since ${day(data.spendTotals.firstDay)}`
+                  : 'Nothing recorded yet'
+              }
+              unrecorded={!spendRecorded}
+            />
+          </div>
+
+          <ChartFrame
+            title="Spent per day"
+            period={period}
+            first={spendEnds[0]}
+            last={spendEnds[1]}
+            unrecorded={
+              spendRecorded
+                ? undefined
+                : 'Nothing has been recorded on any of these days. The ledger starts at the first paid call this build makes.'
+            }
+            legend={[
+              { label: 'Reader', color: SERIES.one },
+              { label: 'Reranker', color: SERIES.two },
+              { label: 'Search embedding', color: SERIES.three },
+              { label: 'Worker embedding', color: SERIES.four },
+            ]}
+            caption={
+              <>
+                <strong>
+                  Recorded by this deployment from the provider&rsquo;s usage fields; earlier
+                  development spend is not in it.
+                </strong>{' '}
+                Each bar is one day&rsquo;s four kinds stacked — these really are parts of one
+                total, which is why this is the one stacked chart on the page. Tokens come from{' '}
+                <code>usage.input_tokens</code> and <code>usage.output_tokens</code> at the moment
+                each call returns; the dollars come from <code>lib/prices.ts</code> and are stored
+                beside the tokens, so a price change does not rewrite what last month cost. The
+                reader&rsquo;s cached-input rate is not modelled, so its figure is an upper bound
+                rather than an understatement. A failure to record never fails a search.
+              </>
+            }
+          >
+            <Bars
+              stacked
+              series={[
+                { label: 'Reader', color: SERIES.one, values: data.spend.map((d) => d.reader) },
+                { label: 'Reranker', color: SERIES.two, values: data.spend.map((d) => d.rerank) },
+                {
+                  label: 'Search embedding',
+                  color: SERIES.three,
+                  values: data.spend.map((d) => d.embed),
+                },
+                {
+                  label: 'Worker embedding',
+                  color: SERIES.four,
+                  values: data.spend.map((d) => d.worker),
+                },
+              ]}
+            />
+          </ChartFrame>
+
           <p className="admnote">
-            These are <strong>this process&rsquo;s</strong> counters over a rolling twenty-four
-            hours, and not a month to date. The limiter keeps them in memory on purpose — nothing
-            about a visitor is written down — so a restart forgets them, and there is no
-            month-to-date figure to show that would not be a guess. The embedding worker&rsquo;s
-            own spend is counted by the worker and is not visible here at all.
+            The four figures at the top of this panel are <strong>this process&rsquo;s</strong>{' '}
+            counters over a rolling twenty-four hours, which is what the LIMITER works from. The
+            limiter keeps them in memory on purpose — nothing about a visitor is written down —
+            so a restart forgets them. The ledger survives a restart and knows nothing about caps.
+            They are different questions and are deliberately not the same number.
           </p>
           <p className="admnote">
             <strong>The worst case is knowable, and it is this.</strong> Every daily cap spent

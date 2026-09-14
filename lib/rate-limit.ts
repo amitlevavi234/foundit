@@ -245,6 +245,29 @@ export const DEFAULT_REVIEWS_PER_ACCOUNT_PER_HOUR = 10;
 export const DEFAULT_SAVES_PER_ACCOUNT_PER_HOUR = 120;
 
 /**
+ * Filing a report — the owner's item 9, and the supervisor's two numbers.
+ *
+ * FIVE PER ADDRESS PER HOUR, because reporting is open to a signed-out
+ * visitor: a sign-in wall in front of "this listing is wrong" is a wall in
+ * front of the reports most worth having, and the price of not having one is
+ * that the address is the only thing a bound can be attached to. Five is more
+ * than anybody reporting in good faith needs in an hour and nothing at all for
+ * a script.
+ *
+ * TEN PER ACCOUNT PER DAY, which is the stricter of the two and is deliberately
+ * a DAY rather than an hour. A report is a thing a person reads: a hundred of
+ * them from one account is not moderation, it is a way of burying the ones
+ * that matter. Somebody with a genuine list of ten things to report on one day
+ * can send the eleventh tomorrow, or say so in the details of the tenth.
+ *
+ * Both are ceilings on the WRITE. The email `/report` still sends is behind the
+ * same gate, so neither can be used to make our mail server send a hundred
+ * messages either.
+ */
+export const DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR = 5;
+export const DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY = 10;
+
+/**
  * The two limits on asking for a 6-digit sign-in code, from research/09 §6.
  *
  * They defend different things and both are needed.
@@ -371,6 +394,8 @@ export interface Limits {
   savesPerAccountPerHour: number;
   opensPerVisitorPerHour: number;
   opensPerDay: number;
+  reportsPerAddressPerHour: number;
+  reportsPerAccountPerDay: number;
 }
 
 /** The configured ceilings. Read at call time so a test can set them. */
@@ -429,6 +454,14 @@ export function limits(): Limits {
       DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
     ),
     opensPerDay: positiveInt(process.env.MAX_OPENS_PER_DAY, DEFAULT_OPENS_PER_DAY),
+    reportsPerAddressPerHour: positiveInt(
+      process.env.MAX_REPORTS_PER_ADDRESS_PER_HOUR,
+      DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR,
+    ),
+    reportsPerAccountPerDay: positiveInt(
+      process.env.MAX_REPORTS_PER_ACCOUNT_PER_DAY,
+      DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY,
+    ),
   };
 }
 
@@ -740,6 +773,10 @@ declare global {
          * limit cannot see.
          */
         opens: DailyCap;
+        /** Reports, by address, per hour. */
+        reportedFrom: TokenBuckets;
+        /** Reports, by account, per DAY — a day-windowed map of its own. */
+        reportedBy: TokenBuckets;
         /** Whether the "the rerank budget is spent" line has been said today. */
         rerankCapAnnounced: boolean;
       }
@@ -761,6 +798,8 @@ function state() {
     edited: new TokenBuckets(),
     wrote: new TokenBuckets(),
     opens: new DailyCap(),
+    reportedFrom: new TokenBuckets(),
+    reportedBy: new TokenBuckets(undefined, 50_000, DAY_MS),
     rerankCapAnnounced: false,
   };
 
@@ -782,6 +821,12 @@ function state() {
   // the first request after this field was added would find a limiter without
   // one and throw out of a Server Action.
   s.wrote ??= new TokenBuckets();
+  // The owner's item 9, added on 14 September 2026. Two maps and not one,
+  // because they have different windows: an hour for the address bucket and a
+  // day for the account bucket, and a TokenBuckets instance has exactly one
+  // window (see its constructor, and the paragraph above it about why).
+  s.reportedFrom ??= new TokenBuckets();
+  s.reportedBy ??= new TokenBuckets(undefined, 50_000, DAY_MS);
   return s;
 }
 
@@ -1062,6 +1107,39 @@ export function allowReview(accountId: string): EditAllowance {
     limits().reviewsPerAccountPerHour,
   );
   return { allowed: taken.allowed, retryAfterSeconds: taken.retryAfterSeconds };
+}
+
+/**
+ * May this visitor file a report right now? — the owner's item 9.
+ *
+ * TWO GATES AND THE STRICTER ONE WINS, because they defend different things.
+ * The address bucket bounds a signed-out flood; the account bucket bounds a
+ * signed-in one, over a day rather than an hour, because a hundred reports
+ * from one account is not moderation but a way of burying the ones that
+ * matter. `accountId` is null for a signed-out reporter, and then the address
+ * is the only bound there is — which is the price of not putting a sign-in
+ * wall in front of "this listing is wrong".
+ *
+ * Both keys are hashed with the per-process salt on the way in and both
+ * strings are dropped, exactly like every other bucket in this file, so this
+ * cannot become a record of who reported what and when. That matters here more
+ * than for a review: a review is public and a report is not.
+ */
+export function allowReport(address: string, accountId: string | null): EditAllowance {
+  const byAddress = state().reportedFrom.take(
+    visitorKey(`report-address:${address.trim()}`),
+    limits().reportsPerAddressPerHour,
+  );
+  if (!byAddress.allowed) {
+    return { allowed: false, retryAfterSeconds: byAddress.retryAfterSeconds };
+  }
+  if (!accountId) return { allowed: true, retryAfterSeconds: 0 };
+
+  const byAccount = state().reportedBy.take(
+    visitorKey(`report-account:${accountId.trim()}`),
+    limits().reportsPerAccountPerDay,
+  );
+  return { allowed: byAccount.allowed, retryAfterSeconds: byAccount.retryAfterSeconds };
 }
 
 /**

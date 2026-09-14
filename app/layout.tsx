@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 
 import { AnalyticsBeacon, SentryDsnMeta } from '@/components/AnalyticsBeacon';
 import { fontClassNames } from '@/lib/fonts';
+import { countPageView } from '@/lib/page-views';
 
 import '@/styles/tokens.css';
 import '@/styles/base.css';
@@ -49,7 +50,28 @@ export const viewport: Viewport = {
 export default async function RootLayout({ children }: { children: ReactNode }) {
   // Set by middleware.ts on every request. Absent only where middleware does
   // not run, and there is no such route that renders this layout.
-  const nonce = (await headers()).get('x-nonce') ?? '';
+  const incoming = await headers();
+  const nonce = incoming.get('x-nonce') ?? '';
+
+  /* ONE PAGE VIEW — the owner's item 10, 14 September 2026.
+   *
+   * This is the only place it is counted, because this is the one component
+   * that renders for every HTML document and for nothing else: `/healthz` is a
+   * Route Handler and `/o` answers 204, so neither reaches here at all, and
+   * `_next/static` never touches a React render.
+   *
+   * WHAT THE TWO HEADERS ARE FOR. A client-side navigation re-renders the tree
+   * on the server with `RSC: 1`, which would count a second view for a page
+   * somebody is already on; `Next-Router-Prefetch` marks a render for a link
+   * nobody has followed. Counting either would make the number bigger than
+   * the truth in the direction that flatters it, which is the direction a
+   * dashboard figure must never be wrong in.
+   *
+   * Nothing about the visitor is read, here or in lib/page-views.ts: the whole
+   * of the state is a day and an integer, flushed once a minute. See that
+   * file for why that is a fact about the deployment rather than about people.
+   */
+  if (!incoming.get('rsc') && !incoming.get('next-router-prefetch')) countPageView();
 
   return (
     <html lang="en" className={fontClassNames}>

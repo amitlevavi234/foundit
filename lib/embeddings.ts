@@ -39,6 +39,8 @@
  *     cannot embed has nothing else to do.
  */
 
+import { reportSpend } from './spend-sink.ts';
+
 /** The one address. Not a base URL, not a template, not configurable. */
 export const EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings';
 
@@ -330,12 +332,21 @@ export async function embedTexts(
     throw new EmbeddingError(`provider answered with model ${model}`);
   }
 
-  return {
-    vectors,
-    model: EMBEDDING_MODEL,
-    tokens: Number(payload.usage?.prompt_tokens ?? payload.usage?.total_tokens ?? 0),
-    truncated,
-  };
+  const tokens = Number(payload.usage?.prompt_tokens ?? payload.usage?.total_tokens ?? 0);
+
+  // THE SPEND LEDGER — the owner's item 10, 14 September 2026. One request,
+  // the provider's own token count, no output tokens because an embedding has
+  // none. `reportSpend` is a no-op unless somebody installed a sink, which is
+  // why this line is safe in `scripts/embed.mjs` and in `eval/run.mjs`: see
+  // lib/spend-sink.ts, which imports nothing.
+  //
+  // `WORKER` OR `EMBED` IS NOT DECIDED HERE. This module is both callers, and
+  // which one it is is a fact about the process rather than about the call —
+  // so the sink decides, and `scripts/embed-worker.mjs` installs one that says
+  // `worker`. The default installed by the application says `embed`.
+  reportSpend('embed', 1, tokens, 0);
+
+  return { vectors, model: EMBEDDING_MODEL, tokens, truncated };
 }
 
 /* ===========================================================================

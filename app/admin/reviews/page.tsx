@@ -7,10 +7,15 @@ import { Button } from '@/components/Button';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { Stars } from '@/components/Stars';
-import { reviewPage } from '@/lib/admin';
-import { MAX_REMOVAL_REASON, MIN_REMOVAL_REASON, type AdminReview } from '@/lib/admin-sql';
+import { reports, reviewPage } from '@/lib/admin';
+import {
+  MAX_REMOVAL_REASON,
+  MIN_REMOVAL_REASON,
+  type AdminReport,
+  type AdminReview,
+} from '@/lib/admin-sql';
 
-import { removeReviewAction } from '../actions';
+import { removeReviewAction, resolveReportAction } from '../actions';
 import { adminMetadata } from '../metadata';
 
 /* ===========================================================================
@@ -70,6 +75,11 @@ const TROUBLE: Record<string, string> = {
   // and the pair answered whether a review id existed to anybody who could
   // post the action.
   'not-removed': 'That removal did not happen, and nothing was changed.',
+  // The owner's item 9. One sentence for every way a resolve did not
+  // happen — an id nobody filed, one somebody else closed a moment ago —
+  // for the reason F4 gives above: two sentences are an oracle over which
+  // report ids exist.
+  'not-resolved': 'That report was not closed. Either it is not there, or somebody closed it first.',
 };
 
 const TOLD: Record<string, string> = {
@@ -89,13 +99,50 @@ interface Props {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
+/* ===========================================================================
+ * THREE TABS, AND THE FIRST ONE IS A QUEUE — the owner's item 9.
+ *
+ * This page was three sections stacked down one scroll: Live, Removed by an
+ * administrator, Taken down by its author. That is a fine way to READ the
+ * reviews and a poor way to WORK, because the thing an operator opens this
+ * page to do — look at what somebody reported — was not on it at all: reports
+ * went to an inbox and were written down nowhere.
+ *
+ * Reported is now the first tab and the default, because it is the only one
+ * with anything waiting in it. All and Removed are the same rows as before.
+ *
+ * THE TABS ARE LINKS AND NOT A CONTROL. `?tab=` on an ordinary anchor: it
+ * works before hydration, it works with JavaScript off, each tab is a URL
+ * somebody can send to somebody else, and the back button does what a back
+ * button does. After the owner's items 4 to 7 that is a rule in this codebase
+ * rather than a preference.
+ * ======================================================================== */
+
+const TABS = [
+  { id: 'reported', label: 'Reported' },
+  { id: 'all', label: 'All' },
+  { id: 'removed', label: 'Removed' },
+] as const;
+
+type TabId = (typeof TABS)[number]['id'];
+
+function tabOf(raw: string | undefined): TabId {
+  return raw === 'all' || raw === 'removed' ? raw : 'reported';
+}
+
 export default async function AdminReviews({ searchParams }: Props) {
   const page = await reviewPage();
   if (!page) notFound();
 
+  // Null only for somebody who is not an administrator, and the layout has
+  // already answered them with the not-found page by the time this runs.
+  const filed = (await reports()) ?? [];
+
   const params = await searchParams;
   const problem = first(params.problem);
   const told = first(params.told);
+  const resolved = first(params.resolved);
+  const tab = tabOf(first(params.tab));
 
   // THREE LISTS, BECAUSE THERE ARE THREE STATES (Phase 8 review, F8).
   // `removedAt` used to be the review's `deleted_at`, which its AUTHOR sets
@@ -105,6 +152,9 @@ export default async function AdminReviews({ searchParams }: Props) {
   const live = reviews.filter((r) => !r.removedByAdminAt && !r.authorDeletedAt);
   const down = reviews.filter((r) => r.removedByAdminAt);
   const retracted = reviews.filter((r) => !r.removedByAdminAt && r.authorDeletedAt);
+
+  const open = filed.filter((r) => r.resolvedAt === null);
+  const closed = filed.filter((r) => r.resolvedAt !== null);
 
   return (
     <div className="page">
@@ -124,6 +174,24 @@ export default async function AdminReviews({ searchParams }: Props) {
           </div>
         </div>
 
+        <nav className="admtabs" aria-label="Which reviews">
+          {TABS.map((t) => {
+            const count =
+              t.id === 'reported' ? open.length : t.id === 'removed' ? down.length : reviews.length;
+            return (
+              <Link
+                key={t.id}
+                href={`/admin/reviews?tab=${t.id}`}
+                className={t.id === tab ? 'admtab on' : 'admtab'}
+                aria-current={t.id === tab ? 'page' : undefined}
+              >
+                {t.label}
+                <span className="tab faint"> {count}</span>
+              </Link>
+            );
+          })}
+        </nav>
+
         {problem && TROUBLE[problem] ? (
           <p role="alert" className="admnote" style={{ borderColor: 'var(--c-red)', color: 'var(--c-red)' }}>
             {TROUBLE[problem]}
@@ -134,83 +202,155 @@ export default async function AdminReviews({ searchParams }: Props) {
             {TOLD[told]}
           </p>
         ) : null}
-
-        <section className="admsection">
-          <div className="section-head">
-            <h2 className="h3" style={{ margin: 0 }}>
-              Live
-            </h2>
-            <span className="admperiod">
-              {live.length} {live.length === 1 ? 'review' : 'reviews'}
-            </span>
-          </div>
-
-          {live.length === 0 ? (
-            <p className="admnote">Nobody has written a review yet.</p>
-          ) : (
-            <div className="panel">
-              {live.map((review) => (
-                <Row key={review.id} review={review} />
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="admsection">
-          <div className="section-head">
-            <h2 className="h3" style={{ margin: 0 }}>
-              Removed by an administrator
-            </h2>
-            <span className="admperiod">
-              {down.length} {down.length === 1 ? 'review' : 'reviews'}
-            </span>
-          </div>
-
-          {down.length === 0 ? (
-            <p className="admnote">
-              No review has ever been taken down by an administrator. Every one that is will stay
-              on this list, with the reason and who wrote it — a removal is a record, not an
-              erasure.
-            </p>
-          ) : (
-            <div className="panel">
-              {down.map((review) => (
-                <Row key={review.id} review={review} />
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="admsection">
-          <div className="section-head">
-            <h2 className="h3" style={{ margin: 0 }}>
-              Taken down by its author
-            </h2>
-            <span className="admperiod">
-              {retracted.length} {retracted.length === 1 ? 'review' : 'reviews'}
-            </span>
-          </div>
-
-          {retracted.length === 0 ? (
-            <p className="admnote">Nobody has retracted a review of their own.</p>
-          ) : (
-            <div className="panel">
-              {retracted.map((review) => (
-                <Row key={review.id} review={review} />
-              ))}
-            </div>
-          )}
-          <p className="admnote">
-            <strong>These are not takedowns and their words are not here.</strong> Somebody
-            deleted what they wrote, which is their own decision about their own words, so the
-            operator gets the listing, the handle and the date and not the text — the same rule
-            that keeps a private saved list off this dashboard (§10, and <code>0015</code>).
-            An administrator may still record a removal against one, and it is the only way to
-            stop the same words being posted again: use the form on the row.
+        {resolved ? (
+          <p role="status" className="panel-tint admnote">
+            That report is closed, with your handle and the time on it. It stays on the list under
+            &ldquo;Closed&rdquo; — a resolution is a record, not an erasure.
           </p>
-        </section>
+        ) : null}
 
-        {page.total > page.rows.length ? (
+        {/* --- Reported ---------------------------------------------------- */}
+        {tab === 'reported' ? (
+          <>
+            <section className="admsection">
+              <div className="section-head">
+                <h2 className="h3" style={{ margin: 0 }}>
+                  Open
+                </h2>
+                <span className="admperiod">
+                  {open.length} {open.length === 1 ? 'report' : 'reports'}
+                </span>
+              </div>
+
+              {open.length === 0 ? (
+                <p className="admnote">
+                  Nothing is waiting. A report arrives from <Link href="/report">/report</Link> or
+                  from the link at the foot of a listing, is written to <code>public.reports</code>{' '}
+                  and is emailed to the team at the same time — so this being empty means there is
+                  nothing to do, rather than that nobody is watching the inbox.
+                </p>
+              ) : (
+                <div className="panel">
+                  {open.map((report) => (
+                    <ReportRow key={report.id} report={report} />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="admsection">
+              <div className="section-head">
+                <h2 className="h3" style={{ margin: 0 }}>
+                  Closed
+                </h2>
+                <span className="admperiod">
+                  {closed.length} {closed.length === 1 ? 'report' : 'reports'}
+                </span>
+              </div>
+              {closed.length === 0 ? (
+                <p className="admnote">Nothing has been closed yet.</p>
+              ) : (
+                <div className="panel">
+                  {closed.map((report) => (
+                    <ReportRow key={report.id} report={report} />
+                  ))}
+                </div>
+              )}
+              <p className="admnote">
+                <strong>Closing a report does nothing to the thing reported.</strong> It records
+                that somebody looked, who they were and when — and nothing else. Taking a review
+                down is the separate control on the row above, it needs its own reason, and it
+                tells the author. Most reports are closed by looking and finding it fine, which is
+                why the note is optional.
+              </p>
+            </section>
+          </>
+        ) : null}
+
+        {/* --- All --------------------------------------------------------- */}
+        {tab === 'all' ? (
+          <>
+            <section className="admsection">
+              <div className="section-head">
+                <h2 className="h3" style={{ margin: 0 }}>
+                  Live
+                </h2>
+                <span className="admperiod">
+                  {live.length} {live.length === 1 ? 'review' : 'reviews'}
+                </span>
+              </div>
+
+              {live.length === 0 ? (
+                <p className="admnote">Nobody has written a review yet.</p>
+              ) : (
+                <div className="panel">
+                  {live.map((review) => (
+                    <Row key={review.id} review={review} />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="admsection">
+              <div className="section-head">
+                <h2 className="h3" style={{ margin: 0 }}>
+                  Taken down by its author
+                </h2>
+                <span className="admperiod">
+                  {retracted.length} {retracted.length === 1 ? 'review' : 'reviews'}
+                </span>
+              </div>
+
+              {retracted.length === 0 ? (
+                <p className="admnote">Nobody has retracted a review of their own.</p>
+              ) : (
+                <div className="panel">
+                  {retracted.map((review) => (
+                    <Row key={review.id} review={review} />
+                  ))}
+                </div>
+              )}
+              <p className="admnote">
+                <strong>These are not takedowns and their words are not here.</strong> Somebody
+                deleted what they wrote, which is their own decision about their own words, so the
+                operator gets the listing, the handle and the date and not the text — the same
+                rule that keeps a private saved list off this dashboard (§10, and{' '}
+                <code>0015</code>). An administrator may still record a removal against one, and it
+                is the only way to stop the same words being posted again: use the form on the row.
+              </p>
+            </section>
+          </>
+        ) : null}
+
+        {/* --- Removed ----------------------------------------------------- */}
+        {tab === 'removed' ? (
+          <section className="admsection">
+            <div className="section-head">
+              <h2 className="h3" style={{ margin: 0 }}>
+                Removed by an administrator
+              </h2>
+              <span className="admperiod">
+                {down.length} {down.length === 1 ? 'review' : 'reviews'}
+              </span>
+            </div>
+
+            {down.length === 0 ? (
+              <p className="admnote">
+                No review has ever been taken down by an administrator. Every one that is will stay
+                on this list, with the reason and who wrote it — a removal is a record, not an
+                erasure.
+              </p>
+            ) : (
+              <div className="panel">
+                {down.map((review) => (
+                  <Row key={review.id} review={review} />
+                ))}
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {tab !== 'reported' && page.total > page.rows.length ? (
           <p className="admnote">
             Showing {page.rows.length} of {page.total} reviews, newest first. The rest are not on
             this page; there is no control for them yet and this sentence is here rather than a
@@ -221,6 +361,84 @@ export default async function AdminReviews({ searchParams }: Props) {
 
       <SiteFooter />
     </div>
+  );
+}
+
+const WHAT: Record<string, string> = {
+  review: 'A review',
+  tool: 'A listing',
+  profile: 'A profile',
+};
+
+/**
+ * One report, with the thing it is about under it.
+ *
+ * THE REVIEW COMES WITH THE REPORT rather than being looked up here. A
+ * reported review may be three thousand rows down the list this page is
+ * showing, so `public.admin_reports` (0023, 0027) carries it in the same row;
+ * see that migration for why a wide result is the right shape.
+ */
+function ReportRow({ report }: { report: AdminReport }) {
+  const target =
+    report.kind === 'tool' ? (
+      <Link href={`/tools/${report.target}`}>{report.target}</Link>
+    ) : report.kind === 'profile' ? (
+      <Link href={`/u/${report.target}`}>@{report.target}</Link>
+    ) : (
+      <span className="tab">#{report.target}</span>
+    );
+
+  return (
+    <article className="admreview">
+      <div className="admreview-head">
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+          <strong>{WHAT[report.kind] ?? report.kind}</strong>
+          {target}
+          <span className="tab faint">
+            {report.reporter ? `reported by @${report.reporter}` : 'reported by somebody signed out'}
+          </span>
+        </div>
+        <span className="tab faint">{day(report.createdAt)}</span>
+      </div>
+
+      {/* THE REASONS, which is what the owner asked to see on this tab. They
+          are somebody's own words, cleaned of control characters on the way in
+          (public.file_report) and rendered as text by React, which escapes. */}
+      <p className="admreview-body">{report.reason}</p>
+      {report.details ? <p className="admreview-body faint">{report.details}</p> : null}
+
+      {report.review ? (
+        <div className="admreported">
+          <Row review={report.review} />
+        </div>
+      ) : null}
+
+      {report.resolvedAt ? (
+        <p className="admnote" style={{ margin: 0 }}>
+          <strong>Closed {day(report.resolvedAt)}</strong>
+          {report.resolvedBy ? ` by @${report.resolvedBy}` : ''}
+          {report.resolution ? `: ${report.resolution}` : '. No note was left.'}
+        </p>
+      ) : (
+        <form action={resolveReportAction} className="admreview-form">
+          <input type="hidden" name="report" value={report.id} />
+          <div className="field" style={{ flex: '1 1 320px' }}>
+            <label className="sr-only" htmlFor={`resolution-${report.id}`}>
+              What you did about this report. Optional.
+            </label>
+            <input
+              id={`resolution-${report.id}`}
+              name="resolution"
+              maxLength={MAX_REMOVAL_REASON}
+              placeholder="What you did about it — optional"
+            />
+          </div>
+          <Button type="submit" size="sm">
+            Resolve
+          </Button>
+        </form>
+      )}
+    </article>
   );
 }
 

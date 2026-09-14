@@ -369,6 +369,12 @@ reset role;
 create or replace function pg_temp.allowlist()
 returns table (name text, shape text) language sql immutable as $$
   select * from (values
+    -- THE OWNER'S ITEM 10, 14 September 2026: accounts seen, by day. Two
+    -- columns and neither of them is a handle — this is the only new panel
+    -- that touches public.profiles at all and it counts rows rather than
+    -- listing them.
+    ('admin_active_accounts',
+     'p_days:i day:t seen:t'),
     ('admin_catalogue_added',
      'p_days:i p_limit:i slug:t name:t handle:t maintained_by:t status:t created_at:t'),
     ('admin_catalogue_counts',
@@ -379,17 +385,48 @@ returns table (name text, shape text) language sql immutable as $$
      ''),
     ('admin_demand',
      'p_days:i day:t searches:t judged:t nothing_good:t'),
+    -- THE OWNER'S ITEM 10: listings created and listings published, by day.
+    ('admin_new_tools',
+     'p_days:i day:t added:t published:t'),
     ('admin_ops_events',
      'kind:t recorded:t ok:t detail:t at:t'),
+    -- THE OWNER'S ITEM 10: page views by day, and whether anything was
+    -- counting that day. infra.page_views_daily holds a date and a number and
+    -- has no third column, which is why a panel over it can sit in this file
+    -- beside the search panels without being the join §10 forbids: there is
+    -- nothing in it to join on.
+    ('admin_page_views',
+     'p_days:i day:t views:t recording:t'),
     ('admin_people',
      'p_limit:i handle:t tools_added:t tools_maintained:t reviews_written:t '
      'likes_given:t last_seen_day:t joined_day:t'),
+    -- THE OWNER'S ITEM 9, and the widest row in this file. It carries a
+    -- report and the review it is about together, because the Reported tab
+    -- cannot page through every review ever written to find one. Every person
+    -- in it is a HANDLE — reporter, resolver, author — and not one column
+    -- comes from a search table. `reports` is added to §2(ii)'s people list in
+    -- the same commit, so a later panel joining a report to a search event
+    -- fails that section rather than this one.
+    ('admin_report_counts',
+     'p_days:i received:t open:t'),
+    ('admin_reports',
+     'p_limit:i report_id:t kind:t target:t reason:t details:t reporter:t '
+     'created_at:t resolved_at:t resolved_by:t resolution:t review_id:t '
+     'tool_slug:t tool_name:t handle:t rating:t body:t review_created_at:t '
+     'removed_by_admin_at:t author_deleted_at:t'),
     ('admin_reviews',
      'p_limit:i p_offset:i review_id:t tool_slug:t tool_name:t handle:t rating:t '
      'body:t created_at:t removed_by_admin_at:t author_deleted_at:t '
      'removal_reason:t removed_by:t total:t'),
     ('admin_signups',
      'p_days:i day:t signups:t'),
+    -- THE OWNER'S ITEM 10: what the four paid paths cost, by day, and the two
+    -- totals beside the chart. Neither names a table in public at all —
+    -- infra.spend_ledger is a day, a kind and four numbers.
+    ('admin_spend',
+     'p_days:i day:t reader:t rerank:t embed:t worker:t'),
+    ('admin_spend_totals',
+     'p_months:i month_to_date:t all_time:t requests:t first_day:t'),
     ('admin_top_queries',
      'p_days:i p_limit:i query_text:t searches:t last_at:t'),
     ('admin_unmet_demand',
@@ -462,7 +499,12 @@ declare
   def  text;
   bad  text := null;
   searchy text := '\m(search_events|search_event_tools|query_embeddings|query_readings|query_reranks)\M';
-  peopley text := '\m(profiles|profiles_public|profiles_public_rows|auth_core|collections|collection_items|tool_likes|reviews|review_removals|tool_claims|ownership_changes|tools|tool_problems)\M';
+    -- `reports` joined this list on 14 September 2026 with 0023. A report has a
+  -- reporter_id and a resolved_by, so a function that reached a report from a
+  -- search event would have reached a person — which is the one join §10
+  -- forbids. Adding the word here is what makes that a failure rather than a
+  -- convention.
+  peopley text := '\m(profiles|profiles_public|profiles_public_rows|auth_core|collections|collection_items|tool_likes|reviews|review_removals|tool_claims|ownership_changes|tools|tool_problems|reports)\M';
 begin
   for f in select * from pg_temp.admin_functions()
   loop
@@ -751,19 +793,34 @@ $$;
 -- it has one writer and one reader and a policy there would have to say
 -- `true`. So the privileges ARE the rule, and here they are read back.
 -- ===========================================================================
--- The privileges, read as the owner: naming infra.ops_events at all needs
--- USAGE on the schema, which is exactly what the application does not have.
+-- THIS SECTION ASSERTED THAT NOBODY HAD USAGE ON `infra` UNTIL 14 SEPTEMBER
+-- 2026 — the owner's item 10, and 0028. Two of the three now do, and the
+-- reason is that USAGE was never the boundary it was being read as.
+--
+-- USAGE on a schema grants the ability to WRITE A NAME in it. It grants no
+-- SELECT, no INSERT, no UPDATE, no DELETE and no EXECUTE. `foundit_app` and
+-- `foundit_embed` need it because 0024 grants them EXECUTE on two SECURITY
+-- DEFINER writers that LIVE in `infra` — the page-view counter and the spend
+-- ledger — and a function you may execute but may not name is a function you
+-- may not call: every page view came back `permission denied for schema
+-- infra` until 0028 fixed it.
+--
+-- So what is asserted below is the thing that actually is the boundary, and it
+-- is asserted harder than before: with USAGE and nothing else, not one of the
+-- three application roles can read, write or execute anything in here.
+-- `foundit_auth` has no business naming anything in `infra` at all and still
+-- does not.
 do $$
 declare bad text;
 begin
-  if has_schema_privilege('foundit_app', 'infra', 'usage') then
-    perform pg_temp.fail('foundit_app has USAGE on schema infra');
+  if not has_schema_privilege('foundit_app', 'infra', 'usage') then
+    perform pg_temp.fail('foundit_app cannot name the two writers 0024 grants it (0028)');
   end if;
-  if has_schema_privilege('foundit_embed', 'infra', 'usage') then
-    perform pg_temp.fail('foundit_embed has USAGE on schema infra');
+  if not has_schema_privilege('foundit_embed', 'infra', 'usage') then
+    perform pg_temp.fail('foundit_embed cannot name infra.add_spend, which the worker calls');
   end if;
   if has_schema_privilege('foundit_auth', 'infra', 'usage') then
-    perform pg_temp.fail('foundit_auth has USAGE on schema infra');
+    perform pg_temp.fail('foundit_auth has USAGE on schema infra and has nothing to do there');
   end if;
 
   select string_agg(format('%s:%s', g.role, v.verb), ', ') into bad
@@ -784,7 +841,9 @@ begin
 end
 $$;
 
--- And the application cannot reach it by trying, either.
+-- And the application cannot reach any of them by trying, either — which is
+-- the half that matters now that it can name them. Three tables, three
+-- refusals, all `insufficient_privilege` rather than an empty result.
 set role foundit_app;
 
 do $$
@@ -792,6 +851,26 @@ begin
   begin
     execute 'select 1 from infra.ops_events';
     perform pg_temp.fail('foundit_app read infra.ops_events');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    execute 'select 1 from infra.page_views_daily';
+    perform pg_temp.fail('foundit_app read infra.page_views_daily, so USAGE is doing more '
+                         'than letting it name the writer it is granted');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    execute 'select 1 from infra.spend_ledger';
+    perform pg_temp.fail('foundit_app read infra.spend_ledger');
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    execute 'insert into infra.page_views_daily (day, views) values (current_date, 1)';
+    perform pg_temp.fail('foundit_app wrote infra.page_views_daily around the writer, so '
+                         'the writer''s clamps are optional');
   exception when insufficient_privilege then null;
   end;
 end
@@ -1349,6 +1428,12 @@ declare
     -- The one operator panel that reads the search side, whose three columns
     -- §2's allowlist pins.
     'admin_catalogue_unmatched',
+    -- Filing a report and closing one (0023). public.reports has NO policy for
+    -- foundit_app at all — not a select, not an insert, not an update — so
+    -- these two are the only doors and both need the window to reach the
+    -- table. `file_report` reads auth.uid() itself; `resolve_report` checks
+    -- auth.is_admin() itself.
+    'file_report', 'resolve_report',
     -- And the public face of a profile, which is a view and therefore has
     -- nowhere of its own to carry the clause.
     'profiles_public_rows'

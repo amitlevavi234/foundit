@@ -204,6 +204,68 @@ export async function sendReviewRemoved(
   );
 }
 
+/* ===========================================================================
+ * A report — the owner's item 9, and the supervisor's decision of 14 September
+ * 2026.
+ *
+ * REPORTS ARE NOW BOTH RECORDED AND EMAILED. `docs/product-decisions.md` §5
+ * used to say "reports go to the team by email rather than into a queue", and
+ * the dashboard said, honestly, "Reports received — Not recorded". The email
+ * is what reaches a person; the row (`public.reports`, 0023) is what can be
+ * counted, listed and closed. Neither replaces the other and this is the half
+ * that reaches a person.
+ *
+ * IT GOES TO US AND NEVER TO THE PERSON REPORTED ON. `REPORT_EMAIL` is the
+ * team's own address — the same one the tool page's `mailto:` link has always
+ * used — and the reporter's own address is not in this message at all, because
+ * this product does not have it: `public.file_report` records `auth.uid()`,
+ * which is a profile id, and a handle is what the dashboard shows.
+ * ======================================================================== */
+export interface ReportNotice {
+  kind: string;
+  /** The listing's slug, the review's id, or the profile's handle. */
+  target: string;
+  reason: string;
+  details: string;
+  /** The row this is about, so the two can be matched up. Null if it failed. */
+  reportId: string | null;
+  /** The reporter's handle, or null when they were signed out. */
+  reporter: string | null;
+}
+
+/** Where a report goes. The team's own address, never a maker's. */
+export function reportAddress(): string {
+  return process.env.REPORT_EMAIL ?? 'reports@foundit.tools';
+}
+
+export async function sendReport(notice: ReportNotice): Promise<SendResult> {
+  const to = reportAddress();
+  const lines = [
+    `A ${notice.kind} was reported on Foundit.`,
+    '',
+    `What: ${notice.kind} ${notice.target}`,
+    `Recorded as: ${notice.reportId ?? 'NOT RECORDED — the write failed'}`,
+    `Reported by: ${notice.reporter ? `@${notice.reporter}` : 'somebody signed out'}`,
+    '',
+    `Reason: ${notice.reason}`,
+    ...(notice.details ? [`More: ${notice.details}`] : []),
+    '',
+    'It is on /admin/reviews under Reported until somebody resolves it.',
+    '',
+  ];
+  const body = lines.join('\n');
+
+  if (devCodeLoggingAllowed()) {
+    console.warn(
+      `[development] report notice for ${to} about ${notice.kind} ${notice.target} — ` +
+        'printed because AUTH_DEV_CODE_TO_LOG=1 and this is not production; nothing was sent',
+    );
+    return { delivered: true, reason: 'logged' };
+  }
+
+  return post(to, `Reported: ${notice.kind} ${notice.target}`, body);
+}
+
 /**
  * The transport. One recipient, four fields, one address, one request.
  *

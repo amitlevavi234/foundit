@@ -4,10 +4,10 @@ import { revalidatePath, revalidateTag } from 'next/cache';
 import { notFound, redirect } from 'next/navigation';
 
 import { currentViewer } from '@/lib/accounts';
-import { removeReview } from '@/lib/admin';
+import { removeReview, resolveReport } from '@/lib/admin';
 
 /* ===========================================================================
- * The one write the operator dashboard makes.
+ * The two writes the operator dashboard makes.
  *
  * NOTHING HERE DECIDES WHETHER THE REMOVAL MAY HAPPEN. `removeReview` sends
  * two ordinary statements as whoever is asking, and 0013's policy, 0013's
@@ -67,4 +67,42 @@ export async function removeReviewAction(formData: FormData): Promise<void> {
   revalidatePath('/admin/reviews');
   revalidatePath('/admin');
   redirect(`/admin/reviews?removed=${encodeURIComponent(reviewId)}&told=${outcome.told}`);
+}
+
+/* ---------------------------------------------------------------------------
+ * Closing a report — the owner's item 9, 14 September 2026.
+ *
+ * The same shape as the removal above and for the same reasons: the admin
+ * check is the FIRST thing that happens, before the report id is read, so a
+ * live id, a missing id, a signed-in non-administrator and a signed-out
+ * stranger with the action id are one answer, and that answer is the
+ * not-found page. `public.resolve_report` checks `auth.is_admin()` itself as
+ * well — this one is about what somebody SEES.
+ *
+ * THE NOTE IS OPTIONAL, which is the supervisor's decision. Most reports are
+ * closed by looking at the thing and finding it fine, and a mandatory
+ * paragraph saying so would be a paragraph nobody reads and everybody types.
+ * What is not optional is that closing it is RECORDED: who and when, on the
+ * row, and the row stays.
+ *
+ * NO `revalidateTag('catalogue')`. Resolving a report changes nothing a
+ * visitor can see — not a listing, not a review, not a count on a tool page.
+ * Only the two operator screens move.
+ * ------------------------------------------------------------------------ */
+export async function resolveReportAction(formData: FormData): Promise<void> {
+  const viewer = await currentViewer();
+  if (!viewer?.isAdmin) notFound();
+
+  const reportId = String(formData.get('report') ?? '');
+  const resolution = String(formData.get('resolution') ?? '');
+
+  const done = await resolveReport(reportId, resolution);
+
+  revalidatePath('/admin/reviews');
+  revalidatePath('/admin');
+  redirect(
+    done
+      ? '/admin/reviews?tab=reported&resolved=1'
+      : '/admin/reviews?tab=reported&problem=not-resolved',
+  );
 }

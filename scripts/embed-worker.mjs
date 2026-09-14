@@ -95,6 +95,8 @@ import {
 } from '../lib/embeddings.ts';
 import { EMBEDDINGS_WORKER_BATCH, EMBEDDING_DOCUMENT_TOKENS } from '../lib/prices.ts';
 import { mayEmbedTokens } from '../lib/rate-limit.ts';
+import { callCost } from '../lib/prices.ts';
+import { onSpend } from '../lib/spend-sink.ts';
 import { embedBatch } from './embed-batch.mjs';
 
 const EXIT = { OK: 0, CONFIG: 1, PROVIDER: 2, DATABASE: 3, LOCKED: 4 };
@@ -255,6 +257,42 @@ const pool = new pg.Pool({
 // with an unhandled rejection, and the message can carry the connection
 // string, so it is not re-raised anywhere it could reach a log.
 pool.on('error', () => {});
+
+/* ---------------------------------------------------------------------------
+ * THE SPEND LEDGER — the owner's item 10, 14 September 2026.
+ *
+ * `lib/embeddings.ts` announces every embedding request it makes through
+ * `lib/spend-sink.ts`, and reports it as `embed`. In this process it is not:
+ * `embed` is somebody searching and `worker` is the catalogue being filled,
+ * and the whole reason the ledger has four kinds rather than three is that a
+ * month where one of those doubled and the other did not is the thing the
+ * Money panel is for. Which one it is is a fact about the PROCESS, so the
+ * process is what decides it — that is why the sink takes the kind and
+ * overrides it here rather than the library guessing.
+ *
+ * The connection is this worker's own (`foundit_embed`), which 0024 grants
+ * execute on `infra.add_spend` for exactly this. Fire and forget with a
+ * warning: a worker that fell over because the bookkeeping failed would stop
+ * embedding, which is worse than a number that is too low.
+ * ------------------------------------------------------------------------ */
+onSpend((_kind, requests, tokensIn, tokensOut) => {
+  const day = new Date().toISOString().slice(0, 10);
+  pool
+    .query(
+      'select infra.add_spend($1::date, $2::text, $3::bigint, $4::bigint, $5::bigint, $6::numeric)',
+      [
+        day,
+        'worker',
+        requests,
+        tokensIn,
+        tokensOut,
+        callCost('worker', tokensIn, tokensOut).toFixed(8),
+      ],
+    )
+    .catch((error) => {
+      process.stderr.write(`worker spend was not recorded: ${reasonOf(error)}\n`);
+    });
+});
 
 const started = Date.now();
 let stopping = false;

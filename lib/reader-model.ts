@@ -60,6 +60,7 @@
  * a copy of it in a provider's dashboard would undo that at the far end.
  */
 
+import { reportSpend } from './spend-sink.ts';
 import type { Platform, PricingModel, ToolFlag } from './types';
 
 /** The one address. Not a base URL, not a template, not configurable. */
@@ -955,10 +956,25 @@ export async function readSentence(sentence: string): Promise<ReaderResult | nul
         (secondary?.reading.english.trim() ? secondary.reading.english : null) ??
         '');
 
+  const tokensIn = (primary?.tokensIn ?? 0) + (secondary?.tokensIn ?? 0);
+  const tokensOut = (primary?.tokensOut ?? 0) + (secondary?.tokensOut ?? 0);
+
+  // THE SPEND LEDGER — the owner's item 10, 14 September 2026. Here rather
+  // than in `readSentenceOrThrow` because a READING is the unit that was paid
+  // for: two samples and a vote. The request count is how many of the two
+  // actually came back, and `primary`/`secondary` are null exactly when one
+  // did not — a sample that failed still cost a request, which is why this
+  // counts them rather than writing 2.
+  //
+  // `reportSpend` does nothing unless somebody installed a sink, which is what
+  // keeps this module importable by `eval/run.mjs` with no Next runtime around
+  // it. lib/spend-sink.ts imports nothing at all.
+  reportSpend('reader', (primary ? 1 : 0) + (secondary ? 1 : 0), tokensIn, tokensOut);
+
   return {
     reading: { ...chosen.reading, asksForSoftware: !corroborated, english },
     model: chosen.model,
-    tokensIn: (primary?.tokensIn ?? 0) + (secondary?.tokensIn ?? 0),
-    tokensOut: (primary?.tokensOut ?? 0) + (secondary?.tokensOut ?? 0),
+    tokensIn,
+    tokensOut,
   };
 }

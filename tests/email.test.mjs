@@ -18,7 +18,19 @@ import {
   sendSignInCode,
 } from '../lib/email.ts';
 
-const KEYS = ['RESEND_API_KEY', 'EMAIL_FROM', 'AUTH_DEV_CODE_TO_LOG', 'NODE_ENV'];
+// `REPORT_EMAIL` joined this list on 14 September 2026 — the owner's item 9.
+// It is where a report goes, and it moved into lib/email.ts from
+// app/tools/[slug]/page.tsx when the tool page's `mailto:` became a link to
+// /report: the address belongs beside the transport that uses it, and the
+// assertion below is that every environment variable this module reads is
+// read through a named constant and never written anywhere.
+const KEYS = [
+  'RESEND_API_KEY',
+  'EMAIL_FROM',
+  'AUTH_DEV_CODE_TO_LOG',
+  'NODE_ENV',
+  'REPORT_EMAIL',
+];
 
 /** Run `fn` with the environment set to exactly `env`, then put it all back. */
 async function withEnv(env, fn) {

@@ -59,7 +59,37 @@ export const DASHBOARD_SQL = `
        from public.admin_words($1::int) x)                             as words,
     (select coalesce(jsonb_agg(to_jsonb(x) order by x.kind), '[]'::jsonb)
        from public.admin_ops_events() x)                               as ops,
+    -- THE OWNER'S ITEM 10, 14 September 2026. Six more panels on the same
+    -- round trip, which is the whole point of this statement's shape: a
+    -- dashboard that asked once per panel would be seventeen queries by now.
+    (select coalesce(jsonb_agg(to_jsonb(x) order by x.day), '[]'::jsonb)
+       from public.admin_active_accounts($1::int) x)                   as active,
+    (select coalesce(jsonb_agg(to_jsonb(x) order by x.day), '[]'::jsonb)
+       from public.admin_new_tools($1::int) x)                         as new_tools,
+    (select coalesce(jsonb_agg(to_jsonb(x) order by x.day), '[]'::jsonb)
+       from public.admin_page_views($1::int) x)                        as views,
+    (select coalesce(jsonb_agg(to_jsonb(x) order by x.day), '[]'::jsonb)
+       from public.admin_spend($1::int) x)                             as spend,
+    (select to_jsonb(x) from public.admin_spend_totals(1) x)           as spend_totals,
+    -- THE OWNER'S ITEM 9: the two figures the Words panel used to say were
+    -- "Not recorded".
+    (select to_jsonb(x) from public.admin_report_counts($1::int) x)    as report_counts,
     public.admin_database_bytes()                                      as database_bytes`;
+
+/** The Reported tab: every report, unresolved first, with its review. */
+export const ADMIN_REPORTS_SQL = `
+  select coalesce(
+           (select jsonb_agg(to_jsonb(x)) from public.admin_reports($1::int) x),
+           '[]'::jsonb
+         ) as rows`;
+
+/** Filing one. The reporter is read inside the function, never passed in. */
+export const FILE_REPORT_SQL = `
+  select public.file_report($1::text, $2::text, $3::text, $4::text) as id`;
+
+/** Closing one. */
+export const RESOLVE_REPORT_SQL = `
+  select public.resolve_report($1::bigint, $2::text) as done`;
 
 /** Every review, newest first, for /admin/reviews. */
 export const ADMIN_REVIEWS_SQL = `
@@ -265,6 +295,14 @@ export interface Dashboard {
   words: WordsDay[];
   ops: OpsEvent[];
   databaseBytes: number;
+  /* --- the owner's item 10, 14 September 2026 --------------------------- */
+  active: ActiveDay[];
+  newTools: NewToolsDay[];
+  views: ViewsDay[];
+  spend: SpendDay[];
+  spendTotals: SpendTotals;
+  /* --- the owner's item 9 ----------------------------------------------- */
+  reports: ReportCounts;
 }
 
 /**
@@ -285,6 +323,76 @@ export interface Dashboard {
  * data, which is the same category 0015 took `auth.is_admin()` out of
  * `collections_read` for.
  */
+/** Accounts whose `last_seen_day` is that day. See admin_active_accounts. */
+export interface ActiveDay {
+  day: string;
+  seen: number;
+}
+
+export interface NewToolsDay {
+  day: string;
+  added: number;
+  published: number;
+}
+
+export interface ViewsDay {
+  day: string;
+  views: number;
+  /**
+   * Whether anything was counting that day at all.
+   *
+   * It is the difference between "no visits" and "no counter", and the panel
+   * draws them differently — §10's rule that nothing shows a 0 where the truth
+   * is "not recorded".
+   */
+  recording: boolean;
+}
+
+/** What each of the four paid paths cost on one day, in dollars. */
+export interface SpendDay {
+  day: string;
+  reader: number;
+  rerank: number;
+  embed: number;
+  worker: number;
+}
+
+export interface SpendTotals {
+  monthToDate: number;
+  allTime: number;
+  requests: number;
+  /** Null until something has been recorded. The panel keys off this. */
+  firstDay: string | null;
+}
+
+export interface ReportCounts {
+  /** Filed inside the window the panel is headed with. */
+  received: number;
+  /** Unresolved right now, with no window — a backlog does not have one. */
+  open: number;
+}
+
+/**
+ * One report, with the review it is about when it is about one.
+ *
+ * The review rides along because `admin_reviews` pages over every review ever
+ * written and a reported one is not necessarily on the page the Reported tab
+ * is showing. Everybody here is a handle: reporter, resolver, author.
+ */
+export interface AdminReport {
+  id: string;
+  kind: 'review' | 'tool' | 'profile';
+  target: string;
+  reason: string;
+  details: string | null;
+  reporter: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  resolution: string | null;
+  review: AdminReview | null;
+}
+
 export interface AdminReview {
   id: string;
   toolSlug: string;
@@ -397,6 +505,37 @@ export function toDashboard(row: Record<string, unknown> | undefined): Dashboard
       at: maybe(o.at),
     })),
     databaseBytes: num(row?.database_bytes),
+
+    active: list(row?.active).map((a) => ({ day: text(a.day), seen: num(a.seen) })),
+    newTools: list(row?.new_tools).map((t) => ({
+      day: text(t.day),
+      added: num(t.added),
+      published: num(t.published),
+    })),
+    views: list(row?.views).map((v) => ({
+      day: text(v.day),
+      views: num(v.views),
+      // `=== true` and never a truthy cast: an absent flag is "nothing was
+      // counting", which is the value the panel turns into a gap rather than
+      // into a zero.
+      recording: v.recording === true,
+    })),
+    spend: list(row?.spend).map((s) => ({
+      day: text(s.day),
+      // `numeric` arrives from node-pg as a STRING, on purpose — it is the
+      // driver refusing to lose precision on a type JavaScript has no room
+      // for. `num` is what turns it into the number the chart needs, and a
+      // reader'S $0.00016 survives it.
+      reader: num(s.reader),
+      rerank: num(s.rerank),
+      embed: num(s.embed),
+      worker: num(s.worker),
+    })),
+    spendTotals: toSpendTotals(row?.spend_totals),
+    reports: {
+      received: num((row?.report_counts as Record<string, unknown> | undefined)?.received),
+      open: num((row?.report_counts as Record<string, unknown> | undefined)?.open),
+    },
   };
 }
 
@@ -406,6 +545,66 @@ function toSentence(s: Record<string, unknown>): Sentence {
     searches: num(s.searches),
     lastAt: maybe(s.last_at),
   };
+}
+
+/**
+ * The spend totals, and the one field that decides what the panel says.
+ *
+ * `first_day` is null until the ledger has a row. The panel keys off it rather
+ * than off `all_time === 0`, because zero dollars recorded and no dollars ever
+ * recorded are two different facts and §10 forbids drawing the second as the
+ * first.
+ */
+export function toSpendTotals(value: unknown): SpendTotals {
+  const t = (value ?? {}) as Record<string, unknown>;
+  return {
+    monthToDate: num(t.month_to_date),
+    allTime: num(t.all_time),
+    requests: num(t.requests),
+    firstDay: maybe(t.first_day),
+  };
+}
+
+/**
+ * Reports, with the review inlined when there is one.
+ *
+ * `review` is null for a report about a tool or a profile — their targets are
+ * not review ids and `admin_reports` leaves every review column null for them
+ * (0027). `review_id` being null is the one test for that, and it is the
+ * database's answer rather than this function re-deciding it from `kind`.
+ */
+export function toAdminReports(value: unknown): AdminReport[] {
+  return list(value).map((r) => {
+    const kind = text(r.kind);
+    return {
+      id: String(r.report_id ?? ''),
+      kind: kind === 'review' || kind === 'tool' || kind === 'profile' ? kind : 'tool',
+      target: text(r.target),
+      reason: text(r.reason),
+      details: maybe(r.details),
+      reporter: maybe(r.reporter),
+      createdAt: text(r.created_at),
+      resolvedAt: maybe(r.resolved_at),
+      resolvedBy: maybe(r.resolved_by),
+      resolution: maybe(r.resolution),
+      review:
+        r.review_id === null || r.review_id === undefined
+          ? null
+          : {
+              id: String(r.review_id),
+              toolSlug: text(r.tool_slug),
+              toolName: text(r.tool_name),
+              handle: text(r.handle),
+              rating: num(r.rating),
+              body: maybe(r.body),
+              createdAt: text(r.review_created_at),
+              removedByAdminAt: maybe(r.removed_by_admin_at),
+              authorDeletedAt: maybe(r.author_deleted_at),
+              removalReason: null,
+              removedBy: null,
+            },
+    };
+  });
 }
 
 export function toAdminReviews(value: unknown): AdminReview[] {
@@ -492,5 +691,43 @@ export function reasonProblem(raw: string): ReasonProblem {
   const reason = cleanReason(raw);
   if (reason.length < MIN_REMOVAL_REASON) return 'short';
   if (reason.length > MAX_REMOVAL_REASON) return 'long';
+  return null;
+}
+
+/* ===========================================================================
+ * The reason a REPORT needs — the owner's item 9, 14 September 2026
+ *
+ * The same numbers and the same cleaning as a removal reason, because they are
+ * the same kind of thing: a sentence somebody typed that an operator will read
+ * later, stored beside a CHECK built on `public.control_character_class()`.
+ * Eight characters is `reports_reason_length`'s own number rather than a
+ * second opinion about it, and `cleanText` is the same strip the CHECK
+ * mirrors, so the form and the database cannot come to different answers.
+ *
+ * `details` is optional and longer, and is cleaned the same way. A report with
+ * eight characters of reason and nothing else is a valid report — "spam" is
+ * not, and that is the whole of why the minimum exists.
+ * ======================================================================== */
+export const MIN_REPORT_REASON = 8;
+export const MAX_REPORT_REASON = 500;
+export const MAX_REPORT_DETAILS = 2000;
+
+export const REPORT_KINDS = ['review', 'tool', 'profile'] as const;
+export type ReportKind = (typeof REPORT_KINDS)[number];
+
+export function isReportKind(value: string): value is ReportKind {
+  return (REPORT_KINDS as readonly string[]).includes(value);
+}
+
+/** What the form will actually send: cleaned, never the raw bytes. */
+export function cleanReportText(raw: string, max: number): string {
+  return cleanText(raw).slice(0, max);
+}
+
+/** Is this a reason `public.file_report` will accept? The page asks first. */
+export function reportReasonProblem(raw: string): ReasonProblem {
+  const reason = cleanReportText(raw, MAX_REPORT_REASON + 1);
+  if (reason.length < MIN_REPORT_REASON) return 'short';
+  if (reason.length > MAX_REPORT_REASON) return 'long';
   return null;
 }

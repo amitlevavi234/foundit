@@ -41,6 +41,37 @@
   /* Text on a filled coral or violet surface. */
   --c-on-fill: #ffffff;
 
+  /* --- Chart series, and the one place a colour here is not off an artboard
+   * --------------------------------------------------------------------------
+   * THE OPERATOR DASHBOARD'S FOUR-SERIES STACK — the owner's item 10, 14
+   * September 2026. The Money panel draws four kinds of paid call in one
+   * stacked bar, and four series need four hues that a person with any common
+   * colour blindness can still tell apart.
+   *
+   * Violet and coral are the site's own structural and action colours and are
+   * slots 1 and 2 unchanged. The catalogue has no third and fourth that work:
+   * `--c-lime` and `--c-amber` are both too light to sit on white (they fail
+   * the lightness band and the 3:1 contrast floor) and `--c-muted` has almost
+   * no chroma, which reads as grey rather than as a series. So two chart-only
+   * steps, and they were not chosen by eye:
+   *
+   *   node scripts/validate_palette.js "#6e4bf6,#ff5a3c,#00a396,#9c6b00"    *     --mode light --surface "#ffffff"
+   *
+   *   [PASS] Lightness band     all 4 inside L 0.43-0.77
+   *   [PASS] Chroma floor       all 4 >= 0.1
+   *   [PASS] CVD separation     worst adjacent teal<->coral dE 13.2 (protan)
+   *   [PASS] Normal-vision      worst adjacent ochre<->teal dE 20.3
+   *   [PASS] Contrast           all 4 >= 3:1
+   *
+   * They are used in the charts and NOWHERE ELSE: nothing in the product's own
+   * interface is teal or ochre, and a colour that appeared on a card as well
+   * would stop reading as "this series".
+   */
+  --c-chart-1: var(--c-violet);
+  --c-chart-2: var(--c-coral);
+  --c-chart-3: #00a396;
+  --c-chart-4: #9c6b00;
+
   /* --- Type ------------------------------------------------------------- */
   --font-display: var(--font-bricolage), 'Bricolage Grotesque', 'Segoe UI', system-ui, sans-serif;
   --font-body: var(--font-onest), Onest, 'Segoe UI', system-ui, sans-serif;

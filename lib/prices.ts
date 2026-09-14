@@ -361,3 +361,43 @@ export function costOf(usage: Usage): Cost {
 export function generationCost(tokensIn: number, tokensOut: number): number {
   return (tokensIn * GENERATOR_INPUT_PER_MTOK + tokensOut * GENERATOR_OUTPUT_PER_MTOK) / 1e6;
 }
+
+/* ===========================================================================
+ * What ONE call cost — the owner's item 10, 14 September 2026
+ *
+ * `costOf` above prices a set of totals for an evaluation run. The spend
+ * ledger needs the other shape: one call, at the moment it returns, from the
+ * token counts the provider itself reported. Same constants, same arithmetic,
+ * one call's worth — so a price change is one edit and the ledger and the
+ * evaluation cannot come to different dollars for the same tokens.
+ *
+ * WHAT IS NOT MODELLED HERE, said out loud because the Money panel's caption
+ * says it too: cached input. The reader's price list has a cached-input rate a
+ * tenth of the ordinary one, and the provider's usage field reports how much
+ * of the input was cached — but `lib/reader-model.ts` does not read that
+ * field, so this prices every input token at the full rate. The ledger is
+ * therefore an UPPER BOUND on the reader, never an understatement, which is
+ * the direction a bill should be wrong in.
+ * ======================================================================== */
+
+export type PaidCall = 'reader' | 'rerank' | 'embed' | 'worker';
+
+/** What one call of each kind cost, from its own reported token counts. */
+export function callCost(kind: PaidCall, tokensIn: number, tokensOut: number): number {
+  const input = Number.isFinite(tokensIn) && tokensIn > 0 ? tokensIn : 0;
+  const output = Number.isFinite(tokensOut) && tokensOut > 0 ? tokensOut : 0;
+  switch (kind) {
+    case 'reader':
+      return (input * READER_INPUT_PER_MTOK + output * READER_OUTPUT_PER_MTOK) / 1e6;
+    case 'rerank':
+      return (input * RERANK_INPUT_PER_MTOK + output * RERANK_OUTPUT_PER_MTOK) / 1e6;
+    // Both embedding paths are the same model at the same price. They are two
+    // kinds in the ledger rather than one because they are two different
+    // stories about the bill: `embed` is somebody searching and `worker` is
+    // the catalogue being filled, and a month where one doubled and the other
+    // did not is exactly what the panel is for.
+    case 'embed':
+    case 'worker':
+      return (input * EMBEDDING_INPUT_PER_MTOK) / 1e6;
+  }
+}

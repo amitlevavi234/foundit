@@ -3,23 +3,33 @@ import 'server-only';
 import { cache } from 'react';
 
 import {
+  ADMIN_REPORTS_SQL,
   ADMIN_REVIEWS_SQL,
   AUTHOR_ADDRESS_SQL,
   CATALOGUE_DAYS,
   DASHBOARD_DAYS,
   DASHBOARD_SQL,
   LIST_LIMIT,
+  FILE_REPORT_SQL,
+  MAX_REPORT_DETAILS,
+  MAX_REPORT_REASON,
   MY_REMOVALS_SQL,
   RECORD_REMOVAL_SQL,
   REMOVE_REVIEW_SQL,
+  RESOLVE_REPORT_SQL,
   cleanReason,
+  cleanReportText,
   reasonProblem,
+  reportReasonProblem,
+  toAdminReports,
   toAdminReviewPage,
   toDashboard,
   toMyRemovals,
+  type AdminReport,
   type AdminReviewPage,
   type Dashboard,
   type MyRemoval,
+  type ReportKind,
 } from './admin-sql';
 import { currentUserId } from './accounts';
 import { authPool } from './auth-db';
@@ -285,4 +295,99 @@ async function tell(
   if (sent.reason === 'not-configured') return 'not-configured';
   console.error(`a review-removal notice was not delivered (${sent.reason})`);
   return 'not-configured';
+}
+
+/* ===========================================================================
+ * Reports — the owner's item 9, and the supervisor's decision of 14 September
+ * 2026.
+ *
+ * §5 used to say "reports go to the team by email rather than into a queue",
+ * and the dashboard said so honestly: "Reports received — Not recorded". A
+ * report is now BOTH. `/report` writes one here and still sends the email; the
+ * email is what reaches a person, and this is what can be counted, listed and
+ * closed.
+ *
+ * The same two rules as everything else in this file. Nothing here decides who
+ * may do what: `public.file_report` reads `auth.uid()` itself and
+ * `public.resolve_report` checks `auth.is_admin()` itself, and neither
+ * believes an argument about who is calling. And a refusal is `null` or
+ * `false` rather than a sentence that tells a stranger what exists.
+ * ======================================================================== */
+
+/**
+ * File one report. The id, or null if the database refused it.
+ *
+ * THE REPORTER IS NOT AN ARGUMENT and cannot be: `file_report` reads
+ * `auth.uid()` inside the transaction this opens, which is the only place the
+ * answer is not a claim. A signed-out report is a report with no reporter, not
+ * a refusal — a sign-in wall in front of "this listing is wrong" is a wall in
+ * front of the reports most worth having.
+ *
+ * The text is cleaned HERE as well as in the function, for the reason
+ * `cleanReason` gives: a form that sends what the database refuses is a form
+ * that shows somebody a constraint name.
+ */
+export async function fileReport(
+  kind: ReportKind,
+  target: string,
+  reason: string,
+  details: string,
+): Promise<string | null> {
+  if (reportReasonProblem(reason)) return null;
+  const cleanedReason = cleanReportText(reason, MAX_REPORT_REASON);
+  const cleanedDetails = cleanReportText(details, MAX_REPORT_DETAILS);
+
+  return asViewer(async (tx) => {
+    try {
+      const { rows } = await tx.query(FILE_REPORT_SQL, [
+        kind,
+        target,
+        cleanedReason,
+        cleanedDetails === '' ? null : cleanedDetails,
+      ]);
+      const id = (rows[0] as { id?: unknown } | undefined)?.id;
+      return id === undefined || id === null ? null : String(id);
+    } catch (error) {
+      refused(error);
+      return null;
+    }
+  });
+}
+
+/**
+ * Every report, unresolved first and newest first, with the review it is
+ * about. Null for everybody who is not an administrator.
+ */
+export const reports = cache(async (limit = LIST_LIMIT): Promise<AdminReport[] | null> => {
+  return asViewer(async (tx) => {
+    try {
+      const { rows } = await tx.query(ADMIN_REPORTS_SQL, [limit]);
+      return toAdminReports((rows[0] as { rows?: unknown } | undefined)?.rows);
+    } catch (error) {
+      refused(error);
+      return null;
+    }
+  });
+});
+
+/**
+ * Close one. False when the id is unknown, when it was already closed, and
+ * when the caller is not an administrator — three outcomes and one answer, for
+ * the reason `removeReview`'s `RemovalOutcome` gives at length: an error that
+ * distinguished them would tell a stranger which report ids exist.
+ */
+export async function resolveReport(reportId: string, resolution: string): Promise<boolean> {
+  const id = Number.parseInt(reportId, 10);
+  if (!Number.isSafeInteger(id) || id <= 0) return false;
+  const note = cleanReportText(resolution, MAX_REPORT_REASON);
+
+  return asViewer(async (tx) => {
+    try {
+      const { rows } = await tx.query(RESOLVE_REPORT_SQL, [id, note === '' ? null : note]);
+      return (rows[0] as { done?: unknown } | undefined)?.done === true;
+    } catch (error) {
+      refused(error);
+      return false;
+    }
+  });
 }

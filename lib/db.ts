@@ -617,3 +617,60 @@ export async function databaseAnswers(timeoutMs = 2_000): Promise<boolean> {
     if (timer) clearTimeout(timer);
   }
 }
+
+/* ===========================================================================
+ * The two ledgers behind the Visits and Money panels — the owner's item 10.
+ *
+ * Both are one statement through a definer in `infra` (0024), and both are
+ * FIRE AND FORGET with a logged warning. Neither is allowed to fail a page:
+ * the brief's words are "a failure to record spend must never fail a search",
+ * and the same is true of a page view. What is lost when one fails is a
+ * number on a dashboard; what would be lost if it threw is somebody's answer.
+ *
+ * They log where `storeQueryEmbedding` above is silent, and the difference is
+ * what is in the arguments. That one carries the sentence somebody typed, so
+ * the only thing worth logging is the one thing that must never be logged.
+ * These carry a date and an integer, so a warning costs nothing and a counter
+ * that has quietly stopped writing is exactly the failure a dashboard cannot
+ * show you.
+ * ======================================================================== */
+
+/** `infra.add_page_views(day, n)`. A day and a number; there is no third argument. */
+export function recordPageViews(day: string, views: number): void {
+  if (!Number.isFinite(views) || views <= 0) return;
+  void getPool()
+    .query('select infra.add_page_views($1::date, $2::int)', [day, Math.round(views)])
+    .catch((error: unknown) => {
+      console.warn(`page views for ${day} were not recorded: ${String(error)}`);
+    });
+}
+
+export type SpendKind = 'reader' | 'rerank' | 'embed' | 'worker';
+
+/** `infra.add_spend(...)`. One paid call's usage, priced at the call site. */
+export function recordSpend(
+  day: string,
+  kind: SpendKind,
+  requests: number,
+  inputTokens: number,
+  outputTokens: number,
+  usd: number,
+): void {
+  void getPool()
+    .query(
+      'select infra.add_spend($1::date, $2::text, $3::bigint, $4::bigint, $5::bigint, $6::numeric)',
+      [
+        day,
+        kind,
+        Math.max(0, Math.round(requests)),
+        Math.max(0, Math.round(inputTokens)),
+        Math.max(0, Math.round(outputTokens)),
+        // A string, not a number: `numeric` is what the column is, and a
+        // float going through JSON is how $0.00016 becomes $0.00015999999.
+        Number.isFinite(usd) ? Math.max(0, usd).toFixed(8) : '0',
+      ],
+    )
+    .catch((error: unknown) => {
+      console.warn(`${kind} spend for ${day} was not recorded: ${String(error)}`);
+    });
+}

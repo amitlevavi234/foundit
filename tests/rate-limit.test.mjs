@@ -24,6 +24,8 @@ import {
   DEFAULT_EMBEDDING_CALLS_PER_DAY,
   DEFAULT_EMBEDDING_TOKENS_PER_DAY,
   DEFAULT_OPENS_PER_DAY,
+  DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR,
+  DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY,
   DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_RERANK_CALLS_PER_DAY,
@@ -267,6 +269,8 @@ test('the limits come from the environment, with the documented defaults', () =>
     MAX_SAVES_PER_ACCOUNT_PER_HOUR: process.env.MAX_SAVES_PER_ACCOUNT_PER_HOUR,
     MAX_OPENS_PER_VISITOR_PER_HOUR: process.env.MAX_OPENS_PER_VISITOR_PER_HOUR,
     MAX_OPENS_PER_DAY: process.env.MAX_OPENS_PER_DAY,
+    MAX_REPORTS_PER_ADDRESS_PER_HOUR: process.env.MAX_REPORTS_PER_ADDRESS_PER_HOUR,
+    MAX_REPORTS_PER_ACCOUNT_PER_DAY: process.env.MAX_REPORTS_PER_ACCOUNT_PER_DAY,
   };
   try {
     for (const name of Object.keys(saved)) delete process.env[name];
@@ -288,6 +292,11 @@ test('the limits come from the environment, with the documented defaults', () =>
       savesPerAccountPerHour: DEFAULT_SAVES_PER_ACCOUNT_PER_HOUR,
       opensPerVisitorPerHour: DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
       opensPerDay: DEFAULT_OPENS_PER_DAY,
+      // The owner's item 9, 14 September 2026: /report writes a row as well as
+      // sending an email, so it needs a bound, and reporting is open to a
+      // signed-out visitor so one of the two has to be the address.
+      reportsPerAddressPerHour: DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR,
+      reportsPerAccountPerDay: DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY,
     });
     // Phase 7's review. The embedder has two ceilings now, and the second is
     // the one that is about the money: MAX_EMBEDDING_CALLS_PER_DAY counts
