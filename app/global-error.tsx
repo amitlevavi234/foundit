@@ -1,6 +1,5 @@
 'use client';
 
-import * as Sentry from '@sentry/nextjs';
 import { useEffect } from 'react';
 
 /* ===========================================================================
@@ -17,6 +16,15 @@ import { useEffect } from 'react';
  * about. `Sentry.captureException` goes through the same `beforeSend` as
  * everything else (lib/sentry-scrub.ts) and is inert without a DSN.
  *
+ * THE SDK IS IMPORTED HERE AND NOT AT THE TOP OF THE FILE — the owner's item
+ * 3, 14 September 2026. A static `import * as Sentry from '@sentry/nextjs'`
+ * in a client component puts a hundred kilobytes of SDK into the bundle of
+ * every page that could ever render this boundary, which is all of them, to
+ * cover a case that by definition has already gone wrong. `instrumentation-
+ * client.ts` has usually loaded it by now anyway, in which case this `import()`
+ * resolves from the module cache and costs a microtask; where it has not, the
+ * page is already broken and one more fetch is not what is wrong with it.
+ *
  * IT SAYS NOTHING ABOUT WHAT WAS TYPED, exactly as app/error.tsx does not:
  * no query, no digest in the body, no `error.message` on the page. A stack
  * trace on a public error page is free reconnaissance, and on /results it
@@ -27,7 +35,11 @@ import { useEffect } from 'react';
  * ======================================================================== */
 export default function GlobalError({ error }: { error: Error & { digest?: string } }) {
   useEffect(() => {
-    Sentry.captureException(error);
+    // Fire and forget, and swallowed: a reporter that threw inside the error
+    // page would replace a page that says something with a blank one.
+    void import('@sentry/nextjs')
+      .then((Sentry) => Sentry.captureException(error))
+      .catch(() => {});
   }, [error]);
 
   return (

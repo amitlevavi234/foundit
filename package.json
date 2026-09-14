@@ -8,7 +8,7 @@
     "node": ">=26.0.0"
   },
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs",
     "build": "next build",
     "postbuild": "node scripts/postbuild-standalone.mjs",
     "start": "node scripts/start.mjs",
