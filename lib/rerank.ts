@@ -52,6 +52,7 @@
 import { createHash } from 'node:crypto';
 
 import { ReaderError, callResponses, capText } from './reader-model.ts';
+import { reportSpend } from './spend-sink.ts';
 
 /** The model. The same one that reads the sentence, and for the same reason. */
 export const RERANK_MODEL = 'gpt-5-nano';
@@ -740,9 +741,32 @@ export function relevanceOf(judgement: RerankJudgement | null, slug: string): 0 
  * percentage and a stronger one than "your words turned up here", and these
  * three words are the whole of it.
  */
+/**
+ * The three positions on the scale, said once, in the owner's own words.
+ *
+ * THE OWNER'S ITEM 2a. He asked for "a one-line legend that explains the three
+ * in the owner's words", and these are his words verbatim: "does exactly this /
+ * does part of it / same area". They are shorter and blunter than the notes
+ * above, which is the point — the note is what one card claims about one tool,
+ * and this is what the three words mean as a set. They live beside
+ * `relevanceBand` so that a later change to a band's meaning cannot leave the
+ * legend describing the old one.
+ *
+ * Loose is in the list although no card can carry it while `RERANK_SHOWN_FROM`
+ * is 2, for the same reason the band itself is kept: the scale is three points
+ * wide and a legend that showed two of them would be drawing a two-point
+ * scale under a three-bar meter. `/ranking` is where the fact that only two
+ * appear is spelled out.
+ */
+export const FIT_LEGEND: ReadonlyArray<{ steps: 1 | 2 | 3; label: string; means: string }> = [
+  { steps: 3, label: 'Strong', means: 'does exactly this' },
+  { steps: 2, label: 'Possible', means: 'does part of it' },
+  { steps: 1, label: 'Loose', means: 'same area — never shown' },
+];
+
 export function relevanceBand(
   relevance: 1 | 2 | 3,
-): { label: string; note: string; tone: 'both' | 'one' | 'name' } {
+): { label: string; note: string; tone: 'both' | 'one' | 'name'; steps: 1 | 2 | 3 } {
   switch (relevance) {
     case 3:
       // SOFTENED after the Phase 5 review. It used to read "this is what the
@@ -755,18 +779,28 @@ export function relevanceBand(
         label: 'Strong',
         note: 'Your sentence and this listing were read together, and this looked like a close match.',
         tone: 'both',
+        // THE SCALE, DRAWN — the owner's item 2a. Three of three. The words
+        // alone did not say that "Possible" was one step down from "Strong"
+        // rather than something unrelated to it, because a band is a word and
+        // a word carries no position. `steps` is the position, and it is on
+        // the JUDGED bands only: a location band (lib/results.ts's
+        // `matchBand`) is not a point on this scale and must never be drawn on
+        // it, which is what having no `steps` field enforces.
+        steps: 3,
       };
     case 2:
       return {
         label: 'Possible',
         note: 'Your sentence and this listing were read together: it does the job, perhaps as one part of a larger tool.',
         tone: 'one',
+        steps: 2,
       };
     default:
       return {
         label: 'Loose',
         note: 'Your sentence and this listing were read together: this is in the right area rather than an answer to it.',
         tone: 'name',
+        steps: 1,
       };
   }
 }
@@ -931,11 +965,25 @@ export async function rerankOrThrow(
     throw new ReaderError('every sample failed');
   }
 
+  const tokensIn = got.reduce((sum, g) => sum + g.tokensIn, 0);
+  const tokensOut = got.reduce((sum, g) => sum + g.tokensOut, 0);
+
+  // THE SPEND LEDGER — the owner's item 10, 14 September 2026. `got.length`
+  // rather than `RERANK_SAMPLES`: a sample that came back is a sample that was
+  // paid for, and one that did not is not necessarily one that was free — but
+  // it reported no tokens, so pricing it would be inventing a number. The
+  // requests column is therefore "samples that answered", which is what the
+  // token counts beside it are also from.
+  //
+  // `reportSpend` does nothing unless somebody installed a sink, which is what
+  // keeps this module importable by `eval/run.mjs` and `eval/calibrate.mjs`.
+  reportSpend('rerank', got.length, tokensIn, tokensOut);
+
   return {
     judgement: combineSamples(got.map((g) => g.judgement)),
     model: RERANK_MODEL,
-    tokensIn: got.reduce((sum, g) => sum + g.tokensIn, 0),
-    tokensOut: got.reduce((sum, g) => sum + g.tokensOut, 0),
+    tokensIn,
+    tokensOut,
     outs: got.map((g) => g.tokensOut),
     samples: got.length,
   };

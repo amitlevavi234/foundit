@@ -8,6 +8,7 @@ import { AccountPrompt } from '@/components/AccountPrompt';
 import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
 import { EmptyState } from '@/components/EmptyState';
+import { FitScale } from '@/components/FitScale';
 import { LikeControl, SaveControl } from '@/components/LibraryControls';
 import { Mark } from '@/components/Logo';
 import { LoadingLine } from '@/components/RouteLoading';
@@ -54,6 +55,7 @@ import {
   RERANK_TOP_N,
   applyRerank,
   candidatesHash,
+  FIT_LEGEND,
   hadGoodMatch,
   relevanceBand,
   relevanceOf,
@@ -957,6 +959,29 @@ async function Answer({
           <div style={{ marginBottom: 4 }}>
             <Link href="/ranking">How results are ranked</Link>
           </div>
+          {/* THE LEGEND — the owner's item 2a. Three words with no scale beside
+              them told him nothing about how far apart they were. The scale is
+              drawn on each card; this says what each of its three positions
+              means, in the owner's own words, once, under the link to the long
+              version. It is shown only where the bands ARE the judgement: on
+              an unjudged page the bands name a location, which is not a point
+              on this scale, and a fit legend over them would be the page
+              claiming a reading that did not happen. */}
+          {judged ? (
+            <div className="fitlegend">
+              {FIT_LEGEND.map((entry) => (
+                <span key={entry.label}>
+                  <FitScale steps={entry.steps} label={entry.label} />
+                  <span>
+                    <strong style={{ color: 'var(--c-ink)', fontWeight: 'var(--fw-semibold)' }}>
+                      {entry.label}
+                    </strong>{' '}
+                    {entry.means}
+                  </span>
+                </span>
+              ))}
+            </div>
+          ) : null}
           {browse ? (
             <>
               You gave constraints and no question, so these are in the catalogue’s own order,{' '}
@@ -1060,7 +1085,7 @@ async function Answer({
                 ? { satisfactions }
                 : { facts: factsOf(result).slice(0, 3) })}
               {...(result.ratingAvg !== null
-                ? { rating: result.ratingAvg.toFixed(1), ratingCount: String(result.ratingCount) }
+                ? { rating: result.ratingAvg, ratingCount: result.ratingCount }
                 : {})}
               {...(result.likeCount > 0 ? { likes: String(result.likeCount) } : {})}
               like={

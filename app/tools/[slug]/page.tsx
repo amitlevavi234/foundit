@@ -13,6 +13,7 @@ import { ReviewForm } from '@/components/ReviewForm';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { Stars } from '@/components/Stars';
+import { reviewCount } from '@/components/ToolCard';
 import { ToolTile } from '@/components/ToolTile';
 import { MAX_REVIEW_BODY, getToolViewerState } from '@/lib/accounts';
 import { emailCodeConfigured, googleConfigured } from '@/lib/auth';
@@ -99,22 +100,6 @@ function formatDate(value: string | null): string {
   return Number.isNaN(date.getTime()) ? '—' : DATE.format(date);
 }
 
-/**
- * Where a report goes.
- *
- * `docs/product-decisions.md` §5: "Reports go to the team by email rather than
- * into a queue." There is no queue, no report table and no moderation screen in
- * this phase — those are the deliberately deferred half of §5 — so the link is
- * a `mailto:`, which needs no account, no JavaScript and nothing built behind
- * it, and which is exactly as much machinery as the decision asks for.
- *
- * §5 names the channel but not the address, and this file is not the place to
- * invent one, so the address is an environment variable with the obvious
- * default on the domain §13 records (foundit.tools). Set REPORT_EMAIL and the
- * link follows it; the mailbox has to exist either way, which is an operations
- * fact rather than a code one.
- */
-const REPORT_EMAIL = process.env.REPORT_EMAIL ?? 'reports@foundit.tools';
 
 /** The five things the catalogue tracks about every tool (§8). */
 const TRACKED_FLAGS: ToolFlag[] = ['works_offline', 'no_account_needed', 'no_ads', 'exports_data'];
@@ -260,12 +245,12 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
                   <strong style={{ fontWeight: 700, fontSize: 18 }}>
                     {tool.ratingAvg.toFixed(1)}
                   </strong>
-                  <span className="muted">
-                    {tool.ratingCount} {tool.ratingCount === 1 ? 'rating' : 'ratings'}
-                  </span>
+                  <span className="muted">{reviewCount(tool.ratingCount)}</span>
                 </>
               ) : (
-                <span className="muted">No ratings yet</span>
+                /* No stars at all rather than five empty ones, and the count in
+                   words — the owner's item 2b. */
+                <span className="muted">No reviews yet</span>
               )}
               {/* The count is public and the attribution is not (0003): this
                   says how many, never who. */}
@@ -440,10 +425,10 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
 
           {/* --- what people made of it ------------------------------------- */}
           <section>
-            <h2 className="h2">Ratings</h2>
+            <h2 className="h2">Rating</h2>
             {tool.ratingCount === 0 ? (
               <p className="muted" style={{ margin: 0 }}>
-                Nobody has rated this yet. Ratings open with accounts.
+                No reviews yet. Reviews open with accounts.
               </p>
             ) : (
               <div
@@ -460,7 +445,7 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
                   </div>
                   <Stars rating={tool.ratingAvg ?? 0} size={18} />
                   <div className="muted" style={{ fontSize: 'var(--t-meta-sm)', marginTop: 6 }}>
-                    {tool.ratingCount} {tool.ratingCount === 1 ? 'rating' : 'ratings'}
+                    {reviewCount(tool.ratingCount)}
                   </div>
                 </div>
 
@@ -710,23 +695,19 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
             <span>{formatDate(tool.publishedAt ?? tool.createdAt)}</span>
             {/* The listing footer from docs/product-spec.md §"Tool detail":
                 "Suggest an edit · Report this listing · View change history".
-                Only the report is here, because only the report is decided for
-                this phase — §5 sends it to the team by email, with no account
-                and no queue behind it. Same tab, because a mailto: does not
-                navigate: components/OutboundLink.tsx is the only thing in this
-                codebase allowed to open a new one. */}
-            <a
-              href={`mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(
-                `Report a listing: ${tool.name} (${tool.slug})`,
-              )}&body=${encodeURIComponent(
-                `What is wrong with this listing?\n\n` +
-                  `(Dead or broken link · Wrong information · Spam or not really software · ` +
-                  `A duplicate of another listing · Something else)\n\n` +
-                  `Listing: ${tool.name}\n`,
-              )}`}
-            >
+                Only the report is here, because only the report is decided.
+
+                IT WAS A `mailto:` UNTIL 14 SEPTEMBER 2026 — the owner's item 9.
+                §5 said reports go to the team by email and are written down
+                nowhere, so the honest link was one that opened the reader's own
+                mail client. The supervisor's decision reverses that half: a
+                report is RECORDED as well as emailed (0023), so the link goes
+                to the form that does both, with the listing already filled in.
+                Same tab, and an ordinary link: components/OutboundLink.tsx is
+                the only thing in this codebase allowed to open a new one. */}
+            <Link href={`/report?kind=tool&target=${encodeURIComponent(tool.slug)}`}>
               Report this listing
-            </a>
+            </Link>
             <span className="faint">
               Someone on the team reads every report. No account needed.
             </span>

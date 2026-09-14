@@ -367,8 +367,8 @@ export default function ComponentSheet() {
                 { label: 'iOS and Android', met: true },
                 { label: 'No offline mode', met: false },
               ]}
-              rating="4.6"
-              ratingCount="812"
+              rating={4.6}
+              ratingCount={812}
               likes="218"
             />
             <ToolCard

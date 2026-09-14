@@ -4,9 +4,16 @@ import type { CSSProperties, ReactNode } from 'react';
 import { Button } from './Button';
 import { SatisfactionChip, Tag } from './Chip';
 import { FitMeter } from './FitMeter';
+import { FitScale } from './FitScale';
 import { Icon } from './Icon';
 import { OutboundButton, OutboundDomain } from './OutboundLink';
+import { Stars } from './Stars';
 import { ToolTile } from './ToolTile';
+
+/** "1 review", "12 reviews". The bracketed numeral the owner could not read. */
+export function reviewCount(n: number): string {
+  return n === 1 ? '1 review' : `${n} reviews`;
+}
 
 /**
  * The result card, from `resultCard()` in design/canvas/build.mjs.
@@ -55,7 +62,17 @@ export interface ToolCardProps {
    * Where it matched, in words — a location, never a rescaled score or a claim
    * about fit. See lib/results.ts. Drawn inside "Why this?", not on the card.
    */
-  band?: { label: string; note: string; tone: 'both' | 'one' | 'name' };
+  band?: {
+    label: string;
+    note: string;
+    tone: 'both' | 'one' | 'name';
+    /**
+     * Present only on a JUDGED band — Strong 3, Possible 2, Loose 1 — and it
+     * draws the three-bar scale beside the word (the owner's item 2a). A
+     * location band has no `steps`, so it cannot be drawn on a fit scale.
+     */
+    steps?: 1 | 2 | 3;
+  };
   /** A fact about the match, drawn inside "Why this?" under `whyLabel`. */
   why?: string;
   /**
@@ -72,8 +89,20 @@ export interface ToolCardProps {
    * nothing to meet when nothing was asked for.
    */
   facts?: string[];
-  rating?: string;
-  ratingCount?: string;
+  /**
+   * The average, 1 to 5, or undefined when nobody has reviewed this yet.
+   *
+   * NUMBERS RATHER THAN PRE-FORMATTED STRINGS since the owner's item 2b, 14
+   * September 2026. The card used to draw one coral star, the average, and the
+   * count in brackets — `4.0 (1)` — and the owner could not tell what the
+   * bracket counted or what the number was out of. Five stars drawn
+   * filled/empty answer the second question by being five, and the count is
+   * written out in words. Neither is possible from a string that has already
+   * been rounded and bracketed somewhere else, so the formatting lives here.
+   */
+  rating?: number;
+  /** How many reviews the average is made of. Zero means "No reviews yet". */
+  ratingCount?: number;
   likes?: string;
   /** The first result on the page is drawn larger and spans two columns. */
   big?: boolean;
@@ -166,6 +195,7 @@ export function ToolCard({
           <div className="whythis-body">
             {band ? (
               <div className={`band band-${band.tone}`}>
+                {band.steps ? <FitScale steps={band.steps} label={band.label} /> : null}
                 <span className="band-label">{band.label}</span>
                 <span>{band.note}</span>
               </div>
@@ -181,15 +211,18 @@ export function ToolCard({
 
       <div className="toolcard-foot">
         <div className="toolcard-stats tab">
-          {rating ? (
-            <span
-              style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--c-ink)' }}
-            >
-              <Icon name="star" size={15} color="var(--c-coral)" strokeWidth={2} />
-              <strong style={{ fontWeight: 'var(--fw-semibold)' }}>{rating}</strong>
-              {ratingCount ? <span className="muted">({ratingCount})</span> : null}
+          {typeof rating === 'number' && typeof ratingCount === 'number' && ratingCount > 0 ? (
+            <span className="toolcard-rating">
+              <Stars rating={rating} size={15} label={`${rating.toFixed(1)} out of 5`} />
+              <strong style={{ fontWeight: 'var(--fw-semibold)' }}>{rating.toFixed(1)}</strong>
+              <span className="muted">{reviewCount(ratingCount)}</span>
             </span>
-          ) : null}
+          ) : (
+            /* No stars at all rather than five empty ones. Five empty stars is
+               a rating of zero drawn in the shape of a rating, and nobody has
+               given this one. The owner's item 2b. */
+            <span className="muted">No reviews yet</span>
+          )}
           {like ??
             (likes ? (
               /* A span is not a control and takes no accessible name, so an
