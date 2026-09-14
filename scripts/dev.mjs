@@ -53,10 +53,23 @@
 //   HOSTNAME=0.0.0.0 npm run dev         -> the same, from the environment
 //   npm run dev -- --port 4000           -> the port, as before
 //
-// `??=` rather than `=`: an empty string is a deliberate value to Next (it
-// falls back to 0.0.0.0), and only an unset variable is us choosing. And a
-// `--hostname` on the command line is passed straight through and wins over
-// both, because somebody typing it means it.
+// AND IT IS PASSED AS `--hostname`, NOT SET AS AN ENVIRONMENT VARIABLE, which
+// is the difference between this file and `scripts/start.mjs` and is a fact
+// about Next rather than a preference. The standalone server reads
+// `process.env.HOSTNAME` itself, so setting it is enough there. `next dev` does
+// not: its CLI declares
+//
+//     .addOption(new Option('-p, --port <port>', …).env('PORT'))
+//     .option('-H, --hostname <hostname>', '… (default: 0.0.0.0)')
+//
+// — `--port` is bound to an environment variable and `--hostname` is not
+// (node_modules/next/dist/bin/next). Setting `HOSTNAME` therefore did nothing
+// at all, which was measured rather than assumed: `netstat` still showed
+// `0.0.0.0:3000` and the LAN address still answered 200.
+//
+// `HOSTNAME` in the environment is still honoured, as the value this passes.
+// A `--hostname` on the command line wins over both, because somebody typing
+// it means it.
 // ===========================================================================
 
 import { spawn } from 'node:child_process';
@@ -72,8 +85,15 @@ const askedForHost = argv.some(
   (arg) => arg === '-H' || arg === '--hostname' || arg.startsWith('--hostname='),
 );
 
-// Only where nobody said otherwise, in either of the two places they could.
-if (!askedForHost) process.env.HOSTNAME ??= '127.0.0.1';
+/**
+ * What to bind to, and the empty string is somebody's deliberate value.
+ *
+ * `??` rather than `||`: `HOSTNAME=''` in the environment means "let Next
+ * choose", the way `scripts/start.mjs` reads it, and only an UNSET variable is
+ * us choosing.
+ */
+const host = process.env.HOSTNAME ?? '127.0.0.1';
+const hostArgs = askedForHost || host === '' ? [] : ['--hostname', host];
 
 process.stdout.write(
   [
@@ -84,7 +104,7 @@ process.stdout.write(
     '  speed with `npm run build && npm start` and `node --env-file=.env.local',
     '  scripts/vitals.mjs`, which refuses to measure a dev server at all.',
     '',
-    `  It is bound to ${askedForHost ? 'the host you asked for' : `${process.env.HOSTNAME}, this machine only`}.`,
+    `  It is bound to ${hostArgs.length > 0 ? `${host}${host === '127.0.0.1' ? ', this machine only' : ''}` : 'the host you asked for'}.`,
     '  A dev server puts the reader\'s prompt and the provider\'s response',
     '  headers in the page source; pass `--hostname 0.0.0.0` if you mean to',
     '  serve that to the network.',
@@ -95,7 +115,7 @@ process.stdout.write(
 // `next` from the local install, and the arguments after `npm run dev --`
 // passed through so `npm run dev -- --port 4000` still works.
 const next = path.join(ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
-const child = spawn(process.execPath, [next, 'dev', ...argv], {
+const child = spawn(process.execPath, [next, 'dev', ...hostArgs, ...argv], {
   stdio: 'inherit',
   cwd: ROOT,
 });
