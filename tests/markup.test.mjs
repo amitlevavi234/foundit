@@ -520,16 +520,24 @@ test('each key is read from a named variable, and never written anywhere', () =>
       ['name'],
       /const KEY_VARIABLES = \['OPENAI_API_KEY', 'EMBEDDINGS_API_KEY'\] as const;/,
     ],
-    // The email client reads FOUR variables and reads each one by its literal
+    // The email client reads FIVE variables and reads each one by its literal
     // name rather than through `process.env[whatever]`, which is what lets
-    // this list be exhaustive: these four, in this order, and nothing else.
+    // this list be exhaustive: these five, in this order, and nothing else.
     // RESEND_API_KEY is the secret; EMAIL_FROM is the verified sender;
     // NODE_ENV and AUTH_DEV_CODE_TO_LOG are the pair that decides whether a
     // code may be printed to a log instead of sent, and BOTH are required, so
     // production cannot reach that path however the second one is set.
+    //
+    // REPORT_EMAIL joined the list on 14 September 2026 with the owner's item
+    // 9: it is where a report goes, and it moved here from
+    // app/tools/[slug]/page.tsx when that page's `mailto:` became a link to
+    // the /report form. It is an address rather than a secret, and it is in
+    // this test for the same reason the other four are — so that adding a
+    // fifth thing this module reads from the environment is a deliberate edit
+    // to a test rather than a line in a file nobody re-reads.
     [
       EMAIL_FILE,
-      ['RESEND_API_KEY', 'EMAIL_FROM', 'NODE_ENV', 'AUTH_DEV_CODE_TO_LOG'],
+      ['RESEND_API_KEY', 'EMAIL_FROM', 'NODE_ENV', 'AUTH_DEV_CODE_TO_LOG', 'REPORT_EMAIL'],
       /export const RESEND_URL = 'https:\/\/api\.resend\.com\/emails';/,
     ],
   ]) {
@@ -846,7 +854,11 @@ test('every page the footer promises exists, is unwritten out loud, and is noind
     'pricing',
     'privacy',
     'ranking',
-    'report',
+    // `report` WAS HERE until 14 September 2026 — the owner's item 9. It was
+    // an UnwrittenPage describing a reporting route that did not exist, and
+    // now it is the route: a form that writes to `public.reports` (0023) and
+    // emails the team. A page that has been built must not keep claiming it
+    // has not been.
     'security',
     'terms',
   ];
@@ -970,18 +982,28 @@ test('the submit flow never fetches what somebody typed, and says so', () => {
   }
 });
 
-test('the required tick is disabled in the HTML and works with no JavaScript', () => {
+test('the required tick needs no script, and Continue is never dead', () => {
   const tick = read(join(ROOT, 'components/RequiredTick.tsx'));
 
-  // Disabled, not styled. docs/product-decisions.md §3 and the Phase 7 gate.
-  assert.match(tick, /disabled=\{!ticked\}/, 'Continue must carry the disabled attribute');
-  // ...which means it starts disabled on the server-rendered HTML, because the
-  // initial state is false.
-  assert.match(tick, /useState\(false\)/, 'and must start disabled');
+  // THIS TEST USED TO ASSERT THE OPPOSITE — the owner's item 6, 14 September
+  // 2026. It required `disabled={!ticked}` and a `<noscript>` duplicate, and
+  // both were the shape of one mistake: the only control on the add flow that
+  // did not work until the route's client bundle had compiled. On `next dev`
+  // that is fifteen to thirty seconds, which is when the owner pressed it, and
+  // a `<noscript>` block does not help a browser that HAS JavaScript and is
+  // still waiting for it. So the attribute is gone, the duplicate is gone with
+  // it, and what is asserted now is that nothing on this screen depends on
+  // script at all.
+  // The attribute, not the word: the file's own comment explains at length
+  // what used to be disabled and why it no longer is.
+  const code = tick.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  assert.doesNotMatch(code, /\bdisabled\b/, 'Continue must never be disabled');
+  assert.doesNotMatch(code, /<noscript>/, 'and needs no no-JS duplicate, because there is one button');
+  assert.doesNotMatch(code, /'use client'/, 'the submit flow has no client component left in it');
+  assert.doesNotMatch(code, /useState|onChange|onClick/, 'and no state to hold the button shut');
 
-  // And the three layers that stop that from being a dead end.
-  assert.match(tick, /required/, 'the checkbox is required, so no-JS browsers refuse the form');
-  assert.match(tick, /<noscript>/, 'and a no-JS Continue is drawn');
+  // The two layers that refuse an unticked submit, neither of which is script.
+  assert.match(code, /required/, 'the checkbox is required, so the browser refuses the form');
 
   // The server refuses it too, with the tick's own sentence.
   const actions = read(join(ROOT, 'app/submit/actions.ts'));
@@ -1186,6 +1208,17 @@ test('the dashboard reads admin functions and never the search tables', () => {
     'public.admin_ops_events',
     'public.admin_database_bytes',
     'public.admin_reviews',
+    // The owner's items 9 and 10, 14 September 2026. Every one of these is on
+    // db/test/admin_test.sql's allowlist with its exact column shape, which is
+    // the check that matters; this list is the other half — that the panel is
+    // read through the definer at all rather than by a statement of its own.
+    'public.admin_active_accounts',
+    'public.admin_new_tools',
+    'public.admin_page_views',
+    'public.admin_spend',
+    'public.admin_spend_totals',
+    'public.admin_report_counts',
+    'public.admin_reports',
   ]) {
     assert.ok(sql.includes(fn), `${fn} is not read by lib/admin-sql.ts`);
   }
@@ -1208,16 +1241,47 @@ test('the dashboard reads admin functions and never the search tables', () => {
 test('a panel with no writer says so in words and never shows a zero', () => {
   const page = read(join(ROOT, 'app/admin/page.tsx'));
 
-  // The three figures §10 asks for that nothing writes yet, each of which has
-  // to appear as a sentence rather than as a number.
+  // The figures §10 asks for that nothing writes yet, each of which has to
+  // appear as a sentence rather than as a number.
+  //
+  // REPORTS LEFT THIS LIST ON 14 SEPTEMBER 2026 — the owner's item 9. It said
+  // "Not recorded" and it was telling the truth: §5 sent a report to an inbox
+  // and wrote it down nowhere, so there was no number and a 0 would have been
+  // a lie. `public.reports` (0023) is the writer, so the panel now shows two
+  // real figures and this test would be asserting a sentence that is no
+  // longer true.
+  //
+  // TWO FIGURES JOINED THE LIST IN ITS PLACE, and both are the same rule
+  // again: the page-view counter and the spend ledger both start at their
+  // first row, and every day before that is "nothing was counting" rather
+  // than zero.
   assert.match(page, /Never recorded/, 'the ops panel must say "never recorded"');
-  assert.match(page, /Not recorded/, 'reports must say they are not recorded');
+  assert.match(page, /Not available/, 'a figure this process cannot read says so');
   assert.match(
     page,
-    /reach the team by email and are written down nowhere/i,
-    'and must say WHY reports are not a number',
+    /Nothing has been counted yet/,
+    'a visits panel with no counter behind it says so rather than showing 0',
   );
-  assert.match(page, /Not available/, 'a figure this process cannot read says so');
+  assert.match(
+    page,
+    /a 0 here would say pages were counted and there were none/i,
+    'and says why that is not a zero',
+  );
+  assert.match(
+    page,
+    /Nothing has been recorded yet\. The ledger starts at its first paid call/,
+    'a money panel with an empty ledger says so rather than showing $0.00',
+  );
+  assert.match(
+    page,
+    /a \$0\.00 here would say calls were priced and came to nothing/i,
+    'and says why that is not a zero either',
+  );
+  assert.doesNotMatch(
+    page,
+    /reach the team by email and are written down nowhere/i,
+    'reports ARE written down now (0023); the page must not still say they are not',
+  );
 
   // The honest label on the money panel: in-process counters are not a month
   // to date and the page may not call them one.

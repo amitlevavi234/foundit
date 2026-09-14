@@ -1,6 +1,6 @@
 'use client';
 
-import { useId, useState, type KeyboardEvent } from 'react';
+import { useId, useState } from 'react';
 
 import { Icon } from './Icon';
 import { MAX_QUERY_LENGTH } from '@/lib/sql';
@@ -9,11 +9,30 @@ import { MAX_QUERY_LENGTH } from '@/lib/sql';
  * The one input the product has: "Say what's bugging you."
  *
  * A slab with the send button parked inside it, from the homepage artboard.
- * It is a plain `<form method="get">` with a `<textarea>`, so it works with
- * JavaScript switched off and the result is a shareable URL. The client half
- * adds two things and nothing else: Enter submits (Shift+Enter starts a new
- * line, because people write two sentences here), and a counter appears as the
- * 200-character ceiling gets close.
+ * It is a plain `<form method="get">`, so it works with JavaScript switched off
+ * and the result is a shareable URL.
+ *
+ * IT IS A SINGLE-LINE `<input>` AND IT USED TO BE A `<textarea>` — the owner's
+ * item 7, 14 September 2026. A `<textarea>` does not submit on Enter; a script
+ * had to make it, with `onKeyDown` calling `requestSubmit()`. On `next dev` the
+ * route's client bundle takes fifteen to thirty seconds to compile after the
+ * HTML arrives, and until it does `onKeyDown` does not exist. The owner typed a
+ * sentence, pressed Enter, and the browser did what a browser does with Enter
+ * in a textarea: it inserted a newline. The search then went out as
+ *
+ *     GET /results?q=need+to+edit+PDF+free%0D%0A
+ *
+ * — a CRLF on the end of his sentence, in the log, in the URL, and in what the
+ * reader was asked to read.
+ *
+ * The sentence is capped at 200 characters and has never needed a newline, so
+ * the element that submits on Enter by itself is the right one. There is no
+ * `onKeyDown` any more, and Enter works before hydration, after hydration, and
+ * with JavaScript switched off entirely.
+ *
+ * The counter stays, and it is the only thing left that needs script: a count
+ * that has not appeared yet is a missing courtesy, not a broken control, and
+ * `maxLength` enforces the ceiling either way.
  *
  * 200 is not a stylistic choice. It is the cap the database enforces on
  * `public.search_tools` and the length `log_search_event` truncates to, so all
@@ -33,8 +52,6 @@ export interface SearchFieldProps {
   shadow?: 'violet' | 'lime' | 'coral' | 'ink';
   /** Constraints and filters that should survive the next search, as a GET. */
   hidden?: Record<string, string>;
-  /** One line in the dock, two on the homepage. */
-  rows?: number;
 }
 
 const SHADOW_CLASS = {
@@ -54,19 +71,11 @@ export function SearchField({
   autoFocus = false,
   shadow = 'violet',
   hidden,
-  rows = size === 'sm' ? 1 : 2,
 }: SearchFieldProps) {
   const id = useId();
   const [value, setValue] = useState(defaultValue);
   const remaining = MAX_QUERY_LENGTH - value.length;
   const showCount = value.length >= MAX_QUERY_LENGTH - 40;
-
-  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
-    }
-  }
 
   return (
     <form
@@ -84,14 +93,17 @@ export function SearchField({
           ))
         : null}
 
-      <textarea
+      <input
         id={id}
         name={name}
-        rows={rows}
+        type="text"
+        // `search` would give Chrome a clear-field cross inside the slab; the
+        // artboard has one control in this box and it is the send button.
+        enterKeyHint="search"
+        autoComplete="off"
         maxLength={MAX_QUERY_LENGTH}
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        onKeyDown={onKeyDown}
         placeholder={placeholder}
         // The homepage is a single input and nothing else; landing in it is
         // what people expect. Off by default everywhere else.

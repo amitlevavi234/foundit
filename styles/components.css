@@ -790,12 +790,11 @@ dl.facts dd {
   display: block;
 }
 
-.searchbox textarea {
+.searchbox input {
   display: block;
   width: 100%;
   border: 0;
   outline: none;
-  resize: none;
   background: transparent;
   font: inherit;
   font-size: var(--t-lead);
@@ -803,9 +802,12 @@ dl.facts dd {
   color: var(--c-ink);
   padding: 0;
   overflow: hidden;
+  /* A single-line field cannot wrap, so a sentence longer than the slab has
+     to be able to scroll sideways inside it. */
+  text-overflow: ellipsis;
 }
 
-.searchbox textarea::placeholder {
+.searchbox input::placeholder {
   color: var(--c-muted);
 }
 
@@ -934,6 +936,16 @@ dl.facts dd {
   min-width: 0;
   font-size: var(--t-meta);
   color: var(--c-muted);
+}
+
+/* Five stars, the average, and the count in words — the owner's item 2b. It
+ * used to be one star, `4.0`, and `(1)`, and the bracket did not say what it
+ * counted. */
+.toolcard-rating {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  color: var(--c-ink);
 }
 
 /* `margin-left: auto` rather than the parent's `justify-content`, because
@@ -1142,7 +1154,7 @@ dl.facts dd {
   align-items: center;
 }
 
-.searchbox.sm textarea {
+.searchbox.sm input {
   font-size: var(--t-body-lg);
 }
 
@@ -1177,6 +1189,66 @@ dl.facts dd {
   font-size: var(--t-micro);
   color: var(--c-muted);
   flex-wrap: wrap;
+}
+
+/* The three-bar fit scale that sits in front of a JUDGED band's word — the
+ * owner's item 2a. Three bars, filled three, two or one, so the word has a
+ * position as well as a meaning. It takes its colour from the band's own tone
+ * class below, so the scale and the word beside it are always painted the
+ * same, and an unfilled bar is the track colour rather than a second hue: the
+ * whole thing reads in greyscale and at a glance. */
+.fitscale {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+  flex: none;
+}
+
+.fitscale span {
+  width: 4px;
+  border-radius: 1px;
+  background: var(--c-track);
+}
+
+.fitscale span:nth-child(1) {
+  height: 5px;
+}
+.fitscale span:nth-child(2) {
+  height: 8px;
+}
+.fitscale span:nth-child(3) {
+  height: 12px;
+}
+
+.band-both .fitscale-on {
+  background: var(--c-violet);
+}
+
+.band-one .fitscale-on,
+.band-name .fitscale-on {
+  background: var(--c-muted);
+}
+
+/* The legend under "How results are ranked", in the owner's own words. One
+ * line, wrapping on a narrow screen. */
+.fitlegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-6);
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.fitlegend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+  white-space: nowrap;
+}
+
+.fitlegend .fitscale-on {
+  background: var(--c-violet);
 }
 
 .band-label {
@@ -2394,33 +2466,162 @@ dl.facts dd {
 }
 
 /* A thirty-day sparkline made of divs: one column per day, no library. */
-.admbars {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 72px;
-  padding: var(--s-5) var(--s-7);
+/* --- The dashboard's charts — the owner's items 8 and 10 ------------------
+ *
+ * `.admbars` WAS HERE: thirty flex children with an inline height percentage,
+ * `aria-hidden`, no title, no period and no caption. The owner looked at the
+ * one chart on this page and asked what it was, which is item 8. Every chart
+ * is now a `<figure>` with a `<figcaption>` that says what the number is and
+ * where it comes from, and the plot itself is an inline `<svg>`
+ * (components/AdminCharts.tsx) — no library, no canvas, nothing to hydrate.
+ */
+.admchart {
+  margin: 0;
+  padding: var(--s-5) var(--s-7) var(--s-6);
   border: var(--border-soft);
   border-radius: var(--r-md);
   background: var(--c-surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
 }
 
-.admbars > span {
-  flex: 1;
-  min-width: 3px;
-  border-radius: 2px 2px 0 0;
-  background: var(--c-violet);
-  /* A day with nothing in it is a hairline rather than nothing at all, so the
-     row reads as thirty days and not as however many were busy. */
-  min-height: 2px;
+/* A chart with nothing behind it says so in words, in the chart's own box,
+ * and never draws thirty flat bars — docs/product-decisions.md §10. */
+.admnote.unrecorded {
+  border-style: dashed;
+  border-color: var(--c-faint);
+  background: transparent;
 }
 
-.admbars > span.none {
-  background: var(--c-track);
+/* Two charts side by side where a panel has two, one under the other when the
+ * page is narrow. */
+.admcharts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--s-6);
 }
 
-.admbars > span.bad {
-  background: var(--c-coral);
+/* The word "hatched" in the Visits caption, drawn as what it describes. */
+.admhatched {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    135deg,
+    var(--c-sunk),
+    var(--c-sunk) 2px,
+    var(--c-faint) 2px,
+    var(--c-faint) 3px
+  );
+  color: var(--c-ink);
+}
+
+.admchart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.admchart-title {
+  font-weight: var(--fw-heading);
+  font-size: var(--t-meta);
+  color: var(--c-ink);
+}
+
+/* 72px tall whatever the panel is wide: the SVG is drawn in a 300-unit box and
+ * stretched, so a bar is the same fraction of a day at every width. */
+.admsvg {
+  display: block;
+  width: 100%;
+  height: 72px;
+}
+
+/* Recessive, and there is no grid at all: thirty days of a small number does
+ * not need one, and a grid is the first thing that makes a small chart
+ * unreadable. */
+.admaxis {
+  stroke: var(--c-rule);
+  stroke-width: 1;
+}
+
+.admhatch {
+  stroke: var(--c-faint);
+  stroke-width: 1;
+}
+
+.admchart-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--t-micro-sm);
+  color: var(--c-faint);
+}
+
+/* A legend whenever there are two or more series, so identity is never
+ * carried by colour alone. One series has none: the title names it. */
+.admlegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--t-micro);
+  color: var(--c-muted);
+}
+
+.admlegend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.admswatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+
+/* The three tabs on /admin/reviews — the owner's item 9. Links and not a
+ * control: each tab is a URL, the back button works, and they work before
+ * hydration and with JavaScript off. */
+.admtabs {
+  display: flex;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.admtab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-6);
+  border: var(--border);
+  border-radius: var(--r-pill);
+  background: var(--c-surface);
+  color: var(--c-ink);
+  font-size: var(--t-meta);
+  font-weight: var(--fw-heading);
+  text-decoration: none;
+}
+
+.admtab.on {
+  background: var(--c-ink);
+  color: var(--c-on-fill);
+}
+
+.admtab.on .faint {
+  color: var(--c-rule);
+}
+
+/* The review a report is about, set into the report's own card so the two
+ * cannot be read as two separate things on the list. */
+.admreported {
+  border-left: 3px solid var(--c-rule);
+  padding-left: var(--s-6);
+  margin-left: var(--s-2);
 }
 
 /* One review on /admin/reviews. */

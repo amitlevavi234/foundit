@@ -152,6 +152,76 @@ const HEADERS: ReadonlyArray<readonly [string, string]> = [
   ['Cross-Origin-Resource-Policy', 'same-origin'],
 ];
 
+/* ===========================================================================
+ * THE `Origin: null` FIVE HUNDRED — the owner's items 4, 5, 6 and 7.
+ *
+ * The owner pressed Save and Like on `/tools/anki` and got a 500. The log:
+ *
+ *     POST /tools/anki?q=… 500
+ *     TypeError: Invalid URL, input: 'null'
+ *
+ * It is not our code. `next/dist/server/app-render/action-handler.js` opens
+ * the Server Action path with, verbatim:
+ *
+ *     const originDomain = typeof req.headers['origin'] === 'string'
+ *       ? new URL(req.headers['origin']).host : undefined;
+ *
+ * — no `try`. `Origin` is a header a browser is allowed to send as the three
+ * letters `null`: the header carries a SERIALIZED origin, and an opaque origin
+ * serializes to `null` (HTML, "origin"; Fetch, "append a request Origin
+ * header"). A document reached through a redirect chain, one whose referrer
+ * the policy stripped, and a sandboxed frame all produce it. Chrome then posts
+ * the form — a `<form encType="multipart/form-data">` is exactly what Next
+ * renders for a Server Action, and exactly what the browser submits when the
+ * page is not hydrated yet — and `new URL('null')` throws before anything of
+ * ours runs. Reproduced on this laptop against `next dev` 15.5.25:
+ *
+ *     Origin: null                  → 500   TypeError: Invalid URL
+ *     (no Origin header at all)     → 303   the action ran
+ *     Origin: http://localhost:3000 → 303   the action ran
+ *
+ * Next already treats a MISSING `Origin` as "an old browser", logs a warning
+ * and runs the action. So an unparseable one is not a stricter case than a
+ * missing one — it is the same case arriving in a shape that crashes. This
+ * normalises it to the request's own origin before Next looks at it, which is
+ * the "same-site default" the brief asks for, and leaves the crash impossible
+ * rather than caught.
+ *
+ * WHAT THIS DOES NOT GIVE AWAY. A genuine cross-site POST always carries a
+ * real `Origin`; it never arrives missing. `Sec-Fetch-Site` is sent by every
+ * browser that sends `Origin` at all, so when it says `cross-site` and the
+ * origin is missing or unparseable the request is not a browser doing an
+ * ordinary thing — that one gets a syntactically valid origin that can never
+ * match our host, so Next refuses it with its own message instead of throwing.
+ * Behind all of this the session cookie is `SameSite=Lax`, which is what
+ * actually stops a cross-site POST carrying a session (lib/auth-options.ts).
+ * ======================================================================== */
+
+/** An origin Next can parse, or null. `'null'` and `''` are not origins. */
+function parsedOrigin(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).host ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The origin this request was addressed to, as the browser would write it. */
+function ownOrigin(request: NextRequest): string {
+  const host =
+    request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() ||
+    request.headers.get('host') ||
+    '';
+  const proto =
+    request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim() ||
+    (request.nextUrl.protocol === 'https:' ? 'https' : 'http');
+  return host ? `${proto}://${host}` : 'https://foundit.invalid';
+}
+
+/** One that is valid, and can never be ours. */
+const REFUSING_ORIGIN = 'https://cross-site.invalid';
+
 export function middleware(request: NextRequest): NextResponse {
   // 16 random bytes, base64. `crypto` is the Web Crypto global, which is what
   // the Edge runtime has; `node:crypto` is not importable here.
@@ -164,6 +234,11 @@ export function middleware(request: NextRequest): NextResponse {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-nonce', nonce);
   requestHeaders.set('Content-Security-Policy', csp);
+
+  if (request.method === 'POST' && parsedOrigin(request.headers.get('origin')) === null) {
+    const site = request.headers.get('sec-fetch-site');
+    requestHeaders.set('origin', site === 'cross-site' ? REFUSING_ORIGIN : ownOrigin(request));
+  }
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set('Content-Security-Policy', csp);
