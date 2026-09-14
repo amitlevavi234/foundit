@@ -4356,10 +4356,42 @@ opened.
 1. `middleware.ts` normalises an `Origin` that is missing or unparseable to the
    request's own origin before Next sees it — unless `Sec-Fetch-Site` says
    `cross-site`, which gets a syntactically valid origin that can never match
-   our host so Next refuses it with its own message instead of throwing. A
-   genuine cross-site POST always carries a real `Origin`; behind all of it the
-   session cookie is `SameSite=Lax`, which is what actually stops one carrying
-   a session.
+   our host so Next refuses it with its own message instead of throwing.
+
+   **This paragraph said three things that were not true, and the round-1
+   review was right about all three** (F7, overclaims 6, 7 and 7b). It said a
+   genuine cross-site POST "always carries a real `Origin`; it never arrives
+   missing": false — Fetch sets the serialized origin to the four characters
+   `null` for a non-GET request whose mode is not "cors" when the referrer
+   policy is `no-referrer`, so an attacker page sending
+   `Referrer-Policy: no-referrer` produces exactly the header this normalises.
+   It said `Sec-Fetch-Site` "is sent by every browser that sends `Origin` at
+   all": false twice over — Fetch Metadata is only appended for a potentially
+   trustworthy URL, so a plain-HTTP origin that is not localhost sends `Origin`
+   and no `Sec-Fetch-*`, and Safari before 16.4 and Firefox before 90 send none
+   anywhere. And it cited `lib/auth-options.ts` for `SameSite=Lax`, which is
+   `lib/auth.ts:145`; `lib/auth-options.ts` contains no `sameSite` at all.
+
+   What is true, and is enough: the session cookie is `SameSite=Lax`
+   (`lib/auth.ts`), so a cross-site POST does not carry a session and Save,
+   Like, Review and the add flow arrive signed out with nothing to do. The
+   actions the origin rules actually protect are the SESSION-LESS ones —
+   filing a report, asking for a sign-in code, and the beacon — and
+   `Sec-Fetch-Site` is a signal there rather than a backstop.
+
+   **The rewrite was also not scoped to Server Actions, and that disabled two
+   checks downstream** (F7). It ran for every POST on every route, so
+   `app/o/route.ts`'s documented refusal of a missing `Origin` was dead — a
+   `POST /o` with no Origin header counted a click — and Better Auth's
+   `validateOrigin` never saw what the client sent. It now runs only where
+   Next's action handler reads the header (a `Next-Action` header, or a
+   `multipart/form-data` POST to a page route), `/api/*` and `/o` are outside
+   its matcher, and the client's own value is passed through as
+   `x-original-origin` for the beacon to read. A Server Action POST with no
+   parseable `Origin` AND no `Sec-Fetch-Site` — the one pair no browser
+   produces — is refused with a 403 and a sentence.
+   `tests/origin.test.mjs` is the whole matrix, on all three consumers, which
+   nothing had before.
 2. **Item 7**: the search field is a single-line `<input>` instead of a
    `<textarea>`, so Enter submits with or without script. The sentence is
    capped at 200 characters and has never needed a newline. The character count
@@ -4407,42 +4439,96 @@ main-4e583db8156879db.js                         266.1      82.5  (shared or laz
 framework-67e87833b9140bb8.js                    213.9      67.3  (shared or lazy)
 ```
 
-The first one is Sentry's browser SDK, on all 54 routes, against about 2 kB of
-this site's own client code. `instrumentation-client.ts` imported it
-statically in the entry Next loads first; it loads it at `requestIdleCallback`
-now, skips it entirely when no DSN is configured, and bridges the gap with two
-plain listeners whose catch is replayed into the SDK when it arrives.
-`app/global-error.tsx` imports it dynamically for the same reason. **First Load
-JS: 163 kB -> 106 kB.**
+The first one is the chunk Sentry's browser SDK was in, on all 54 routes,
+against about 2 kB of this site's own client code.
+`instrumentation-client.ts` imported it statically in the entry Next loads
+first; it loads it at `requestIdleCallback` now, skips it entirely when no DSN
+is configured, and bridges the gap with two plain listeners whose catch is
+replayed into the SDK when it arrives. `app/global-error.tsx` imports it
+dynamically for the same reason. **First Load JS: 163 kB -> 106 kB.**
 
-**The vitals, before and after, same machine, same command**
-(`npm run build`, `npm start`, `node --env-file=.env.local scripts/vitals.mjs
---runs=3`; the "before" is this branch with every other item already in, so the
-difference is the perf work alone):
+**Two sentences about that chunk were overstated and are corrected here**
+(round-1 review, overclaims 4 and 5). `instrumentation-client.ts` called it
+"the largest client chunk in the build **by a factor of two**"; the table
+directly under it says 102.3 kB against 82.5 kB for the next one, which is a
+factor of **1.24**. It was the largest; it was not twice anything. And it
+called the chunk "102 kB gzipped **of Sentry**"; it was not all Sentry. Next's
+own breakdown moves the shared slot from **105 kB to 46.6 kB**, so about
+**58 kB** was removable and the rest of that chunk was this site's own code and
+shared vendor code. Sentry is also still shipped — two lazy chunks, 121.7 kB
+and 119.5 kB gzipped on the current build — just after first paint, which is
+what the commit title says.
+
+**The vitals, before and after, re-measured from scratch on 14 September 2026**
+after the round-1 review could not reproduce the numbers this paragraph used to
+carry (overclaims 2, 3, 9 and 10).
+
+*What was wrong with them.* The old table's "before" was described as "this
+branch with every other item already in, so the difference is the perf work
+alone" — it was not: two commits landed after the Sentry one. The summary said
+"TBT down by 30 to 40 per cent" (three of its own five rows were outside that)
+and "LCP down by 300 to 660 ms" (two of its own five rows were outside that:
+`/browse` 2854 → 2598 is 256 and `/top` 3054 → 2269 is 785). And
+`docs/development.md`, added in the same commit, says "compare orders rather
+than figures, and never draw a conclusion from one run" — which is exactly
+what that paragraph then did, four times, from one three-run table.
+
+*The measurement.* Two `git archive`d copies, each `npm run build` and served by
+`node --env-file=.env.local scripts/start.mjs`, both on this laptop in one
+session with nothing else running, `node --env-file=.env.local
+scripts/vitals.mjs --runs=3` against each. **BEFORE is `60259f5`** — the commit
+before the Sentry work, named rather than described — on **:3301**. **AFTER is
+this branch's HEAD** on **:3300**, which is the Sentry change plus everything
+the round-1 review asked for.
 
 ```
-BEFORE
+BEFORE — 60259f5 on :3301
 page              runs  score  LCP ms  CLS     TBT ms  SpeedIdx  TTFB ms  JS kB
 ----------------  ----  -----  ------  ------  ------  --------  -------  -----
-/                 3/3   75     3057!   0.000   751!    1818      34       174
-/results?q=…      3/3   72     3359!   0.000   793!    1612      62       177
-/browse           3/3   77     2854!   0.000   777!    1222      27       175
-/tools/receiptly  3/3   73     2881!   0.000   931!    1474      44       177
-/top              3/3   80     3054!   0.000   511!    2028      44       178
+/                 3/3   75     2565!   0.000   613!    2063      46       178
+/results?q=…      3/3   73     3385!   0.000   639!    1999      49       181
+/browse           3/3   65     3657!   0.000   999!    2041      48       178
+/tools/receiptly  3/3   73     3216!   0.000   836!    2017      57       181
+/top              3/3   80     3125!   0.000   540!    2008      38       178
 
-AFTER
+AFTER — HEAD on :3300
 page              runs  score  LCP ms  CLS     TBT ms  SpeedIdx  TTFB ms  JS kB
 ----------------  ----  -----  ------  ------  ------  --------  -------  -----
-/                 3/3   82     2633!   0.000   575!    1264      39       117
-/results?q=…      3/3   83     2700!   0.000   459!    1847      52       120
-/browse           3/3   83     2598!   0.000   571!    1190      34       118
-/tools/receiptly  3/3   81     2551!   0.000   607!    1149      26       120
-/top              3/3   89     2269    0.000   337!    2007      47       121
+/                 3/3   82     2869!   0.000   531!    1687      40       117
+/results?q=…      3/3   82     3040!   0.000   457!    2012      48       119
+/browse           3/3   89     1410    0.000   360!    1410      40       115
+/tools/receiptly  3/3   84     2412    0.000   477!    1998      52       117
+/top              3/3   88     2558!   0.000   322!    2028      55       115
 ```
 
-Every score up, JS down by a third, TBT down by 30 to 40 per cent, LCP down by
-300 to 660 ms, and `/top` inside the LCP threshold for the first time. TBT is
-still over 200 ms everywhere and this does not claim otherwise.
+**THE CLAIM THAT REPRODUCES IS THE BUNDLE, and it is the only one stated as a
+rule.** Every page ships **61 to 64 kB less JavaScript** — 178→117, 181→119,
+178→115, 181→117, 178→115 — and that figure comes out of the build rather than
+out of a trace, so it is the same on any machine. `First Load JS shared by all`
+is `106 kB` on this build.
+
+**The timings are reported per page and without a band**, because a band is
+what the last two claims here got wrong. In milliseconds, AFTER minus BEFORE:
+
+```
+page              LCP      TBT      Speed Index   score
+----------------  -------  -------  -----------   -----
+/                 +304     -82      -376          75 -> 82
+/results?q=…      -345     -182     +13           73 -> 82
+/browse           -2247    -639     -631          65 -> 89
+/tools/receiptly  -804     -359     -19           73 -> 84
+/top              -567     -218     +20           80 -> 88
+```
+
+**TBT is lower on all five pages and on none is it worse**, which is the
+question the review asked to have answered explicitly. The Lighthouse score is
+higher on all five. LCP is lower on four and **higher on `/` by 304 ms**, and
+this does not explain that away: `scripts/vitals.mjs`'s own header says a change
+under about half should be treated as noise on this machine, 304 ms on 2565 is
+well inside that, and one three-run A/B is not enough to call it a regression or
+to call it nothing. `/browse` and `/tools/receiptly` are inside the 2500 ms LCP
+threshold for the first time. TBT is still over 200 ms on every page and this
+does not claim otherwise.
 
 **Part (i) of the item asked for the signed-out render to be static or
 ISR-cached "so TTFB is a cache hit", and that is the one thing here that was
@@ -4490,9 +4576,30 @@ reranker, which is read by a model and never printed.
 ### Item 2 — the fit scale and the stars
 
 Three bars filled three, two or one beside Strong / Possible / Loose, a one-line
-legend in the owner's words under "How results are ranked", five stars drawn
-filled and empty with the count in words, and "No reviews yet" with no stars at
-all where there are none.
+legend under "How results are ranked", five stars drawn filled and empty with
+the count in words, and "No reviews yet" with no stars at all where there are
+none.
+
+**Two corrections from the round-1 review.**
+
+The legend's three entries were described as "his words verbatim: does exactly
+this / does part of it / same area" (overclaim 8). Two of them were; the third
+rendered as **"same area — never shown"**, with four words of ours appended
+because a Loose result cannot reach a page while `RERANK_SHOWN_FROM` is 2. Both
+halves are true and they are different statements — one is what the word means
+and the other is a fact about this build's threshold — so `FIT_LEGEND` has two
+fields now and the page draws the note muted after the meaning.
+
+The stars **rounded half up** (F10), so `tabsplit`'s 4.5 was drawn as five
+filled stars — which is what 5.0 looks like — and 3.5 and 4.4 were both drawn
+as four. The screen-reader name was right in every case; only the picture lied,
+to the people reading the picture. A star is filled when the rating reaches it
+whole and the next one is drawn HALF when the rating is at least half way past
+it, so the drawing never claims more than the number beside it.
+`tests/card.test.mjs` walks 5, 4.5, 4.4, 4, 3.5 and 0 — and it now passes the
+card NUMBERS (F18): it was passing `rating: '4.5'` as a string, which
+`ToolCard` reads as "no reviews", so the one test in the repository that
+rendered a card was rendering a card no page can produce.
 
 ### Items 8, 9 and 10 — the dashboard
 
@@ -4504,19 +4611,49 @@ thirty-day line, new accounts per day, new listings per day, page views per day
 from an identity-free in-process counter, and money spent from a persisted
 ledger written by the four paid-call paths from the providers' own usage
 fields. Searches that found nothing good is a second series on the searches
-chart. The four-colour series palette was validated rather than chosen — the
-command and its five PASSes are in `styles/tokens.css` beside the values.
+chart.
 
-### Seven migrations, and three of them are corrections of the other four
+The four-colour series palette was described here as "validated rather than
+chosen — the command and its five PASSes are in `styles/tokens.css` beside the
+values". **There is no such command in this repository** (round-1 review, F23):
+`scripts/validate_palette.js` does not exist and never did, so nobody could
+re-run it. What is true is that three of the five claims are arithmetic over
+the four hex values — the lightness band, the chroma floor and the 3:1 contrast
+on white — and they were checked by hand twice, once when the values were
+chosen and once independently by the reviewer, who got the same numbers. The
+table is in `styles/tokens.css` beside the values. The two colour-vision
+claims depended on a simulation model that is not in this tree either and are
+gone: the reasoning for four distinguishable hues stands, and the chart labels
+every series in its legend so colour is never the only statement of which is
+which.
+
+### Eight migrations, and five of them are corrections of three
 
 `0022_english_only`, `0023_reports`, `0024_dashboard_panels`,
 `0025_reports_review_join`, `0026_reports_read_policy`,
-`0027_reports_target_cast`, `0028_infra_usage`.
+`0027_reports_target_cast`, `0028_infra_usage`, `0029_english_only_grant`.
+
+This heading said "seven, and three of them are corrections of the other four",
+and both halves were wrong (round-1 review, overclaim 1). There are **eight**,
+and **five correct three**: 0025, 0026 and 0027 correct 0023; 0028 corrects
+0024; and **0029 corrects 0022** and was not mentioned anywhere in this
+section. 0029 is also the only PRIVILEGE correction in the set — a missing
+column grant that produced a hard 500 rather than a silent zero — which makes
+it the one a reader most needs told about:
+
+- **0029**: 0022 added `tool_problems.non_english_script` and five queries
+  filter on it. `foundit_app` has SELECT on TWELVE NAMED COLUMNS of that table
+  and not on the table, which is 0005's deliberate arrangement — the role that
+  can plant a vector must not be able to read one out — so a column added later
+  is not in the list and a column-level grant REFUSES rather than filtering:
+  `permission denied for table tool_problems`, and `GET /submit/done` answered
+  500. Caught by `tests/links.test.mjs` against a production build. The fix is
+  one column and not the table.
 
 An applied migration is never edited, so each defect found after applying one
-is its own file. All three corrections were found by a test rather than by
-reading, and all three are the same class — something the SQL layer does that
-the code did not say out loud:
+is its own file. Every correction was found by a test rather than by reading,
+and they are all the same class — something the SQL layer does that the code
+did not say out loud:
 
 - **0025**: `admin_reports` selected `reviews.removed_by_admin_at`, a column
   that does not exist — that figure is `review_removals.created_at`, which is
@@ -4537,6 +4674,181 @@ the code did not say out loud:
   a schema is not a data privilege** — with it and nothing else the
   application still gets `permission denied for table` on both ledgers, and
   `db/test/panels_test.sql` asserts both halves.
+
+## Owner feedback, round 1 — the adversarial review, and the twenty-four things it found (14 September 2026)
+
+Five reviewers went over the eight commits above without writing to the
+repository once, and came back with twenty-four findings and twelve overclaims,
+every one with reproduced output. The overclaims are corrected in place in the
+section above, beside the sentences that were wrong, rather than listed here —
+a correction filed away from the claim is a correction nobody reads. What
+follows is the findings.
+
+**Three migrations, and none of them edits an applied one.**
+`0030_reports_round1` (F1, F11, F12, F17, F20, F21),
+`0031_english_script_widened` (F14), `0032_spend_recording` (F8, and the
+pointer back to 0024 that F22 asked for).
+
+### The two that could take a screen down
+
+- **F1 — one report filed by a stranger permanently broke the Reported tab.**
+  `reports_target_shaped` bounded the SHAPE of a review's target
+  (`^[0-9]+$`, 200 characters) and not its MAGNITUDE, so a 23-digit target
+  passed the CHECK, passed 0027's CASE guard, and then raised **22003** on
+  `::bigint` — the failure class 0027 was written to close, one migration
+  later. `lib/admin.ts` swallows it, so the operator saw the tab render as the
+  not-found page, for ever: there is no delete path for `public.reports`
+  anywhere in the product and `resolve_report` needs an id nobody could read
+  any more. Filing it needed no account. 0030 bounds the magnitude where the
+  shape is bounded (`^[0-9]{1,18}$`) **and** puts the same bound in the CASE,
+  because the first stops a new row and only the second saves a database that
+  already has one. `db/test/reports_test.sql` §6 tests both, and plants the
+  pre-0030 row with the CHECK dropped inside the transaction to do it.
+
+- **F5 — a stranger could close the reporting channel for everybody.** With
+  `TRUST_CLOUDFLARE_HEADERS` unset (the default, and this laptop)
+  `visitorAddress()` returns the literal string `unattributed` for every
+  visitor, so "five reports per address per hour" was five in total, between
+  the whole internet — and `allowReport` spent that bucket FIRST, so a
+  fully signed-in account was refused because a signed-out stranger had spent
+  it. `/report` is this product's §4.5 notice mechanism. One reporter is now
+  judged by one ceiling: a signed-in account by its own ten a day and by
+  nothing anybody else did, a signed-out visitor with a known address by five
+  an hour, and the shared bucket — which is everybody rather than one person —
+  by sixty an hour, which is a bound on our mail server rather than on a
+  visitor.
+
+### The ones about a claim that was not true of the page
+
+- **F2 — with scripts off, four of the five main pages were a skeleton for
+  ever.** Each had a `loading.tsx`, which Next compiles into a Suspense
+  boundary around the whole segment: React streams the fallback and sends the
+  real subtree later inside `<div hidden id="S:n">` with an inline script to
+  swap it in. `components/SearchField.tsx` claimed twice that it "works with
+  JavaScript switched off", and the markup did; the page did not — the search
+  box, the Save and Like forms, the review form, the fit scales and the stars
+  were all in the document and all invisible. The five files are gone. Each
+  page renders its shell synchronously and puts its DATA LIST in a Suspense
+  slot of its own, which is a boundary below the page rather than above it — so
+  `notFound()` still answers 404 first, which is what the boundary above it
+  broke in Phase 8. `tests/english.test.mjs` parses the HTML of all five routes
+  and fails if a shell form, fit scale or star comes back inside a hidden
+  subtree.
+
+- **F3 — every client-side navigation counted a second page view, and the
+  caption denied it.** `app/layout.tsx` tested `incoming.get('rsc')`. That is
+  always null, and the reason turned out to be structural: `rsc` and
+  `next-router-prefetch` are FLIGHT_HEADERS, which Next strips from `headers()`
+  in a Server Component AND from the request it hands middleware, restoring
+  them unchanged afterwards ("Flight headers are not overridable / removable so
+  they are applied at the end" — `next/dist/server/web/adapter.js`). So neither
+  of the two obvious places could see the answer, and a middleware that deleted
+  the header changed nothing — measured, not assumed. The decision moved one
+  layer out, to `lib/router-headers.ts`, which runs from `instrumentation.ts`
+  before Next has looked at the request, marks it with a header Next does not
+  hide, and lets `middleware.ts` decide with `lib/page-view-policy.ts`. Every
+  row of the reviewer's table is a line in `tests/page-views.test.mjs`, and the
+  live delta reproduces: seventy requests in seven shapes, twenty counted —
+  the ten plain GETs and the ten 404s.
+
+  The caption on `app/admin/page.tsx` promised five exclusions and three were
+  real (overclaim 12). It now lists what is excluded AND the two inclusions a
+  reader would otherwise assume away: a **404 is counted**, because it is a
+  page this deployment rendered and the status is not known until after the
+  render the decision is read in, and so is a **bot that runs no script**,
+  because the only thing that could separate one from a person is a string
+  anybody may write.
+
+- **F24 — `Next-Router-Prefetch: 1` with no `RSC` answered 500**, from inside
+  Next's own layout router (`ReferenceError: location is not defined`), on this
+  build and on the one before it. It is a 500 anybody can produce with `curl`,
+  which on a deployment with a DSN is one Sentry issue per request. The same
+  shim declines it: that pair is not something a browser sends, because the
+  router sets `RSC: 1` on every request it makes.
+
+### The ones about the report flow
+
+**F6, F13, F15, F17, F20 and F21 are one journey.** Choosing "A review" and
+typing the listing's address — the most natural mistake the form allows —
+produced no row, an email to the operator saying "NOT RECORDED", and a screen
+telling the reporter *"that is a fault our end and not yours"*. It was their
+typo, they were told the opposite, and the review id they needed was rendered
+nowhere in the product. Now: the kind and the target's shape are checked in the
+action before either side effect, with a sentence per kind (F6); every review on
+a tool page carries a **"Report this review"** link with its number already in
+it, and the number beside it (F6); the draft travels in a five-minute httpOnly
+cookie instead of on the query string, where a 2.5 kB URL carrying somebody's
+accusation landed in every access log and in the `Referer` of their next click
+(F13); the email says "a signed-in account" or "a visitor who was not signed
+in" instead of asserting "somebody signed out" of every report ever filed
+(F15); `file_report` strips control characters from the target and the CHECK
+refuses them, which the other three free-text columns already had (F17); a
+`kind=profile` report stores `profiles.id` resolved from the handle, so a
+rename cannot re-point an old accusation at whoever takes the name, and the
+admin page draws the CURRENT handle (F21); and `admin_reports` says whether the
+thing a report names still exists, so an operator can separate junk from a real
+report about something that has since gone (F20).
+
+### The ones about the operator's screens
+
+- **F11** — the Reported tab was fifty rows with no control for the
+  fifty-first, ordered newest-first, with a badge counted off the truncated
+  array. So past fifty open reports the OLDEST — the ones somebody had been
+  waiting on longest — fell off the only screen in the product that lists
+  reports, and nothing said so. Open reports are oldest-first now, both lists
+  page with the same `?from=` control, and the badge is
+  `admin_report_counts().open`, which has no window and no limit on it.
+- **F12** — a removed review on that tab rendered "Removed &lt;date&gt;: " and
+  then nothing, under the page's own promise that the reason goes on the
+  record. `admin_reports` declared no `removal_reason` and no `removed_by`
+  although it already joined `review_removals`; `toAdminReports` hardcoded both
+  to null. Both are columns now, and mapped.
+- **F8** — the Money chart drew twenty-nine days of $0.00 for days before the
+  ledger existed, while `admin_spend_totals().first_day` a few lines up the
+  same page said the ledger began yesterday. `admin_spend` has the `recording`
+  flag `admin_page_views` has had all along, and `Bars` hatches an unrecorded
+  day exactly as `RecordedBars` does.
+
+### The rest
+
+- **F4** — the two new SQL suites asserted absolute totals on `current_date`,
+  which is the day the running application writes to, so the pasted
+  `bash db/test.sh` gate was true only of a database whose ledger happened to
+  be empty (overclaim 11). Already fixed by `c1b8453` before the review ended,
+  and verified by it. The rule it leaves behind: the SQL suites must be run
+  against a database the application has been used on.
+- **F9** — `npm run dev` bound every interface, on a laptop, and a dev server
+  serialises the server's own `fetch` calls into the RSC payload: a `/results`
+  page whose reader ran carried the reader's entire system prompt, the OpenAI
+  response headers and a `Set-Cookie` for `api.openai.com`, in the page source.
+  `scripts/dev.mjs` defaults `HOSTNAME` to `127.0.0.1` now, with a
+  `--hostname` pass-through and the paragraph `scripts/start.mjs` already
+  carried.
+- **F10, F18** — see item 2 above.
+- **F14** — 0022's "no Hebrew or Arabic renders" covered the two BLOCKS and not
+  the two SCRIPTS: presentation forms, Arabic Supplement and Arabic Extended-A
+  went straight through, which is what text pasted out of a PDF looks like.
+  `tests/english.test.mjs` spelled the same range out a second time, so the
+  test agreed with the gap. One list of ranges now, in
+  `db/non-english-script.mjs`, rendered two ways; 0031 drops and recreates the
+  generated column and its partial index together, and a test asserts the
+  migration still contains character-for-character what that module renders.
+- **F16** — `infra.add_page_views` and `infra.add_spend` are the only definer
+  functions in the range with no caller check, which is a decision (the page-view
+  counter is called for a visitor who is nobody) and was not written down.
+  `db/test/panels_test.sql` §1b is the written allowlist, with a pinned
+  `search_path` on each and — the half that matters — no schema on that path
+  that either calling role can CREATE in.
+- **F19** — the English route walk was signed out, so `MAKER_DASHBOARD_SQL`,
+  one of the five places 0022 names as printing a statement, was never
+  exercised by the test that exists to guard it. It walks a second time as a
+  throwaway maker who owns a listing that really carries a non-English
+  statement, and puts the listing back afterwards.
+- **F22** — `0024:445-449` warns that granting USAGE on `infra` "would be the
+  whole boundary gone" and `0028` does exactly that, correctly. An applied
+  migration is never edited, so the pointer back is in `0032`'s header and in
+  `docs/development.md` under "Migrations that have been superseded".
+- **F23** — see item 8 to 10 above.
 
 ## Blocked on Amit
 

@@ -53,15 +53,42 @@
    * `--c-lime` and `--c-amber` are both too light to sit on white (they fail
    * the lightness band and the 3:1 contrast floor) and `--c-muted` has almost
    * no chroma, which reads as grey rather than as a series. So two chart-only
-   * steps, and they were not chosen by eye:
+   * steps.
    *
-   *   node scripts/validate_palette.js "#6e4bf6,#ff5a3c,#00a396,#9c6b00"    *     --mode light --surface "#ffffff"
+   * ---------------------------------------------------------------------------
+   * WHERE THESE FIGURES CAME FROM — OWNER FEEDBACK, ROUND 1, F23.
    *
-   *   [PASS] Lightness band     all 4 inside L 0.43-0.77
-   *   [PASS] Chroma floor       all 4 >= 0.1
-   *   [PASS] CVD separation     worst adjacent teal<->coral dE 13.2 (protan)
-   *   [PASS] Normal-vision      worst adjacent ochre<->teal dE 20.3
-   *   [PASS] Contrast           all 4 >= 3:1
+   * This paragraph used to quote a command, `node scripts/validate_palette.js`,
+   * and five `[PASS]` lines it printed. THERE IS NO SUCH SCRIPT IN THIS
+   * REPOSITORY and there never was, so nobody could re-run it, and a comment
+   * that cites a check nobody can repeat is worse than one that cites nothing:
+   * it stops the next person looking.
+   *
+   * What is true is that three of the four values below were worked out with a
+   * tool that is not in this tree, and then CHECKED BY HAND, twice — once when
+   * they were chosen and once by the round-1 reviewer, independently, who got
+   * the same numbers. Those are the three that are arithmetic over the hex
+   * values, and here they are:
+   *
+   *   token                 hex       OKLCh L   C       contrast on #ffffff
+   *   --c-chart-1 violet    #6e4bf6   0.5562    0.2398  5.25:1
+   *   --c-chart-2 coral     #ff5a3c   0.6845    0.2058  3.10:1
+   *   --c-chart-3 teal      #00a396   0.6433    0.1134  3.14:1
+   *   --c-chart-4 ochre     #9c6b00   0.5647    0.1181  4.65:1
+   *
+   * All four sit inside the lightness band L 0.43-0.77, all four are at or
+   * above 0.1 chroma, and all four clear 3:1 against white. Anybody can check
+   * those three claims from the four hex values alone.
+   *
+   * THE TWO COLOUR-VISION-DEFICIENCY CLAIMS ARE GONE. The old comment asserted
+   * a worst adjacent separation of dE 13.2 under protanopia and dE 20.3 under
+   * normal vision. Those depend on a simulation model and a colour-difference
+   * formula that are not in this tree either, so nobody can check them, and
+   * a `[PASS]` nobody can check is a claim wearing a test's clothes. The
+   * REASONING for four distinguishable hues stands — two of the site's own
+   * colours plus a teal and an ochre, spread around the hue circle rather than
+   * four neighbours — and the chart also labels every series in its legend, so
+   * the colours are never the only statement of which is which.
    *
    * They are used in the charts and NOWHERE ELSE: nothing in the product's own
    * interface is teal or ochre, and a colour that appeared on a card as well

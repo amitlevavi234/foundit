@@ -13,12 +13,33 @@ import {
  * THE SDK IS LOADED AFTER THE PAGE IS, AND IT USED TO BE LOADED BEFORE
  *
  * THE OWNER'S ITEM 3, 14 September 2026: "find why TBT is ~1 s on a page that
- * does almost nothing". `node scripts/chunks.mjs` answers it in one line —
- * this is the largest client chunk in the build by a factor of two, it is
- * loaded on EVERY route, and it is 102 kB gzipped of Sentry:
+ * does almost nothing". `node scripts/chunks.mjs` answers it — this was the
+ * largest client chunk in the build, it was loaded on EVERY route, and most of
+ * it was Sentry:
  *
- *   chunk                        raw kB   gzip kB  routes
- *   4218-1617f939e76c4f8b.js      332.5     102.3  every route (54)
+ *   chunk                          raw kB   gzip kB  routes
+ *   4218-1617f939e76c4f8b.js        332.5     102.3  every route (54)
+ *   main-95d3e51f346ac87a.js        266.1      83.1  (shared or lazy)
+ *   framework-f2431946d98e80c4.js   213.9      67.0  (shared or lazy)
+ *
+ * TWO SENTENCES HERE USED TO OVERSTATE THAT, and both are corrected above —
+ * OWNER FEEDBACK, ROUND 1, overclaims 4 and 5.
+ *
+ *   "by a factor of two" — the table printed directly underneath said 102.3 kB
+ *   against 83.1 kB for the next one, which is a factor of 1.24. The chunk was
+ *   the largest; it was not twice anything.
+ *
+ *   "it is 102 kB gzipped of Sentry" — the chunk was not all Sentry. Next's own
+ *   breakdown puts the shared slot at 105 kB before this change and 46.6 kB
+ *   after it, so about 58 kB of it was removable and the rest was this site's
+ *   own code and shared vendor code. Sentry is also still SHIPPED — 121.7 kB
+ *   and 119.5 kB gzipped in two lazy chunks on the current build — just after
+ *   first paint, which is what the commit title says and what the paragraph
+ *   below describes.
+ *
+ * The measured effect on the pages, from a three-run A/B against `next start`
+ * taken on 14 September 2026 (`docs/loop-progress.md`): every page ships 61 to
+ * 64 kB less JavaScript, and Total Blocking Time came down on all five.
  *
  * Total Blocking Time is EXECUTION rather than download — the Phase 9a review
  * withdrew the opposite claim and was right to — and a hundred kilobytes of
