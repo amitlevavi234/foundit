@@ -322,7 +322,11 @@ export const SEARCH_DETAILED_SQL = `
         select tp.statement,
                ts_rank_cd(tp.search_doc, (select tsq from q), 1) as strength
           from public.tool_problems tp
-         where tp.tool_id = t.id
+         -- ENGLISH ONLY (0022, the owner's item 1). This one IS rendered — it
+         -- is the quoted statement inside "Why this?" — so it is filtered. The
+         -- statements array above it is NOT, because that array goes to the
+         -- reranker and never to a page.
+         where tp.tool_id = t.id and not tp.non_english_script
          order by strength desc, tp.sort_order, tp.id
          limit 1
       ) p on true
@@ -573,6 +577,12 @@ export const HOME_SQL = `
       join public.tools t on t.id = tp.tool_id and t.status = 'published'
       left join public.tool_categories tc on tc.tool_id = t.id and tc.is_primary
       left join public.categories c on c.id = tc.category_id
+      -- ENGLISH ONLY, and the filter is here rather than on retrieval
+      -- (0022, the owner's item 1). Fifteen seeded statements are in Hebrew
+      -- or Arabic so that a Hebrew or Arabic sentence can find those tools by
+      -- meaning; this column keeps them out of the HTML without taking them
+      -- out of the index.
+     where not tp.non_english_script
      order by t.id, tp.sort_order, tp.id
   ),
   found_recent as (
@@ -619,7 +629,12 @@ export const TOOL_SQL = `
   probs as (
     select tp.statement, tp.sort_order, tp.id
       from public.tool_problems tp
-     where tp.tool_id = (select id from t)
+      -- ENGLISH ONLY, and the filter is here rather than on retrieval
+      -- (0022, the owner's item 1). Fifteen seeded statements are in Hebrew
+      -- or Arabic so that a Hebrew or Arabic sentence can find those tools by
+      -- meaning; this column keeps them out of the HTML without taking them
+      -- out of the index.
+     where tp.tool_id = (select id from t) and not tp.non_english_script
   ),
   revs as (
     select r.id, r.rating, r.body, r.created_at,
@@ -712,7 +727,12 @@ export const BROWSE_SQL = `
       join public.tools t on t.id = tp.tool_id and t.status = 'published'
       left join public.tool_categories tc on tc.tool_id = t.id and tc.is_primary
       left join public.categories c on c.id = tc.category_id
-     where $1::text is null or c.slug = $1::citext
+      -- ENGLISH ONLY, and the filter is here rather than on retrieval
+      -- (0022, the owner's item 1). Fifteen seeded statements are in Hebrew
+      -- or Arabic so that a Hebrew or Arabic sentence can find those tools by
+      -- meaning; this column keeps them out of the HTML without taking them
+      -- out of the index.
+     where ($1::text is null or c.slug = $1::citext) and not tp.non_english_script
      order by t.id, tp.sort_order, tp.id
   ),
   page as (

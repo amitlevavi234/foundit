@@ -298,8 +298,12 @@ export const MAKER_DASHBOARD_SQL = `
     (select k.matched_count from public.maker_listing_metrics(m.id, 30) k) as matched_count,
     (select p.handle::text from public.profiles p where p.id = m.submitted_by) as added_by,
     coalesce(
+      -- ENGLISH ONLY (0022, the owner's item 1): the maker dashboard prints
+      -- these, so it gets the renderable ones. A maker whose statement is
+      -- filtered still has it working in search; docs/product-decisions.md §14.
       (select array_agg(tp.statement order by tp.sort_order, tp.id)
-         from public.tool_problems tp where tp.tool_id = m.id),
+         from public.tool_problems tp
+        where tp.tool_id = m.id and not tp.non_english_script),
       '{}'
     ) as statements,
     coalesce((

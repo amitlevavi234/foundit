@@ -1903,13 +1903,13 @@ from (values
    'Bilingual dictionaries with forum threads arguing about the awkward cases, which is where the answer usually is.',
    'free','{web,ios,android}','{en,es,fr,it,pt,de}','{no_account_needed}'),
   ('morfix','Morfix','https://www.morfix.co.il',
-   'מילון עברי-אנגלי. A Hebrew-English dictionary with inflections, common phrases and pronunciation.',
+   'A Hebrew-English dictionary with inflections, common phrases and pronunciation.',
    'freemium','{web,ios,android}','{he,en}','{has_free_tier}'),
   ('dicta-nakdan','Dicta Nakdan','https://nakdanpro.dicta.org.il',
-   'ניקוד אוטומטי לטקסט עברי. Adds Hebrew vowel points to unpointed text automatically, free in the browser.',
+   'Adds Hebrew vowel points to unpointed text automatically, free in the browser.',
    'free','{web}','{he}','{no_account_needed,no_ads}'),
   ('almaany','Almaany','https://www.almaany.com',
-   'قاموس عربي. An Arabic dictionary and thesaurus with translations into English and several other languages.',
+   'An Arabic dictionary and thesaurus with translations into English and several other languages.',
    'free','{web,ios,android}','{ar,en}','{no_account_needed}')
 ) as v(slug, name, url, summary, pricing, platforms, languages, flags)
 on conflict do nothing;
