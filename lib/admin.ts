@@ -14,6 +14,7 @@ import {
   MAX_REPORT_DETAILS,
   MAX_REPORT_REASON,
   MY_REMOVALS_SQL,
+  PROFILE_ID_BY_HANDLE_SQL,
   RECORD_REMOVAL_SQL,
   REMOVE_REVIEW_SQL,
   RESOLVE_REPORT_SQL,
@@ -21,11 +22,11 @@ import {
   cleanReportText,
   reasonProblem,
   reportReasonProblem,
-  toAdminReports,
+  toAdminReportPage,
   toAdminReviewPage,
   toDashboard,
   toMyRemovals,
-  type AdminReport,
+  type AdminReportPage,
   type AdminReviewPage,
   type Dashboard,
   type MyRemoval,
@@ -355,20 +356,62 @@ export async function fileReport(
 }
 
 /**
- * Every report, unresolved first and newest first, with the review it is
- * about. Null for everybody who is not an administrator.
+ * One page of reports: open first and OLDEST first inside that, then the
+ * closed ones newest first, each with the review it is about. Null for
+ * everybody who is not an administrator.
+ *
+ * OWNER FEEDBACK, ROUND 1, F11. This took a limit and no offset and the page
+ * passed neither, so the Reported tab was fifty rows with nothing behind them:
+ * past fifty open reports the OLDEST — the ones somebody has been waiting on
+ * longest — fell off the only screen in the product that lists reports, and
+ * its badge counted the truncated array so nothing said so. `total` is the
+ * count before the limit, read out of the same statement rather than from a
+ * second one that could disagree.
  */
-export const reports = cache(async (limit = LIST_LIMIT): Promise<AdminReport[] | null> => {
+export const reportPage = cache(
+  async (limit = LIST_LIMIT, offset = 0): Promise<AdminReportPage | null> => {
+    return asViewer(async (tx) => {
+      try {
+        const { rows } = await tx.query(ADMIN_REPORTS_SQL, [limit, offset]);
+        const row = rows[0] as { rows?: unknown; open?: unknown } | undefined;
+        return toAdminReportPage(row?.rows, row?.open, limit, offset);
+      } catch (error) {
+        refused(error);
+        return null;
+      }
+    });
+  },
+);
+
+/**
+ * A handle, as `profiles.id` — or null when nobody has that handle.
+ *
+ * OWNER FEEDBACK, ROUND 1, F21, and it is the one read in this file that is
+ * not an `admin_*` call. `public.profiles_public` is the view 0003 built for
+ * exactly this: the columns of a profile anybody may see, with the ones nobody
+ * may left out. Reporting a profile is open to a signed-out visitor, so this
+ * has to work with no session, and it does — the view's policy is what decides,
+ * not this function.
+ *
+ * Null is not an error and is not shown to anybody. `app/report/actions.ts`
+ * stores the typed handle when this returns null, because a refusal that
+ * depended on the answer would turn the report form into an oracle over which
+ * accounts exist.
+ */
+export async function profileIdForHandle(handle: string): Promise<string | null> {
+  const wanted = handle.trim();
+  if (wanted === '') return null;
   return asViewer(async (tx) => {
     try {
-      const { rows } = await tx.query(ADMIN_REPORTS_SQL, [limit]);
-      return toAdminReports((rows[0] as { rows?: unknown } | undefined)?.rows);
+      const { rows } = await tx.query(PROFILE_ID_BY_HANDLE_SQL, [wanted]);
+      const id = (rows[0] as { id?: unknown } | undefined)?.id;
+      return typeof id === 'string' && id !== '' ? id : null;
     } catch (error) {
       refused(error);
       return null;
     }
   });
-});
+}
 
 /**
  * Close one. False when the id is unknown, when it was already closed, and

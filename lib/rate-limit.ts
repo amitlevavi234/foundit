@@ -2,6 +2,10 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { READER_REQUESTS_PER_READING } from './reader-model.ts';
 import { RERANK_REQUESTS_PER_JUDGEMENT } from './rerank.ts';
+// The name of the bucket everybody unattributable shares, imported rather than
+// spelled again: `allowReport` has to know whether the key it was handed is one
+// visitor or all of them, and two copies of that string would be two answers.
+import { SHARED_BUCKET } from './visitor-policy.ts';
 
 /**
  * What stops one stranger with a script from spending the whole month's budget
@@ -268,6 +272,31 @@ export const DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR = 5;
 export const DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY = 10;
 
 /**
+ * SIXTY AN HOUR FOR THE SHARED BUCKET, which is a different kind of number
+ * from the two above — OWNER FEEDBACK, ROUND 1, F5.
+ *
+ * `lib/visitor-policy.ts` returns `SHARED_BUCKET` for every visitor unless the
+ * deployment says something in front of it overwrites the address header. That
+ * is the default, and it means the five-per-address ceiling was being applied
+ * to "everybody" rather than to one person: five reports an hour in total,
+ * from the whole internet, after which `/report` answered "that is as many
+ * reports as this page takes" to the next person to try. A stranger could shut
+ * the notice mechanism for twelve minutes with one request.
+ *
+ * So the shared bucket gets a ceiling that is about US rather than about a
+ * visitor: sixty an hour is a bound on our own mail server and on the
+ * moderation queue, and it is a number no honest afternoon reaches. It is
+ * deliberately not "no ceiling at all" — the bucket is the only bound a
+ * signed-out flood has off the tunnel, and a ceiling that only a flood can
+ * reach is still a ceiling.
+ *
+ * A SIGNED-IN REPORTER NEVER TOUCHES IT. They are judged by the account
+ * ceiling alone, which is the other half of F5 and the half that matters most:
+ * nothing a stranger does may refuse somebody with an identity of their own.
+ */
+export const DEFAULT_REPORTS_PER_SHARED_BUCKET_PER_HOUR = 60;
+
+/**
  * The two limits on asking for a 6-digit sign-in code, from research/09 §6.
  *
  * They defend different things and both are needed.
@@ -396,6 +425,7 @@ export interface Limits {
   opensPerDay: number;
   reportsPerAddressPerHour: number;
   reportsPerAccountPerDay: number;
+  reportsPerSharedBucketPerHour: number;
 }
 
 /** The configured ceilings. Read at call time so a test can set them. */
@@ -461,6 +491,10 @@ export function limits(): Limits {
     reportsPerAccountPerDay: positiveInt(
       process.env.MAX_REPORTS_PER_ACCOUNT_PER_DAY,
       DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY,
+    ),
+    reportsPerSharedBucketPerHour: positiveInt(
+      process.env.MAX_REPORTS_PER_SHARED_BUCKET_PER_HOUR,
+      DEFAULT_REPORTS_PER_SHARED_BUCKET_PER_HOUR,
     ),
   };
 }
@@ -1110,36 +1144,67 @@ export function allowReview(accountId: string): EditAllowance {
 }
 
 /**
- * May this visitor file a report right now? — the owner's item 9.
+ * May this visitor file a report right now? — the owner's item 9, rewritten
+ * for OWNER FEEDBACK, ROUND 1, F5.
  *
- * TWO GATES AND THE STRICTER ONE WINS, because they defend different things.
- * The address bucket bounds a signed-out flood; the account bucket bounds a
- * signed-in one, over a day rather than an hour, because a hundred reports
- * from one account is not moderation but a way of burying the ones that
- * matter. `accountId` is null for a signed-out reporter, and then the address
- * is the only bound there is — which is the price of not putting a sign-in
- * wall in front of "this listing is wrong".
+ * ONE REPORTER IS JUDGED BY ONE CEILING. That is the change, and the defect it
+ * closes is a bad one: the two gates used to be asked in order, address first,
+ * with a refusal returning before the account gate was reached. With
+ * `TRUST_CLOUDFLARE_HEADERS` unset — the default, and the state the owner's
+ * laptop is in — `visitorAddress()` returns the literal string `unattributed`
+ * for EVERY visitor, so five reports an hour was five in total, between
+ * everybody, signed in or out. A stranger could spend the bucket and the next
+ * request from a fully signed-in account was refused with "that is as many
+ * reports as this page takes". `/report` is this product's §4.5 notice
+ * mechanism, and a notice mechanism a stranger can switch off for twelve
+ * minutes a token is exactly the failure the mechanism exists to prevent. The
+ * reviewer reproduced it in one minute with `curl`.
  *
- * Both keys are hashed with the per-process salt on the way in and both
- * strings are dropped, exactly like every other bucket in this file, so this
- * cannot become a record of who reported what and when. That matters here more
- * than for a review: a review is public and a report is not.
+ * SO THE THREE CEILINGS ARE THREE ANSWERS TO THREE DIFFERENT QUESTIONS:
+ *
+ *   A SIGNED-IN REPORTER is judged by the ACCOUNT ceiling alone — ten a day.
+ *   They have an identity that cannot be shared with a stranger, so nothing a
+ *   stranger does may refuse them, and the address bucket is not even spent on
+ *   their behalf. Ten a day is the stricter of the two numbers anyway: this is
+ *   not a loosening, it is the same ceiling applied to the right person.
+ *
+ *   A SIGNED-OUT REPORTER WHOSE ADDRESS IS KNOWN is judged by the ADDRESS
+ *   ceiling — five an hour. "Known" means the deployment says something in
+ *   front of it overwrites the header (lib/visitor-policy.ts); off the tunnel
+ *   nobody's address is known and this case does not arise.
+ *
+ *   EVERYBODY ELSE SHARES ONE BUCKET, and it gets a ceiling of its own
+ *   because it is a different thing. `SHARED_BUCKET` is not one visitor, it is
+ *   "all of them" — so bounding it at five an hour was applying a per-person
+ *   number to a whole population. Sixty an hour is a bound on our own mail
+ *   server and moderation queue rather than on any person: a real flood still
+ *   stops, and one determined stranger can no longer close the channel for
+ *   everybody in twelve minutes.
+ *
+ * Every key is hashed with the per-process salt on the way in and every string
+ * is dropped, exactly like every other bucket in this file, so this cannot
+ * become a record of who reported what and when. That matters here more than
+ * for a review: a review is public and a report is not.
  */
 export function allowReport(address: string, accountId: string | null): EditAllowance {
-  const byAddress = state().reportedFrom.take(
-    visitorKey(`report-address:${address.trim()}`),
-    limits().reportsPerAddressPerHour,
-  );
-  if (!byAddress.allowed) {
-    return { allowed: false, retryAfterSeconds: byAddress.retryAfterSeconds };
+  // THE ACCOUNT GATE FIRST, AND ON ITS OWN. Asking the address bucket first
+  // and returning on its refusal is precisely F5: it makes a signed-in
+  // account's ceiling reachable by somebody who is not that account.
+  if (accountId) {
+    const byAccount = state().reportedBy.take(
+      visitorKey(`report-account:${accountId.trim()}`),
+      limits().reportsPerAccountPerDay,
+    );
+    return { allowed: byAccount.allowed, retryAfterSeconds: byAccount.retryAfterSeconds };
   }
-  if (!accountId) return { allowed: true, retryAfterSeconds: 0 };
 
-  const byAccount = state().reportedBy.take(
-    visitorKey(`report-account:${accountId.trim()}`),
-    limits().reportsPerAccountPerDay,
+  const key = address.trim();
+  const shared = key === SHARED_BUCKET || key === '';
+  const taken = state().reportedFrom.take(
+    visitorKey(`report-address:${key}`),
+    shared ? limits().reportsPerSharedBucketPerHour : limits().reportsPerAddressPerHour,
   );
-  return { allowed: byAccount.allowed, retryAfterSeconds: byAccount.retryAfterSeconds };
+  return { allowed: taken.allowed, retryAfterSeconds: taken.retryAfterSeconds };
 }
 
 /**

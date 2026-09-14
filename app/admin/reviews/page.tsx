@@ -7,8 +7,9 @@ import { Button } from '@/components/Button';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
 import { Stars } from '@/components/Stars';
-import { reports, reviewPage } from '@/lib/admin';
+import { REVIEWS_PER_PAGE, reportPage, reviewPage } from '@/lib/admin';
 import {
+  LIST_LIMIT,
   MAX_REMOVAL_REASON,
   MIN_REMOVAL_REASON,
   type AdminReport,
@@ -130,19 +131,86 @@ function tabOf(raw: string | undefined): TabId {
   return raw === 'all' || raw === 'removed' ? raw : 'reported';
 }
 
+/**
+ * `?from=` — how many rows to skip, and nothing a URL can do to it is an error.
+ *
+ * OWNER FEEDBACK, ROUND 1, F11. Both lists on this page are now paged with the
+ * same parameter, because the Reported tab was fifty rows with no control for
+ * the rest and its own badge counted the truncated array. A nonsense value is
+ * the first page rather than a 500: this is an operator's screen and an
+ * operator who mangles a URL should get the list back, not an error page.
+ */
+function offsetOf(raw: string | undefined): number {
+  const n = Number.parseInt(raw ?? '', 10);
+  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, 1_000_000) : 0;
+}
+
+/**
+ * "Older" and "Newer", when there is anything either way.
+ *
+ * Links and not a control, for the reason the tabs are links: it works before
+ * hydration, it works with JavaScript off, each page is a URL somebody can
+ * send to somebody else, and the back button does what a back button does.
+ */
+function Pager({
+  tab,
+  offset,
+  shown,
+  total,
+  what,
+}: {
+  tab: TabId;
+  offset: number;
+  shown: number;
+  total: number;
+  what: string;
+}) {
+  const older = offset + shown;
+  const newer = Math.max(0, offset - shown);
+  if (total <= shown && offset === 0) return null;
+
+  return (
+    <p className="admnote" style={{ display: 'flex', gap: 16, alignItems: 'baseline' }}>
+      <span>
+        Showing {total === 0 ? 0 : offset + 1}–{offset + shown} of {total} {what}.
+      </span>
+      {offset > 0 ? (
+        <Link href={`/admin/reviews?tab=${tab}${newer > 0 ? `&from=${newer}` : ''}`}>Newer</Link>
+      ) : null}
+      {older < total ? <Link href={`/admin/reviews?tab=${tab}&from=${older}`}>Older</Link> : null}
+    </p>
+  );
+}
+
 export default async function AdminReviews({ searchParams }: Props) {
-  const page = await reviewPage();
-  if (!page) notFound();
-
-  // Null only for somebody who is not an administrator, and the layout has
-  // already answered them with the not-found page by the time this runs.
-  const filed = (await reports()) ?? [];
-
   const params = await searchParams;
   const problem = first(params.problem);
   const told = first(params.told);
   const resolved = first(params.resolved);
   const tab = tabOf(first(params.tab));
+  const from = offsetOf(first(params.from));
+
+  // ONE OFFSET FOR WHICHEVER TAB IS OPEN. The three lists are three different
+  // queries and a person is looking at one of them, so `?from=` means "this
+  // tab, from row N" and switching tabs starts again from the top — which is
+  // what the tab links do, because they carry no `from`.
+  const page = await reviewPage(REVIEWS_PER_PAGE, tab === 'reported' ? 0 : from);
+  if (!page) notFound();
+
+  // Null only for somebody who is not an administrator, and the layout has
+  // already answered them with the not-found page by the time this runs.
+  //
+  // OWNER FEEDBACK, ROUND 1, F11: this used to be `reports()` with no argument
+  // at all, so the tab was fifty rows and the fifty-first was unreachable from
+  // the only screen in the product that lists reports.
+  const filedPage = await reportPage(LIST_LIMIT, tab === 'reported' ? from : 0);
+  const filed = filedPage?.rows ?? [];
+
+  // AND THE BADGE COMES FROM THE DATABASE, not from the length of a truncated
+  // array — the other half of F11. `admin_report_counts().open` has no window
+  // on it and no limit, so with sixty open reports the tab says sixty and
+  // shows the fifty oldest.
+  const openCount = filedPage?.open ?? 0;
 
   // THREE LISTS, BECAUSE THERE ARE THREE STATES (Phase 8 review, F8).
   // `removedAt` used to be the review's `deleted_at`, which its AUTHOR sets
@@ -176,8 +244,13 @@ export default async function AdminReviews({ searchParams }: Props) {
 
         <nav className="admtabs" aria-label="Which reviews">
           {TABS.map((t) => {
+            // The Reported badge is `admin_report_counts().open` — the real
+            // backlog, with no window and no limit on it — rather than the
+            // length of whatever this page happened to receive. F11: with
+            // sixty open reports the badge said fifty and nothing said the
+            // other ten existed.
             const count =
-              t.id === 'reported' ? open.length : t.id === 'removed' ? down.length : reviews.length;
+              t.id === 'reported' ? openCount : t.id === 'removed' ? down.length : reviews.length;
             return (
               <Link
                 key={t.id}
@@ -218,7 +291,7 @@ export default async function AdminReviews({ searchParams }: Props) {
                   Open
                 </h2>
                 <span className="admperiod">
-                  {open.length} {open.length === 1 ? 'report' : 'reports'}
+                  {openCount} {openCount === 1 ? 'report' : 'reports'}, oldest first
                 </span>
               </div>
 
@@ -264,6 +337,18 @@ export default async function AdminReviews({ searchParams }: Props) {
                 why the note is optional.
               </p>
             </section>
+
+            {/* F11. Open reports are oldest first, so this page drains from
+                the front and "Older" reaches what the limit left behind.
+                Before this the tab was fifty rows and the fifty-first was
+                unreachable from the only screen that lists reports. */}
+            <Pager
+              tab="reported"
+              offset={from}
+              shown={filed.length}
+              total={filedPage?.total ?? filed.length}
+              what="reports, open first and then closed"
+            />
           </>
         ) : null}
 
@@ -350,12 +435,14 @@ export default async function AdminReviews({ searchParams }: Props) {
           </section>
         ) : null}
 
-        {tab !== 'reported' && page.total > page.rows.length ? (
-          <p className="admnote">
-            Showing {page.rows.length} of {page.total} reviews, newest first. The rest are not on
-            this page; there is no control for them yet and this sentence is here rather than a
-            list that silently stops.
-          </p>
+        {tab !== 'reported' ? (
+          <Pager
+            tab={tab}
+            offset={from}
+            shown={page.rows.length}
+            total={page.total}
+            what="reviews, newest first"
+          />
         ) : null}
       </main>
 
@@ -371,6 +458,20 @@ const WHAT: Record<string, string> = {
 };
 
 /**
+ * What "not found" means for each kind, on hover.
+ *
+ * OWNER FEEDBACK, ROUND 1, F20. Two quite different things end up here and the
+ * operator has to be able to tell them apart: junk somebody typed, and a real
+ * report whose subject has been deleted since — which is exactly the case the
+ * missing foreign key on `reports.target` exists to allow.
+ */
+const GONE: Record<string, string> = {
+  review: 'No review has this number. Either it was typed wrong, or the review has been deleted outright since the report was filed.',
+  tool: 'No listing has this address. Either it was typed wrong, or the listing is a draft or has been removed since.',
+  profile: 'No account has this id or handle. Either it was typed wrong, or the account has been deleted since.',
+};
+
+/**
  * One report, with the thing it is about under it.
  *
  * THE REVIEW COMES WITH THE REPORT rather than being looked up here. A
@@ -379,14 +480,34 @@ const WHAT: Record<string, string> = {
  * see that migration for why a wide result is the right shape.
  */
 function ReportRow({ report }: { report: AdminReport }) {
-  const target =
-    report.kind === 'tool' ? (
-      <Link href={`/tools/${report.target}`}>{report.target}</Link>
-    ) : report.kind === 'profile' ? (
-      <Link href={`/u/${report.target}`}>@{report.target}</Link>
-    ) : (
-      <span className="tab">#{report.target}</span>
-    );
+  /* WHAT THE TARGET IS, AND WHETHER IT IS STILL THERE — OWNER FEEDBACK, ROUND
+   * 1, F20 and F21.
+   *
+   * F21: a `kind=profile` report stores `profiles.id`, because a handle is
+   * user-editable and an old report pointing at a name somebody else has taken
+   * since would be an accusation attached to the wrong person. So the link is
+   * built from `targetHandle`, which is what that account is called RIGHT NOW,
+   * and the stored id is never drawn — it is not a name anybody would
+   * recognise.
+   *
+   * F20: filing is deliberately permissive. A report may name a listing that
+   * does not exist, a draft, or a review that has since been deleted — and it
+   * must, because filing has to leak no existence and a report has to outlive
+   * its target. `targetResolves` is how the operator tells the two apart
+   * without following a link to find out, so junk can be closed at a glance
+   * and a real report about something that has gone is not mistaken for it. */
+  const label =
+    report.kind === 'profile' ? (report.targetHandle ?? report.target) : report.target;
+
+  const target = !report.targetResolves ? (
+    <span className="tab faint">{label}</span>
+  ) : report.kind === 'tool' ? (
+    <Link href={`/tools/${label}`}>{label}</Link>
+  ) : report.kind === 'profile' ? (
+    <Link href={`/u/${label}`}>@{label}</Link>
+  ) : (
+    <span className="tab">#{label}</span>
+  );
 
   return (
     <article className="admreview">
@@ -394,6 +515,11 @@ function ReportRow({ report }: { report: AdminReport }) {
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
           <strong>{WHAT[report.kind] ?? report.kind}</strong>
           {target}
+          {report.targetResolves ? null : (
+            <span className="tab" style={{ color: 'var(--c-red)' }} title={GONE[report.kind]}>
+              not found
+            </span>
+          )}
           <span className="tab faint">
             {report.reporter ? `reported by @${report.reporter}` : 'reported by somebody signed out'}
           </span>

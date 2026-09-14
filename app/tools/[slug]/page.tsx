@@ -585,6 +585,27 @@ export default async function ToolPage({ params, searchParams }: ToolProps) {
                           {review.easeOfUse !== null ? ` · Easy to start: ${review.easeOfUse}/5` : null}
                         </div>
                       ) : null}
+                      {/* REPORT THIS REVIEW — OWNER FEEDBACK, ROUND 1, F6.
+                          `/report` asks for "the review's number, from its
+                          page", and until this line no page in the product
+                          rendered one: the id was a React `key` and nothing
+                          else, and the only report link on a tool page was
+                          `kind=tool`. So the natural way to report a review
+                          was to choose "A review" and type the listing's
+                          address, which the CHECK refused, which produced an
+                          email saying NOT RECORDED and a screen telling the
+                          reporter it was "a fault our end". The link carries
+                          the kind and the number, so the ordinary path types
+                          neither — and the number is visible beside it for
+                          somebody who would rather go the long way round.
+                          Quiet: reporting is a thing a few people need and
+                          nobody should be invited to do. */}
+                      <div className="faint" style={{ fontSize: 'var(--t-micro-sm)' }}>
+                        <Link href={`/report?kind=review&target=${encodeURIComponent(review.id)}`}>
+                          Report this review
+                        </Link>{' '}
+                        · no. {review.id}
+                      </div>
                     </div>
                   );
                 })}

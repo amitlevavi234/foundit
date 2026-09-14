@@ -703,8 +703,22 @@ export default async function AdminDashboard() {
                 counts them at the edge with no cookie and does not tell us who they are either
                 (§13). A <span className="admhatched">hatched</span> day is one where nothing was
                 counting yet, which is not the same as a day with no visitors and is not drawn as
-                one. Excluded: <code>/healthz</code>, <code>/o</code>, requests for a page
-                somebody is already on, prefetches, and static files.
+                one.{' '}
+                {/* OWNER FEEDBACK, ROUND 1, F3 and overclaim 12. This sentence
+                    used to name five exclusions and only four of them were
+                    real: "requests for a page somebody is already on" was the
+                    RSC half of a guard that never fired, because `headers()`
+                    does not expose that header to a Server Component — so
+                    every client-side navigation counted a second time, in the
+                    direction that flatters the figure. The decision has moved
+                    to `middleware.ts`, where the header can be seen, and this
+                    caption now lists what is excluded AND the two inclusions a
+                    reader would otherwise assume away. */}
+                <strong>Excluded:</strong> <code>/healthz</code>, <code>/o</code>, static files,
+                prefetches, and the re-render a client-side navigation asks for when somebody is
+                already on the page. <strong>Counted:</strong> a page that answered 404 — it was
+                still rendered and served, and the status is not known until after the render this
+                is decided in — and a request from a bot that runs no script.
               </>
             }
           >
@@ -830,6 +844,12 @@ export default async function AdminDashboard() {
                 ? undefined
                 : 'Nothing has been recorded on any of these days. The ledger starts at the first paid call this build makes.'
             }
+            /* OWNER FEEDBACK, ROUND 1, F8: the sentence above is
+               all-or-nothing, so as soon as ONE paid call landed this chart
+               drew twenty-nine days of $0.00 for days the ledger did not exist
+               on — while `admin_spend_totals().first_day`, printed a few lines
+               up this same page, said the ledger began yesterday. The per-day
+               flag below is what the Visits chart has always had. */
             legend={[
               { label: 'Reader', color: SERIES.one },
               { label: 'Reranker', color: SERIES.two },
@@ -848,11 +868,14 @@ export default async function AdminDashboard() {
                 each call returns; the dollars come from <code>lib/prices.ts</code> and are stored
                 beside the tokens, so a price change does not rewrite what last month cost. The
                 reader&rsquo;s cached-input rate is not modelled, so its figure is an upper bound
-                rather than an understatement. A failure to record never fails a search.
+                rather than an understatement. A <span className="admhatched">hatched</span> day
+                is one before the ledger existed, which is not the same as a day that cost nothing
+                and is not drawn as one. A failure to record never fails a search.
               </>
             }
           >
             <Bars
+              recording={data.spend.map((d) => d.recording)}
               stacked
               series={[
                 { label: 'Reader', color: SERIES.one, values: data.spend.map((d) => d.reader) },

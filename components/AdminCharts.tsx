@@ -161,12 +161,29 @@ export function Bars({
   series,
   stacked = false,
   zeroNote,
+  recording,
 }: {
   series: BarSeries[];
   /** True only where the series really are parts of one total. */
   stacked?: boolean;
   /** What a day with no bar means, for the accessible summary. */
   zeroNote?: string;
+  /**
+   * Whether anything was being recorded on each day — OWNER FEEDBACK, ROUND 1,
+   * F8.
+   *
+   * `RecordedBars` below has had this since 0024 and the Visits chart uses it;
+   * `Bars` did not, so the Money chart drew twenty-nine columns of $0.00 for
+   * days before the ledger existed. Its "nothing has been recorded" sentence
+   * only appeared when there were no rows AT ALL, so one paid call turned
+   * twenty-nine unmeasured days into twenty-nine measured zeroes.
+   *
+   * Omit it where every day in the window really was being counted; a day it
+   * marks false is drawn hatched, exactly as `RecordedBars` draws one, and a
+   * day it marks true with nothing in it stays an empty slot — those are
+   * different facts and the chart now has a mark for each.
+   */
+  recording?: boolean[];
 }) {
   const n = Math.max(1, series[0]?.values.length ?? 0);
   const slot = W / n;
@@ -184,6 +201,11 @@ export function Bars({
 
   const total = series.reduce((sum, s) => sum + s.values.reduce((a, b) => a + b, 0), 0);
 
+  // F8. How many of the days in the window were being recorded at all. With no
+  // flag every day counts as recorded, which is what every caller but the
+  // Money chart means.
+  const unrecorded = recording ? recording.filter((day) => !day).length : 0;
+
   return (
     <svg
       className="admsvg"
@@ -193,10 +215,39 @@ export function Bars({
       aria-label={
         `${series.map((s) => s.label).join(' and ')} over ${n} days. ` +
         `${total} in total, and the tallest day is ${peak}.` +
+        (unrecorded > 0
+          ? ` ${unrecorded} of them are drawn hatched because nothing was being recorded yet.`
+          : '') +
         (zeroNote ? ` ${zeroNote}` : '')
       }
     >
+      {unrecorded > 0 ? (
+        <defs>
+          {/* A second pattern with a second id, rather than sharing
+              `RecordedBars`' one: two charts on the same page would otherwise
+              declare the same id twice, and a duplicate id is a document where
+              the first declaration wins by accident rather than by decision. */}
+          <pattern id="notrecording" width="4" height="4" patternUnits="userSpaceOnUse">
+            <path d="M0 4 L4 0" className="admhatch" />
+          </pattern>
+        </defs>
+      ) : null}
       {Array.from({ length: n }, (_, i) => {
+        // A day nothing was being recorded on gets the hatch and no bar. It is
+        // not a zero: a zero would say the money was counted and there was
+        // none.
+        if (recording && recording[i] === false) {
+          return (
+            <rect
+              key={`unrecorded-${i}`}
+              x={i * slot}
+              y={H - 6}
+              width={Math.max(1, slot - gap)}
+              height={6}
+              fill="url(#notrecording)"
+            />
+          );
+        }
         let bottom = H;
         return series.map((s, k) => {
           const value = s.values[i] ?? 0;

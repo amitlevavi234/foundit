@@ -229,8 +229,23 @@ export interface ReportNotice {
   details: string;
   /** The row this is about, so the two can be matched up. Null if it failed. */
   reportId: string | null;
-  /** The reporter's handle, or null when they were signed out. */
-  reporter: string | null;
+  /**
+   * WHICH KIND OF REPORTER, in words — OWNER FEEDBACK, ROUND 1, F15.
+   *
+   * This was "the reporter's handle, or null when they were signed out", and
+   * `app/report/actions.ts` passed `null` unconditionally, so every report
+   * this product has ever emailed said "Reported by: somebody signed out",
+   * including the ones filed by a signed-in account. Saying nothing would have
+   * been better than that; saying which of the two it was is better still, and
+   * is the first thing an operator triaging a flood needs.
+   *
+   * Deliberately NOT the handle. `lib/admin.ts` reads the reporter inside the
+   * database — `file_report` takes it from `auth.uid()` and never from an
+   * argument — so the action does not learn it, and an email is a copy of a
+   * name in somebody's inbox for ever. The handle is on the dashboard, behind
+   * the admin check, where the row is.
+   */
+  reporter: 'a signed-in account' | 'a visitor who was not signed in';
 }
 
 /** Where a report goes. The team's own address, never a maker's. */
@@ -245,7 +260,7 @@ export async function sendReport(notice: ReportNotice): Promise<SendResult> {
     '',
     `What: ${notice.kind} ${notice.target}`,
     `Recorded as: ${notice.reportId ?? 'NOT RECORDED — the write failed'}`,
-    `Reported by: ${notice.reporter ? `@${notice.reporter}` : 'somebody signed out'}`,
+    `Reported by: ${notice.reporter}`,
     '',
     `Reason: ${notice.reason}`,
     ...(notice.details ? [`More: ${notice.details}`] : []),

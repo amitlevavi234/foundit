@@ -76,12 +76,47 @@ export const DASHBOARD_SQL = `
     (select to_jsonb(x) from public.admin_report_counts($1::int) x)    as report_counts,
     public.admin_database_bytes()                                      as database_bytes`;
 
-/** The Reported tab: every report, unresolved first, with its review. */
+/**
+ * The Reported tab: one page of reports, open first and oldest first inside
+ * that, each with its review.
+ *
+ * `order by` INSIDE the aggregate, and it is load-bearing. `admin_reports`
+ * returns its rows in the order the tab reads in — F11's whole point is that
+ * the oldest open report is at the top — and `jsonb_agg` over a set-returning
+ * function is not obliged to preserve it. The ordering key is spelled out here
+ * as the same three clauses the function uses, so the array the page receives
+ * is in the order the database decided rather than in whatever order the rows
+ * happened to arrive in.
+ */
 export const ADMIN_REPORTS_SQL = `
   select coalesce(
-           (select jsonb_agg(to_jsonb(x)) from public.admin_reports($1::int) x),
+           (select jsonb_agg(to_jsonb(x)
+                             order by (x.resolved_at is not null),
+                                      case when x.resolved_at is null then x.created_at end asc,
+                                      case when x.resolved_at is null then x.report_id end asc,
+                                      x.created_at desc,
+                                      x.report_id desc)
+              from public.admin_reports($1::int, $2::int) x),
            '[]'::jsonb
-         ) as rows`;
+         ) as rows,
+         -- THE BADGE, from the database rather than from the length of the
+         -- array above it (OWNER FEEDBACK, ROUND 1, F11). The open count has
+         -- no window and no limit on it, so with sixty open reports the tab
+         -- says sixty and shows the fifty oldest, instead of saying fifty and
+         -- hiding ten. On the same round trip, because it is a number about
+         -- the rows beside it and a second statement could disagree with them.
+         (select x.open from public.admin_report_counts(3650) x) as open`;
+
+/**
+ * A handle to `profiles.id` — OWNER FEEDBACK, ROUND 1, F21.
+ *
+ * `public.profiles_public` and not `public.profiles`: reporting a profile is
+ * open to a signed-out visitor, and the view is the one 0003 built for the
+ * columns of a profile anybody may see. `citext`, so the handle's case is the
+ * database's problem rather than the caller's.
+ */
+export const PROFILE_ID_BY_HANDLE_SQL = `
+  select id from public.profiles_public where handle = $1::citext`;
 
 /** Filing one. The reporter is read inside the function, never passed in. */
 export const FILE_REPORT_SQL = `
@@ -355,6 +390,16 @@ export interface SpendDay {
   rerank: number;
   embed: number;
   worker: number;
+  /**
+   * Whether the ledger existed that day at all — OWNER FEEDBACK, ROUND 1, F8.
+   *
+   * The same column `ViewsDay` has had since 0024, and for the same reason:
+   * the Money chart drew twenty-nine columns of $0.00 for days before the
+   * first paid call, which is a measurement nobody made. §10's rule is that
+   * nothing draws a 0 where the truth is "not recorded", and the Visits chart
+   * had been keeping it on its own.
+   */
+  recording: boolean;
 }
 
 export interface SpendTotals {
@@ -391,6 +436,41 @@ export interface AdminReport {
   resolvedBy: string | null;
   resolution: string | null;
   review: AdminReview | null;
+  /**
+   * Does the thing this report names still exist? — OWNER FEEDBACK, ROUND 1,
+   * F20.
+   *
+   * The WRITE is permissive on purpose: filing must leak no existence, and a
+   * report has to outlive its target, which is frequently why it was filed. So
+   * the reader answers the question instead, and the tab marks the rows an
+   * operator can stop reading.
+   */
+  targetResolves: boolean;
+  /**
+   * For `kind === 'profile'`, that account's handle right now — F21.
+   *
+   * The row stores `profiles.id`, because a handle is editable and a rename
+   * would otherwise re-point an old report at whoever took the name. Null for
+   * every other kind, and null for an id that resolves to nobody.
+   */
+  targetHandle: string | null;
+}
+
+/**
+ * A page of reports, and how many there are in total.
+ *
+ * The same shape `AdminReviewPage` has had since the Phase 8 review, for the
+ * same reason: the Reported tab drew fifty rows and had no control for the
+ * rest, so past fifty open reports the oldest ones fell off the only screen
+ * that lists them (OWNER FEEDBACK, ROUND 1, F11).
+ */
+export interface AdminReportPage {
+  rows: AdminReport[];
+  total: number;
+  /** Unresolved right now, whatever this page holds. The tab's badge. */
+  open: number;
+  limit: number;
+  offset: number;
 }
 
 export interface AdminReview {
@@ -530,6 +610,10 @@ export function toDashboard(row: Record<string, unknown> | undefined): Dashboard
       rerank: num(s.rerank),
       embed: num(s.embed),
       worker: num(s.worker),
+      // F8, and `=== true` for the same reason the line above it gives: an
+      // absent flag is "nothing was being recorded", which the chart draws as
+      // a hatch rather than as $0.00.
+      recording: s.recording === true,
     })),
     spendTotals: toSpendTotals(row?.spend_totals),
     reports: {
@@ -587,6 +671,8 @@ export function toAdminReports(value: unknown): AdminReport[] {
       resolvedAt: maybe(r.resolved_at),
       resolvedBy: maybe(r.resolved_by),
       resolution: maybe(r.resolution),
+      targetResolves: r.target_resolves === true,
+      targetHandle: maybe(r.target_handle),
       review:
         r.review_id === null || r.review_id === undefined
           ? null
@@ -600,11 +686,38 @@ export function toAdminReports(value: unknown): AdminReport[] {
               createdAt: text(r.review_created_at),
               removedByAdminAt: maybe(r.removed_by_admin_at),
               authorDeletedAt: maybe(r.author_deleted_at),
-              removalReason: null,
-              removedBy: null,
+              // OWNER FEEDBACK, ROUND 1, F12. These two were `null,` and
+              // `null,` — hardcoded, because `admin_reports` declared no such
+              // columns even though it already left-joined `review_removals`
+              // and read `rr.created_at` on the next line. `Row` is shared
+              // with the All and Removed tabs, which get a real reason from
+              // `admin_reviews`, so on the Reported tab a removed review
+              // rendered "Removed <date>: " and then nothing, under this
+              // page's own promise that the reason goes on the record. 0030
+              // adds the columns; this maps them.
+              removalReason: maybe(r.removal_reason),
+              removedBy: maybe(r.removed_by),
             },
     };
   });
+}
+
+/**
+ * The page, with the count that came back beside the rows.
+ *
+ * `total` is read from the first row rather than from a second statement, for
+ * the reason `toAdminReviewPage` gives: an empty page has no row to read it
+ * from and is honestly a total of zero.
+ */
+export function toAdminReportPage(
+  value: unknown,
+  open: unknown,
+  limit: number,
+  offset: number,
+): AdminReportPage {
+  const rows = toAdminReports(value);
+  const first = list(value)[0];
+  return { rows, total: num(first?.total), open: num(open), limit, offset };
 }
 
 export function toAdminReviews(value: unknown): AdminReview[] {
@@ -722,6 +835,74 @@ export function isReportKind(value: string): value is ReportKind {
 /** What the form will actually send: cleaned, never the raw bytes. */
 export function cleanReportText(raw: string, max: number): string {
   return cleanText(raw).slice(0, max);
+}
+
+/* ---------------------------------------------------------------------------
+ * THE TARGET'S SHAPE, ASKED BEFORE ANYTHING HAPPENS — OWNER FEEDBACK, ROUND 1,
+ * F6.
+ *
+ * Nothing between the form and `reports_target_shaped` validated the target.
+ * The most natural mistake anybody could make — choosing "A review" and typing
+ * the listing's address — produced NO ROW, an email to the operator saying
+ * "Recorded as: NOT RECORDED — the write failed", and this on screen:
+ *
+ *     "Thank you. The team has been told by email. It could not be added to
+ *      the moderation list — that is a fault our end and not yours."
+ *
+ * It was not a fault our end, the reporter was told the opposite of what had
+ * happened, and there was no way to get it right — the review id was rendered
+ * nowhere in the product and there was no per-review report link. Both halves
+ * are fixed: the id is on the page now (`app/tools/[slug]/page.tsx`), and this
+ * is the check that turns a typo into a sentence instead of a dead letter.
+ *
+ * THREE KINDS, THREE SHAPES, and each is the shape the thing actually has:
+ *
+ *   review   1 to 18 digits. Eighteen because that is the widest decimal that
+ *            always fits in a bigint, which is `reports_target_shaped`'s own
+ *            bound since 0030 (F1).
+ *   tool     a slug: lowercase letters, digits and hyphens.
+ *   profile  a handle: `^[a-z0-9_]{3,24}$`, which is `profiles_handle_format`.
+ *            What is STORED for this kind is the profile's id, resolved from
+ *            the handle in `app/report/actions.ts` — see F21 there.
+ *
+ * IT DOES NOT ASK WHETHER THE THING EXISTS, and that is deliberate rather than
+ * lazy. A refusal that depended on existence would be an oracle: "is there a
+ * user called X" answered to anybody, one form post at a time. Existence is
+ * the operator's question and `admin_reports.target_resolves` is where it is
+ * answered (F20).
+ * ------------------------------------------------------------------------ */
+
+const TARGET_SHAPES: Record<ReportKind, RegExp> = {
+  review: /^[0-9]{1,18}$/,
+  tool: /^[a-z0-9][a-z0-9-]{0,119}$/,
+  profile: /^[a-z0-9_]{3,24}$/,
+};
+
+/** What to say when the target is not the shape that kind of thing has. */
+export const TARGET_SHAPE_HELP: Record<ReportKind, string> = {
+  review:
+    'A review is identified by its number — the one beside “Report this review” under it on the '
+    + 'tool’s page, like 128. Not the tool’s address.',
+  tool: 'A listing is identified by its address, the last part of its page’s URL, like anki.',
+  profile: 'A profile is identified by its handle, like priya — letters, digits and underscores.',
+};
+
+/**
+ * The target as it will be stored.
+ *
+ * Lowercased for a tool and a profile, because `tools.slug` is `citext` and a
+ * handle is lowercase by its own CHECK — somebody typing `Anki` means `anki`,
+ * and refusing them over a capital letter would be pedantry with a form in
+ * front of it. A review number has no case to fold.
+ */
+export function normaliseReportTarget(kind: ReportKind, raw: string): string {
+  const target = cleanReportText(raw, 200);
+  return kind === 'review' ? target : target.toLowerCase();
+}
+
+/** Is this target the shape that kind of thing has? The page asks first. */
+export function reportTargetProblem(kind: ReportKind, raw: string): 'target' | null {
+  return TARGET_SHAPES[kind].test(normaliseReportTarget(kind, raw)) ? null : 'target';
 }
 
 /** Is this a reason `public.file_report` will accept? The page asks first. */

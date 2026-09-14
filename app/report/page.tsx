@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { cookies } from 'next/headers';
 import Link from 'next/link';
 
 import { BackLink } from '@/components/BackLink';
@@ -9,8 +10,10 @@ import {
   MAX_REPORT_DETAILS,
   MAX_REPORT_REASON,
   MIN_REPORT_REASON,
+  TARGET_SHAPE_HELP,
   isReportKind,
 } from '@/lib/admin-sql';
+import { REPORT_DRAFT_COOKIE, parseReportDraft } from '@/lib/report-draft';
 
 import { submitReport } from './actions';
 
@@ -61,19 +64,48 @@ export const dynamic = 'force-dynamic';
  * rule rather than as three bugs.
  * ======================================================================== */
 
+/**
+ * The three kinds, and what identifies each.
+ *
+ * `what` used to say of a review only "The review's number, from its page" —
+ * and no page in the product printed one (OWNER FEEDBACK, ROUND 1, F6). It
+ * does now: every review on a tool page carries a "Report this review" link
+ * with the number already in it, so the ordinary way to reach this form for a
+ * review is to follow that link and never type a number at all. This line is
+ * for the person who got here some other way.
+ */
 const KINDS: Array<{ value: 'tool' | 'review' | 'profile'; label: string; what: string }> = [
   { value: 'tool', label: 'A listing', what: 'The tool’s address, like anki' },
-  { value: 'review', label: 'A review', what: 'The review’s number, from its page' },
+  {
+    value: 'review',
+    label: 'A review',
+    what: 'The number beside “Report this review” under it, like 128',
+  },
   { value: 'profile', label: 'A profile', what: 'The handle, like priya' },
 ];
 
+/**
+ * What went wrong, in the reporter's own terms.
+ *
+ * THE THREE `target-*` ENTRIES ARE OWNER FEEDBACK, ROUND 1, F6. Choosing "A
+ * review" and typing the listing's address is the most natural mistake this
+ * form allows, and it used to produce no row, an email saying "NOT RECORDED",
+ * and a screen telling the reporter it was "a fault our end and not yours". It
+ * was their typo, nothing told them so, and the number they needed was not
+ * rendered anywhere in the product. Each kind now says what its own identifier
+ * looks like, and the tool page carries a "Report this review" link with the
+ * number already in it.
+ */
 const PROBLEM: Record<string, string> = {
   kind: 'Choose what the report is about.',
   target: 'Say which one. A listing’s address, a review’s number, or a handle.',
+  'target-review': `That is not a review’s number. ${TARGET_SHAPE_HELP.review}`,
+  'target-tool': `That is not a listing’s address. ${TARGET_SHAPE_HELP.tool}`,
+  'target-profile': `That is not a handle. ${TARGET_SHAPE_HELP.profile}`,
   short: `A reason needs at least ${MIN_REPORT_REASON} characters. Say what is wrong with it in a sentence.`,
   long: `A reason has to fit in ${MAX_REPORT_REASON} characters. The box below it takes the rest.`,
   'too-many':
-    'That is as many reports as this page takes for now — five an hour, or ten a day from one account. Nothing was recorded and nothing was sent; try again later and what you typed is still here.',
+    'That is as many reports as this page takes for now — ten a day from one account, and a ceiling on how many can arrive at once from visitors who are not signed in. Nothing was recorded and nothing was sent; try again later and what you typed is still here.',
   lost:
     'Nothing was recorded and nothing was sent. That is our fault rather than yours. What you typed is still here — try again in a moment, and if it happens twice tell us on /contact.',
 };
@@ -97,11 +129,39 @@ export default async function Report({ searchParams }: ReportProps) {
   const problem = one(params.problem);
   const sent = one(params.sent);
 
-  const rawKind = one(params.kind);
+  /* WHERE THE FORM'S VALUES COME FROM, and there are two sources on purpose —
+   * OWNER FEEDBACK, ROUND 1, F13.
+   *
+   * THE QUERY STRING, for `?kind=` and `?target=`, because those two are how
+   * another page LINKS here: the foot of a tool page sends
+   * `?kind=tool&target=anki`, and each review sends `?kind=review&target=<id>`.
+   * They are the identity of a public thing, they are already in the URL of
+   * the page the person came from, and a link that could not prefill them
+   * would be a link that made the reporter copy a number by hand.
+   *
+   * THE COOKIE, for everything else and for a refusal. The reason and the
+   * details are the reporter's own accusation about somebody, and they used to
+   * come back on the query string — so a 2.5 kB URL carrying it landed in
+   * every access log in front of this application, in the browser's history,
+   * and in the `Referer` of the next click on this page's own links to
+   * /guidelines and /security. Now a refusal redirects with `problem=` alone
+   * and the draft waits in a five-minute httpOnly cookie, exactly as a review
+   * draft does (lib/review-draft.ts, lib/report-draft.ts).
+   *
+   * The draft wins where it exists, because it is the more recent of the two:
+   * a person who has just been refused typed those words after following the
+   * link that set the query string. */
+  const draft = parseReportDraft((await cookies()).get(REPORT_DRAFT_COOKIE)?.value);
+  // The draft is restored on a REFUSAL and at no other time. Somebody arriving
+  // fresh from a link gets the link's prefill and an empty form, even if they
+  // were refused four minutes ago about something else.
+  const restored = problem === '' ? null : draft;
+
+  const rawKind = restored?.kind ?? one(params.kind);
   const kind = isReportKind(rawKind) ? rawKind : '';
-  const target = one(params.target);
-  const reason = one(params.reason);
-  const details = one(params.details);
+  const target = restored?.target ?? one(params.target);
+  const reason = restored?.reason ?? '';
+  const details = restored?.details ?? '';
 
   return (
     <div className="page">

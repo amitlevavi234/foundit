@@ -26,6 +26,7 @@ import {
   DEFAULT_OPENS_PER_DAY,
   DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR,
   DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY,
+  DEFAULT_REPORTS_PER_SHARED_BUCKET_PER_HOUR,
   DEFAULT_OPENS_PER_VISITOR_PER_HOUR,
   DEFAULT_READER_CALLS_PER_DAY,
   DEFAULT_RERANK_CALLS_PER_DAY,
@@ -39,6 +40,7 @@ import {
   TokenBuckets,
   allowEdit,
   allowOutboundOpen,
+  allowReport,
   allowPublish,
   allowReview,
   allowSave,
@@ -297,6 +299,9 @@ test('the limits come from the environment, with the documented defaults', () =>
       // signed-out visitor so one of the two has to be the address.
       reportsPerAddressPerHour: DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR,
       reportsPerAccountPerDay: DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY,
+      // OWNER FEEDBACK, ROUND 1, F5: a third ceiling, for the bucket that is
+      // everybody rather than one visitor.
+      reportsPerSharedBucketPerHour: DEFAULT_REPORTS_PER_SHARED_BUCKET_PER_HOUR,
     });
     // Phase 7's review. The embedder has two ceilings now, and the second is
     // the one that is about the money: MAX_EMBEDDING_CALLS_PER_DAY counts
@@ -1345,5 +1350,144 @@ test('the two write paths actually call them, and before they write', () => {
   assert.ok(
     saved.indexOf('allowSave(viewer)') < saved.indexOf('await saveTool('),
     'the limit must be taken BEFORE the tool is saved',
+  );
+});
+
+/* ---------------------------------------------------------------------------
+ * FILING A REPORT — OWNER FEEDBACK, ROUND 1, F5.
+ *
+ * The reviewer's own sequence, driven directly rather than over HTTP. It ran
+ * one client against :3000 for a minute and got this:
+ *
+ *     S1 signed-in tool    | 303 | Location: /report?sent=recorded
+ *     A4 stranger          | 303 | recorded
+ *     A5 stranger          | 303 | recorded
+ *     A6 stranger OVER     | 303 | problem=too-many
+ *     …
+ *     S2 signed-in OVER    | 303 | problem=too-many
+ *
+ * S2 is a fully signed-in account refused because a signed-out stranger had
+ * spent the bucket. With `TRUST_CLOUDFLARE_HEADERS` unset — the default —
+ * `visitorAddress()` returns the literal string `unattributed` for everybody,
+ * so "five per address per hour" was five in total, between the whole
+ * internet, and `/report` is this product's §4.5 notice mechanism.
+ * ------------------------------------------------------------------------ */
+test('a stranger cannot close the reporting channel for a signed-in account', () => {
+  // The shared bucket, spent to its ceiling by visitors who are not signed in.
+  // Sixty rather than five, because this bucket is everybody rather than one
+  // person — which is the second half of F5.
+  const ceiling = DEFAULT_REPORTS_PER_SHARED_BUCKET_PER_HOUR;
+  let refusedAt = null;
+  for (let i = 1; i <= ceiling + 1; i += 1) {
+    const answer = allowReport(SHARED_BUCKET, null);
+    if (!answer.allowed && refusedAt === null) refusedAt = i;
+  }
+  assert.equal(
+    refusedAt,
+    ceiling + 1,
+    `the shared bucket refused at ${refusedAt} and its ceiling is ${ceiling}`,
+  );
+
+  // AND THE SIGNED-IN ACCOUNT IS NOT REFUSED BY IT. This is S2, and it is the
+  // whole finding: the account gate is asked first and on its own, so nothing
+  // a stranger did is between this person and the form.
+  const account = 'acct-S2-signed-in';
+  const s2 = allowReport(SHARED_BUCKET, account);
+  assert.equal(
+    s2.allowed,
+    true,
+    'a signed-in account was refused because strangers had spent the shared bucket — F5',
+  );
+
+  // Its own ceiling still holds, and it is the stricter of the two numbers.
+  let accountRefusedAt = null;
+  for (let i = 2; i <= DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY + 1; i += 1) {
+    const answer = allowReport(SHARED_BUCKET, account);
+    if (!answer.allowed && accountRefusedAt === null) accountRefusedAt = i;
+  }
+  assert.equal(
+    accountRefusedAt,
+    DEFAULT_REPORTS_PER_ACCOUNT_PER_DAY + 1,
+    'the account ceiling is ten a day and it has to still be there',
+  );
+  // A day and not an hour: the retry it offers is hours away, which is what
+  // distinguishes the two windows.
+  assert.ok(
+    allowReport(SHARED_BUCKET, account).retryAfterSeconds > 3600,
+    'the account bucket is a DAY, so its retry is more than an hour away',
+  );
+
+  // And a SECOND account is untouched by the first one's ceiling.
+  assert.equal(
+    allowReport(SHARED_BUCKET, 'acct-somebody-else').allowed,
+    true,
+    'one account spending its day did not have to refuse another',
+  );
+});
+
+test('an attributable address gets the per-address ceiling, and only its own', () => {
+  // This is the case with TRUST_CLOUDFLARE_HEADERS set: a real address, from a
+  // header something in front of this process overwrites.
+  const ceiling = DEFAULT_REPORTS_PER_ADDRESS_PER_HOUR;
+  let refusedAt = null;
+  for (let i = 1; i <= ceiling + 1; i += 1) {
+    const answer = allowReport('203.0.113.7', null);
+    if (!answer.allowed && refusedAt === null) refusedAt = i;
+  }
+  assert.equal(refusedAt, ceiling + 1, 'five per address per hour, still');
+  assert.ok(
+    allowReport('203.0.113.7', null).retryAfterSeconds <= 3600,
+    'the address bucket is an HOUR, so its retry is within one',
+  );
+
+  // A different address is a different bucket, which is the property the
+  // shared bucket exists BECAUSE we do not have off the tunnel.
+  assert.equal(
+    allowReport('203.0.113.8', null).allowed,
+    true,
+    'one address spending its hour refused another',
+  );
+
+  // And a signed-in reporter on a spent address is judged by their account,
+  // not by the address — the F5 rule applied the other way round.
+  assert.equal(
+    allowReport('203.0.113.7', 'acct-on-a-spent-address').allowed,
+    true,
+    'a signed-in account was refused by the address bucket it is not judged by',
+  );
+});
+
+test('the report action asks the ceiling before either side effect', () => {
+  // The Phase 7 review's F4 in its report-shaped form: a limiter nothing calls
+  // is decoration. And the ORDER matters twice over here — `currentUserId` has
+  // to be read before `allowReport`, because F5's whole fix is that a
+  // signed-in reporter is judged by their account.
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const action = strip(readFileSync(new URL('../app/report/actions.ts', import.meta.url), 'utf8'));
+
+  assert.match(action, /allowReport\(await visitorAddress\(\), viewer\)/, 'submitReport must ask allowReport with the viewer');
+  assert.ok(
+    action.indexOf('await currentUserId()') < action.indexOf('allowReport('),
+    'the viewer must be known before the ceiling is asked, or the account gate cannot be used',
+  );
+  assert.ok(
+    action.indexOf('allowReport(') < action.indexOf('await fileReport('),
+    'the ceiling must be taken BEFORE the row is written',
+  );
+  assert.ok(
+    action.indexOf('allowReport(') < action.indexOf('await sendReport('),
+    'and BEFORE the email is sent',
+  );
+  // F6: and the shape is checked before the ceiling, so a typo does not spend
+  // a token from anybody's bucket.
+  assert.ok(
+    action.indexOf('reportTargetProblem(') < action.indexOf('allowReport('),
+    'the target shape must be checked before a token is spent',
+  );
+  // F13: nothing the reporter typed goes on a query string.
+  assert.doesNotMatch(
+    action,
+    /back\(\{[\s\S]*?reason/,
+    'a refusal must not put the reporter’s words in a URL',
   );
 });
