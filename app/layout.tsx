@@ -53,25 +53,31 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   const incoming = await headers();
   const nonce = incoming.get('x-nonce') ?? '';
 
-  /* ONE PAGE VIEW — the owner's item 10, 14 September 2026.
+  /* ONE PAGE VIEW — the owner's item 10, 14 September 2026, and OWNER
+   * FEEDBACK, ROUND 1, F3.
    *
-   * This is the only place it is counted, because this is the one component
-   * that renders for every HTML document and for nothing else: `/healthz` is a
-   * Route Handler and `/o` answers 204, so neither reaches here at all, and
-   * `_next/static` never touches a React render.
+   * THE DECISION IS NOT MADE HERE ANY MORE, and that is the whole of F3. This
+   * line used to read
    *
-   * WHAT THE TWO HEADERS ARE FOR. A client-side navigation re-renders the tree
-   * on the server with `RSC: 1`, which would count a second view for a page
-   * somebody is already on; `Next-Router-Prefetch` marks a render for a link
-   * nobody has followed. Counting either would make the number bigger than
-   * the truth in the direction that flatters it, which is the direction a
-   * dashboard figure must never be wrong in.
+   *     if (!incoming.get('rsc') && !incoming.get('next-router-prefetch'))
+   *
+   * and the second half worked while the first did not: `headers()` in a
+   * Server Component does not expose `RSC` on this build, so the test was
+   * always true and every client-side navigation in the application counted a
+   * second page view for a page the visitor was already on. Ten requests
+   * carrying `RSC: 1` produced ten counts where the panel's caption promised
+   * zero.
+   *
+   * `middleware.ts` still has the raw headers, so it decides — GET, not RSC,
+   * not a prefetch, not `/healthz`, `/o`, `_next` or a file — and says so with
+   * one header it deletes first and can therefore only have written itself.
+   * This layout counts when it is there and never asks why.
    *
    * Nothing about the visitor is read, here or in lib/page-views.ts: the whole
    * of the state is a day and an integer, flushed once a minute. See that
    * file for why that is a fact about the deployment rather than about people.
    */
-  if (!incoming.get('rsc') && !incoming.get('next-router-prefetch')) countPageView();
+  if (incoming.get('x-foundit-count') === '1') countPageView();
 
   return (
     <html lang="en" className={fontClassNames}>

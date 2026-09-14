@@ -1,5 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import { COUNT_HEADER, countsAsPageView } from './lib/page-view-policy.ts';
+import { ROUTER_DOCUMENT, ROUTER_HEADER } from './lib/router-headers.ts';
+
 /* ===========================================================================
  * The security headers, and a Content-Security-Policy with a nonce per
  * request.
@@ -153,6 +156,37 @@ const HEADERS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /* ===========================================================================
+ * ONE PAGE VIEW, DECIDED WHERE THE HEADERS ARE STILL READABLE — the owner's
+ * item 10, and OWNER FEEDBACK, ROUND 1, F3.
+ *
+ * `app/layout.tsx` used to make this decision itself:
+ *
+ *     if (!incoming.get('rsc') && !incoming.get('next-router-prefetch'))
+ *       countPageView();
+ *
+ * The prefetch half worked. The RSC half did not: `headers()` in a Server
+ * Component does not expose `RSC` on this build, so `incoming.get('rsc')` was
+ * always null and EVERY client-side navigation counted a second page view for
+ * a page the visitor was already on. Ten requests carrying `RSC: 1` produced
+ * ten counts where the panel's caption promised zero — which is the one
+ * direction `app/layout.tsx`'s own comment says the number must never be wrong
+ * in, "bigger than the truth in the direction that flatters it".
+ *
+ * Middleware still has the raw headers, so the decision is made here and
+ * travels to the layout as ONE header it can only be told:
+ *
+ *     x-foundit-count: 1
+ *
+ * The RULE itself is in `lib/page-view-policy.ts`, so that every row of the
+ * reviewer's table is a line in `tests/page-views.test.mjs` rather than a
+ * paragraph in this comment; that file also lists what is counted and why.
+ *
+ * The header is SET OR DELETED on every request and never merely set. Without
+ * the delete a visitor could send it themselves and count as many page views
+ * as they liked, which would be the same defect with a worse cause.
+ * ======================================================================== */
+
+/* ===========================================================================
  * THE `Origin: null` FIVE HUNDRED — the owner's items 4, 5, 6 and 7.
  *
  * The owner pressed Save and Like on `/tools/anki` and got a 500. The log:
@@ -187,14 +221,81 @@ const HEADERS: ReadonlyArray<readonly [string, string]> = [
  * the "same-site default" the brief asks for, and leaves the crash impossible
  * rather than caught.
  *
- * WHAT THIS DOES NOT GIVE AWAY. A genuine cross-site POST always carries a
- * real `Origin`; it never arrives missing. `Sec-Fetch-Site` is sent by every
- * browser that sends `Origin` at all, so when it says `cross-site` and the
- * origin is missing or unparseable the request is not a browser doing an
- * ordinary thing — that one gets a syntactically valid origin that can never
- * match our host, so Next refuses it with its own message instead of throwing.
- * Behind all of this the session cookie is `SameSite=Lax`, which is what
- * actually stops a cross-site POST carrying a session (lib/auth-options.ts).
+ * ---------------------------------------------------------------------------
+ * WHAT THIS DOES NOT GIVE AWAY — REWRITTEN, because the first version of this
+ * paragraph was wrong in three places and it is the paragraph the next person
+ * to touch this file reasons from (OWNER FEEDBACK, ROUND 1, F7 and overclaims
+ * 6, 7 and 7b).
+ *
+ * IT SAID: "A genuine cross-site POST always carries a real `Origin`; it never
+ * arrives missing." That is false. Fetch, "append a request `Origin` header",
+ * sets the serialized origin to the four characters `null` for a non-GET
+ * request whose mode is not "cors" when the referrer policy is `no-referrer` —
+ * so an attacker page that sends `Referrer-Policy: no-referrer` produces
+ * exactly the header this normalises. Opaque origins (a sandboxed frame, a
+ * document reached through a redirect chain) produce it too.
+ *
+ * IT SAID: "`Sec-Fetch-Site` is sent by every browser that sends `Origin` at
+ * all." Also false, twice over. Fetch Metadata is appended only for a
+ * POTENTIALLY TRUSTWORTHY url, so a plain-HTTP origin that is not localhost
+ * sends `Origin` and no `Sec-Fetch-*`; and Safari before 16.4 and Firefox
+ * before 90 send `Origin` and no `Sec-Fetch-*` anywhere.
+ *
+ * IT CITED `lib/auth-options.ts` for `SameSite=Lax`. That file contains no
+ * `sameSite` at all. It is `lib/auth.ts`.
+ *
+ * WHAT IS ACTUALLY TRUE, and it is still enough:
+ *
+ *   The session cookie is `SameSite=Lax` (`lib/auth.ts`), so a cross-site POST
+ *   does not carry a session at all. That — not `Sec-Fetch-Site` — is what
+ *   makes a forged POST to Save, Like, Review or the add flow harmless: it
+ *   arrives signed out and those actions have nothing to do signed out.
+ *
+ *   So the exposure the origin rules are actually protecting is the SESSIONLESS
+ *   actions: filing a report, asking for a sign-in code, and the beacon. Those
+ *   work for a stranger by design, which means a cross-site POST can reach
+ *   them, which means the only thing standing in front of them is whether the
+ *   request looks like a browser doing an ordinary thing.
+ *
+ *   `Sec-Fetch-Site: cross-site` beside an unparseable origin is therefore
+ *   still worth acting on — it gets an origin that can never match our host,
+ *   so Next refuses it with its own message rather than throwing — but it is a
+ *   signal and not a backstop, and this file no longer claims otherwise.
+ *
+ *   AND THE PAIR NO BROWSER PRODUCES IS REFUSED OUTRIGHT. A Server Action POST
+ *   with no parseable `Origin` AND no `Sec-Fetch-Site` at all is not any of the
+ *   cases above: a browser old enough to omit Fetch Metadata is old enough to
+ *   send a real `Origin`, and a browser new enough to send `Origin: null` sends
+ *   `Sec-Fetch-Site` with it. That combination is a script, and it gets a 403
+ *   with a sentence instead of a normalised origin.
+ *
+ * ---------------------------------------------------------------------------
+ * AND IT IS SCOPED TO SERVER ACTIONS NOW, WHICH IT WAS NOT — F7.
+ *
+ * The rewrite ran for EVERY POST on EVERY route, and two things downstream had
+ * deliberately stricter rules of their own that it silently disabled:
+ *
+ *   `app/o/route.ts` says in its own header that "a missing Origin is not a
+ *   browser and is refused". That refusal was dead: the route was handed an
+ *   origin middleware had written, so a `POST /o` with no Origin header at all
+ *   counted a click. Reproduced, twice, on the reviewed build.
+ *
+ *   Better Auth's `validateOrigin` throws `MISSING_OR_NULL_ORIGIN` for a
+ *   cookie-bearing POST whose `Origin` is absent or `null`. It never saw what
+ *   the client sent.
+ *
+ * Neither of those is Next's action handler, which is the only consumer the
+ * rewrite was ever written for. So the rewrite now runs only where Next's
+ * action handler will actually read the header — a `Next-Action` header, or a
+ * `multipart/form-data` POST to a page route, which is what an unhydrated
+ * browser submits and what carries the `$ACTION_ID_` field. `/api/*` and `/o`
+ * are outside the rewrite's own matcher, so Better Auth and the beacon are
+ * handed exactly what the client sent.
+ *
+ * They are still handed it a second way as well: `x-original-origin` carries
+ * the client's value verbatim on every request, and `app/o/route.ts` is the one
+ * thing that reads it. Belt and braces, so that a later widening of the scope
+ * above cannot quietly disarm the beacon's own check again.
  * ======================================================================== */
 
 /** An origin Next can parse, or null. `'null'` and `''` are not origins. */
@@ -205,6 +306,36 @@ function parsedOrigin(value: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Routes the Origin rewrite never touches, whatever they are posting.
+ *
+ * `/api/*` is Better Auth (and any route handler added later), `/o` is the
+ * beacon. Both have origin rules of their own that are stricter than Next's,
+ * and both are the reason F7 exists. This is the rewrite's OWN matcher and not
+ * `config.matcher` at the foot of the file, because these paths must keep the
+ * security headers and the nonce — excluding them from middleware altogether
+ * would trade one finding for a worse one.
+ */
+const NO_ORIGIN_REWRITE = /^\/(?:api|o)(?:\/|$)/;
+
+/** The header `app/o/route.ts` reads. Never believed from a client. */
+const ORIGINAL_ORIGIN_HEADER = 'x-original-origin';
+
+/**
+ * Is this a request Next's Server Action handler will read `Origin` from?
+ *
+ * Two shapes and no others. `Next-Action` is what the hydrated client sends.
+ * A `multipart/form-data` POST to a page route is what an UNHYDRATED browser
+ * sends — `<form encType="multipart/form-data">` is exactly what Next renders
+ * for a Server Action — and it is the shape the owner's own 500 arrived in.
+ */
+function isServerAction(request: NextRequest): boolean {
+  if (request.method !== 'POST') return false;
+  if (NO_ORIGIN_REWRITE.test(request.nextUrl.pathname)) return false;
+  if (request.headers.get('next-action') !== null) return true;
+  return (request.headers.get('content-type') ?? '').startsWith('multipart/form-data');
 }
 
 /** The origin this request was addressed to, as the browser would write it. */
@@ -222,6 +353,26 @@ function ownOrigin(request: NextRequest): string {
 /** One that is valid, and can never be ours. */
 const REFUSING_ORIGIN = 'https://cross-site.invalid';
 
+/**
+ * The refusal, with a sentence in it.
+ *
+ * Plain text and not a page: whatever sent this is not a browser rendering
+ * HTML, and a person who somehow sees it is owed the reason rather than the
+ * word "Forbidden". The security headers go on it like any other response,
+ * because a refusal is a response.
+ */
+function refuse(csp: string): NextResponse {
+  const response = new NextResponse(
+    'This looks like a form posted by something that is not a browser: it carries no '
+      + 'usable Origin header and no Sec-Fetch-Site header either, and no browser sends '
+      + 'that pair. Nothing was recorded and nothing was changed.\n',
+    { status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+  );
+  response.headers.set('Content-Security-Policy', csp);
+  for (const [name, value] of HEADERS) response.headers.set(name, value);
+  return response;
+}
+
 export function middleware(request: NextRequest): NextResponse {
   // 16 random bytes, base64. `crypto` is the Web Crypto global, which is what
   // the Edge runtime has; `node:crypto` is not importable here.
@@ -235,9 +386,63 @@ export function middleware(request: NextRequest): NextResponse {
   requestHeaders.set('x-nonce', nonce);
   requestHeaders.set('Content-Security-Policy', csp);
 
-  if (request.method === 'POST' && parsedOrigin(request.headers.get('origin')) === null) {
+  /* --- what the client actually sent, kept where only we can write it ------
+   * Deleted first: this is a name a visitor can type, and a forged one would
+   * hand `app/o/route.ts` any origin the sender liked. */
+  const clientOrigin = request.headers.get('origin');
+  // Always SET, never conditionally: the header is present on every request
+  // this middleware touches, and `none` is the value when the client sent no
+  // Origin at all. That makes "absent" mean "middleware did not run" and
+  // nothing else, so `app/o/route.ts` can tell the two apart — and `none` is
+  // not a URL, so a check that reads it refuses rather than passing.
+  requestHeaders.set(ORIGINAL_ORIGIN_HEADER, clientOrigin ?? 'none');
+
+  /* --- F3: the page-view decision, made where the answer can be seen ------
+   *
+   * `rsc` and `next-router-prefetch` are NOT READABLE HERE. Next strips both
+   * before it builds this request and restores them, unchanged, after this
+   * function returns — `lib/router-headers.ts` quotes the source and explains
+   * why that makes both the obvious fixes useless. `x-foundit-router` is what
+   * that file writes at the HTTP server, before Next has looked at the
+   * request, and it is not a flight header so it arrives here intact.
+   *
+   * It is also the same file that declines the `Next-Router-Prefetch` with no
+   * `RSC` that Next answers 500 to (F24) — that has to happen before Next sees
+   * the request too, so it cannot happen in this function either.
+   *
+   * ABSENT MEANS THE SHIM DID NOT RUN, which in this codebase means nothing:
+   * `instrumentation.ts` installs it in the Node runtime before the first
+   * request. Reading it as "neither header" is the safe way to be wrong —
+   * it counts a navigation that should not have been counted, which is the
+   * behaviour F3 found, rather than silently counting nothing at all. */
+  const router = request.headers.get(ROUTER_HEADER) ?? ROUTER_DOCUMENT;
+  const rsc = router.includes('rsc');
+  const prefetch = router.includes('prefetch');
+
+  requestHeaders.delete(COUNT_HEADER);
+  if (
+    countsAsPageView({
+      method: request.method,
+      pathname: request.nextUrl.pathname,
+      rsc,
+      prefetch,
+    })
+  ) {
+    requestHeaders.set(COUNT_HEADER, '1');
+  }
+
+  /* --- F7: the Origin normalisation, for Server Actions and nothing else --- */
+  if (isServerAction(request)) {
     const site = request.headers.get('sec-fetch-site');
-    requestHeaders.set('origin', site === 'cross-site' ? REFUSING_ORIGIN : ownOrigin(request));
+    if (parsedOrigin(clientOrigin) === null) {
+      if (site === null) {
+        // The pair no browser produces. See the header: a browser old enough
+        // to omit Fetch Metadata sends a real Origin, and one new enough to
+        // send `Origin: null` sends Sec-Fetch-Site with it.
+        return refuse(csp);
+      }
+      requestHeaders.set('origin', site === 'cross-site' ? REFUSING_ORIGIN : ownOrigin(request));
+    }
   }
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });

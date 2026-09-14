@@ -34,6 +34,20 @@ import { visitorAddress } from '@/lib/visitor';
  * on every POST, including a same-origin one, so a missing Origin is not a
  * browser and is refused with the same 204 as everything else.
  *
+ * AND IT IS THE CLIENT'S OWN `Origin` THAT IS CHECKED, which for one round it
+ * was not — OWNER FEEDBACK, ROUND 1, F7. `middleware.ts` normalised an
+ * unparseable or missing Origin to the request's own on EVERY POST, for the
+ * sake of Next's Server Action handler, and this route was handed the value
+ * middleware had written. The refusal above was dead: a `POST /o` with no
+ * Origin header at all counted a click, and so did one with `Origin: null`.
+ * Two things changed. The rewrite is now scoped to Server Action requests and
+ * skips `/o` and `/api/*` outright, so `origin` here is already the client's;
+ * and middleware also copies the client's value verbatim into
+ * `x-original-origin`, which this route reads in preference, so a later
+ * widening of that scope cannot disarm this check a second time. Nothing else
+ * in the application reads that header — `tests/beacon.test.mjs` asserts the
+ * whole matrix, which nothing did before.
+ *
  * BOUNDED, which the Server Action was not: `allowOutboundOpen` spends one
  * token from the visitor's own hourly bucket and one from a daily cap for the
  * whole process. Over either, this returns 204 and counts nothing. The address
@@ -106,7 +120,13 @@ async function slugFrom(request: Request): Promise<string> {
 
 export async function POST(request: Request): Promise<Response> {
   const incoming = await headers();
-  if (!sameOrigin(incoming.get('origin'), incoming.get('host'))) return noContent();
+  // `x-original-origin` is written by middleware.ts from the client's own
+  // header, after deleting any the client sent, so it cannot be forged. It is
+  // absent exactly when the client sent no Origin — which is the case this
+  // check exists to refuse — and `origin` is the fallback for the one
+  // situation where middleware did not run at all.
+  const claimed = incoming.get('x-original-origin') ?? incoming.get('origin');
+  if (!sameOrigin(claimed, incoming.get('host'))) return noContent();
 
   const slug = await slugFrom(request);
   // The same shape check lib/accounts.ts makes, here so that a wildly wrong

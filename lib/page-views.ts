@@ -20,19 +20,32 @@ import { recordPageViews } from './db';
  * it flushes to (`infra.page_views_daily` is `(day, views, updated_at)` and
  * db/test/panels_test.sql §0 fails if a fourth column ever appears).
  *
+ * WHERE THE DECISION IS MADE, which is not here and is not in the layout
+ * either: `middleware.ts`, because that is the last place the raw request
+ * headers can be read. It answers with a single `x-foundit-count: 1` header
+ * that it deletes before it sets, so the layout is being told rather than
+ * guessing and a visitor cannot count themselves. OWNER FEEDBACK, ROUND 1, F3
+ * is why that moved: `headers()` in a Server Component does not expose `RSC`
+ * on this build, so the guard that used to live in `app/layout.tsx` tested a
+ * header that was never there and every client-side navigation counted twice.
+ *
  * WHAT IS EXCLUDED, and why each one would otherwise be a lie:
  *
  *   RSC requests and prefetches. A client-side navigation re-renders the tree
  *   on the server and would count a second time for a page the person is
- *   already on; a prefetch counts a page nobody looked at. The `RSC` and
- *   `Next-Router-Prefetch` headers are how Next says which is which, and
- *   `countPageView` is only called where they are absent.
+ *   already on; a prefetch counts a page nobody looked at.
+ *   HEAD requests. Asking whether a page exists is not reading one. It was
+ *   counted until F3 and is not now.
  *   `/healthz` and `/o`. Neither is a page. `/healthz` is a probe that runs
  *   every few seconds for ever and would be most of this number; `/o` answers
- *   204 and has no document at all. Neither renders `app/layout.tsx`, so
- *   neither reaches this module — but they are named here because "why is
- *   /healthz not in it" is the first question somebody will have.
- *   Static assets. `_next/static` never touches a React render.
+ *   204 and has no document at all.
+ *   Static assets. `_next/*`, and any path whose last segment has a dot in it.
+ *
+ * WHAT IS NOT EXCLUDED, said here because it is the surprising half: a 404 is
+ * counted. It is a page this deployment rendered and served, and the status
+ * code is not known until after the render — so excluding it would mean
+ * counting somewhere the answer is known and the request is not. The panel's
+ * caption on `app/admin/page.tsx` says so rather than leaving it to be found.
  *
  * WHAT IT IS NOT, and the caption on the panel says so: it is page views and
  * not people. One person reading four pages is four. Unique visitors come from

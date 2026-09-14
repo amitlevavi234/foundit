@@ -36,6 +36,7 @@ const OFF = 'foundit_prompt_off';
 const YEAR = 60 * 60 * 24 * 365;
 
 function readCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null;
   const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
   return match?.[1] === undefined ? null : decodeURIComponent(match[1]);
 }
@@ -44,7 +45,19 @@ function writeCookie(name: string, value: string): void {
   // `SameSite=Lax` and no `Secure` in development, where there is no
   // certificate. Nothing here is a credential; it is a number this browser
   // keeps about itself.
-  const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+  //
+  // `typeof window` and not `window`, which is the rule rather than a defence
+  // against a bug we have (OWNER FEEDBACK, ROUND 1, F24). This is a `'use
+  // client'` component and both readers below run inside `useEffect`, so the
+  // server never reaches this line — but a client component is still EVALUATED
+  // on the server, the file is one refactor away from being called during a
+  // render, and the failure mode is a 500 on a page rather than a missing
+  // cookie. The 500 F24 actually reported comes from Next's own
+  // `InnerLayoutRouter` reaching for `location.origin` while server-rendering a
+  // request that carries `Next-Router-Prefetch` and no `RSC`; that is handled
+  // in `middleware.ts`, where the header can be seen.
+  const secure =
+    typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
   document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${YEAR}; SameSite=Lax${secure}`;
 }
 

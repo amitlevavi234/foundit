@@ -17,6 +17,25 @@ export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === 'nodejs') await import('./sentry.server.config');
   if (process.env.NEXT_RUNTIME === 'edge') await import('./sentry.edge.config');
 
+  /* THE TWO HEADERS NEXT HIDES FROM ITS OWN MIDDLEWARE — OWNER FEEDBACK,
+   * ROUND 1, F3 and F24.
+   *
+   * `rsc` and `next-router-prefetch` are stripped before the middleware's
+   * request is built and restored, unchanged, afterwards; `headers()` in a
+   * Server Component drops them too. So neither the layout nor middleware can
+   * see whether a request is a client-side navigation — which is why every one
+   * of them counted a second page view — and neither can decline the one
+   * request shape Next crashes on. `lib/router-headers.ts` has the whole story
+   * and the quotations from Next's own source.
+   *
+   * IT HAS TO BE HERE because this is the only hook that runs in the Node
+   * runtime, once, before the first request. Node only: the edge runtime has
+   * no `node:http` and middleware is not where the fix can live. */
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    const { installRouterHeaderShim } = await import('./lib/router-headers-shim');
+    await installRouterHeaderShim();
+  }
+
   /* THE SPEND LEDGER'S SINK — the owner's item 10, 14 September 2026.
    *
    * `lib/reader-model.ts`, `lib/rerank.ts` and `lib/embeddings.ts` announce

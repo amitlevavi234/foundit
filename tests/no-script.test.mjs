@@ -57,8 +57,12 @@ import assert from 'node:assert/strict';
 
 import pg from 'pg';
 
-import { hashSignInCode } from '../lib/auth-options.ts';
 import { refusalFor, serverKind } from './browser.mjs';
+// The throwaway account moved to its own module when tests/english.test.mjs
+// needed one too — OWNER FEEDBACK, ROUND 1, F19. Two copies of a routine that
+// creates a real account and then deletes it is two chances for one of them to
+// stop deleting.
+import { cleanUp, mintSession } from './throwaway.mjs';
 
 const TIMEOUT = 60_000;
 
@@ -99,82 +103,6 @@ async function usable(t, origin) {
   const kind = await serverKind(origin);
   if (kind !== 'production') assert.fail(refusalFor(origin, kind));
   return true;
-}
-
-/* ---------------------------------------------------------------------------
- * The throwaway account.
- *
- * The same shortcut tests/links.test.mjs uses and docs/development.md explains
- * at length: Better Auth issues the row, verifies the code, creates the
- * session and signs the cookie, and the only thing supplied here is what an
- * inbox would supply. It needs the auth role's password and the key codes are
- * hashed under, so it is not a way in — anybody holding both can already sign
- * in as anybody.
- * ------------------------------------------------------------------------ */
-async function mintSession(origin) {
-  const auth = new pg.Pool({ connectionString: process.env.DATABASE_URL_AUTH });
-  const email = `no-script-${Date.now()}@example.invalid`;
-  const code = '424242';
-
-  const sent = await fetch(`${origin}/api/auth/email-otp/send-verification-otp`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin },
-    body: JSON.stringify({ email, type: 'sign-in' }),
-    signal: AbortSignal.timeout(TIMEOUT),
-  });
-  assert.ok(sent.ok, `the server refused to issue a sign-in code (${sent.status})`);
-
-  const updated = await auth.query(
-    'update auth_core.verification set value = $1 where identifier = $2',
-    [`${await hashSignInCode(code)}:0`, `sign-in-otp-${email}`],
-  );
-  assert.equal(updated.rowCount, 1, 'the sign-in code row was not there');
-
-  const signedIn = await fetch(`${origin}/api/auth/sign-in/email-otp`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin },
-    body: JSON.stringify({ email, otp: code }),
-    redirect: 'manual',
-    signal: AbortSignal.timeout(TIMEOUT),
-  });
-  assert.ok(signedIn.ok, `the throwaway account could not sign in (${signedIn.status})`);
-
-  const cookie = (signedIn.headers.getSetCookie?.() ?? [])
-    .map((line) => line.split(';')[0])
-    .filter((pair) => pair.includes('session_token'))
-    .join('; ');
-  assert.notEqual(cookie, '', 'signing in produced no session cookie');
-
-  const { rows } = await auth.query('select id from auth_core."user" where email = $1', [email]);
-  return { auth, email, cookie, userId: rows[0]?.id ?? null };
-}
-
-async function cleanUp(session) {
-  const owner = new pg.Pool({ connectionString: process.env.DATABASE_URL_OWNER });
-  try {
-    if (session.userId) {
-      const client = await owner.connect();
-      try {
-        await client.query('begin');
-        await client.query("select pg_catalog.set_config('foundit.definer','on',true)");
-        await client.query("select pg_catalog.set_config('foundit.counters','on',true)");
-        await client.query('delete from public.profiles where id = $1', [session.userId]);
-        await client.query('commit');
-      } catch {
-        await client.query('rollback');
-      } finally {
-        client.release();
-      }
-      await session.auth.query('delete from auth_core.session where "userId" = $1', [session.userId]);
-      await session.auth.query('delete from auth_core.account where "userId" = $1', [session.userId]);
-      await session.auth.query('delete from auth_core."user" where id = $1', [session.userId]);
-    }
-    await session.auth.query('delete from auth_core.verification where identifier = $1', [
-      `sign-in-otp-${session.email}`,
-    ]);
-  } finally {
-    await Promise.all([owner.end(), session.auth.end()]);
-  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -228,11 +156,18 @@ function multipart(fields, actionId) {
  * NO `Next-Action` HEADER, which is what makes this the no-script path rather
  * than the fetch one; the header is the only thing that distinguishes them.
  * `origin` is what the three cases vary.
+ *
+ * `Sec-Fetch-Site` DEFAULTS TO `same-origin` because that is what a browser
+ * submitting our own form sends, and since OWNER FEEDBACK, ROUND 1, F7 the
+ * middleware refuses the one pair no browser produces — no parseable Origin
+ * AND no Fetch Metadata at all — with a 403. Passing `site: null` leaves the
+ * header off, which is how the test below reaches that refusal on purpose.
  */
-async function postForm(url, form, { origin, cookie }) {
+async function postForm(url, form, { origin, cookie, site = 'same-origin' }) {
   const { body, contentType } = multipart(form.fields, form.actionId);
   const headers = { 'content-type': contentType, cookie };
   if (origin !== undefined) headers.origin = origin;
+  if (site !== null) headers['sec-fetch-site'] = site;
   return fetch(url, {
     method: 'POST',
     headers,
@@ -458,4 +393,47 @@ test('a cross-site POST is still refused', async (t) => {
     signal: AbortSignal.timeout(TIMEOUT),
   });
   assert.equal(named.status, 500, 'and so must one from a named other origin');
+
+  /* AND THE PAIR NO BROWSER PRODUCES IS REFUSED WITH A SENTENCE — OWNER
+   * FEEDBACK, ROUND 1, F7.
+   *
+   * The old comment in `middleware.ts` said a cross-site POST "always carries a
+   * real Origin; it never arrives missing", and that `Sec-Fetch-Site` "is sent
+   * by every browser that sends Origin at all". Both are false: a page sending
+   * `Referrer-Policy: no-referrer` produces `Origin: null`, Fetch Metadata is
+   * only appended for a potentially trustworthy URL, and Safari before 16.4
+   * and Firefox before 90 send no `Sec-Fetch-*` anywhere.
+   *
+   * What IS true is that no browser sends BOTH an unusable Origin and no Fetch
+   * Metadata: one old enough to omit the second sends a real first. So that
+   * combination is a script, and middleware answers it 403 rather than
+   * normalising the origin and running the action. */
+  const blind = await fetch(`${origin}/tools/anki`, {
+    method: 'POST',
+    headers: { 'content-type': contentType },
+    body,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(TIMEOUT),
+  });
+  assert.equal(
+    blind.status,
+    403,
+    'an action POST with no parseable Origin AND no Sec-Fetch-Site must be refused',
+  );
+  assert.match(
+    await blind.text(),
+    /no browser sends that pair/,
+    'and the refusal must say why, in a sentence',
+  );
+
+  // `Origin: null` with no Fetch Metadata is the same pair, arriving in the
+  // other of its two shapes.
+  const nulled = await fetch(`${origin}/tools/anki`, {
+    method: 'POST',
+    headers: { 'content-type': contentType, origin: 'null' },
+    body,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(TIMEOUT),
+  });
+  assert.equal(nulled.status, 403, 'and so must `Origin: null` with no Sec-Fetch-Site');
 });
