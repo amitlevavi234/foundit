@@ -16,6 +16,20 @@
 --      and really refuses to resolve the same report twice;
 --   4. a report holds nothing that could be joined to a search.
 --
+-- NOTHING HERE DEPENDS ON WHAT IS ALREADY IN `public.reports`. It nearly did:
+-- §4 asked whether `admin_reports()` returned "at least four" rows and whether
+-- the open count was "at least three", which are the suite's own rows only on
+-- a database where nobody has ever filed one — and `admin_reports()` defaults
+-- to fifty, so past fifty reports this suite's own would fall off the page it
+-- was reading. It also resolved whichever open report came back first, which
+-- on a used database is somebody else's.
+--
+-- Every id this suite creates is remembered in `pg_temp.filed` and every count
+-- below is a DELTA against what was there when it started. It is the same rule
+-- db/test/panels_test.sql was rewritten under on 14 September 2026, for the
+-- same reason: a test that reads a shared table has to measure its own
+-- arithmetic and nobody else's.
+--
 -- Everything runs inside ONE transaction that is ALWAYS rolled back, exactly
 -- like rls_test.sql and counters_test.sql and for the same reasons. The suite
 -- connects as the schema owner and `set role foundit_app` where it wants the
@@ -43,6 +57,40 @@ returns void language plpgsql as $$
 begin
   raise exception 'REPORTS TEST FAILED: %', msg;
 end;
+$$;
+
+/**
+ * What this suite filed, and what the table held before it started.
+ *
+ * A temp table rather than a variable because each `do $$` block below has its
+ * own scope, and the ids have to survive from the block that files a report to
+ * the block that reads it back.
+ */
+create temp table pg_temp_filed (label text primary key, id bigint) on commit drop;
+
+-- The suite switches into foundit_app to check what the application is
+-- refused, and a temp table belongs to the role that created it — so without
+-- this the bookkeeping, rather than the thing being tested, is what gets
+-- "permission denied". It is a scratch table inside a transaction that always
+-- rolls back; nothing about the schema is being loosened.
+grant select, insert, update on pg_temp_filed to public;
+
+create or replace function pg_temp.remember(p_label text, p_id bigint)
+returns bigint language sql as $$
+  insert into pg_temp_filed (label, id) values (p_label, p_id)
+  on conflict (label) do update set id = excluded.id
+  returning id;
+$$;
+
+create or replace function pg_temp.filed(p_label text)
+returns bigint language sql stable as $$
+  select id from pg_temp_filed where label = p_label;
+$$;
+
+/** How many reports this suite has filed, by id, whatever else is in there. */
+create or replace function pg_temp.mine()
+returns bigint[] language sql stable as $$
+  select coalesce(array_agg(id), '{}'::bigint[]) from pg_temp_filed where label <> 'open_before';
 $$;
 
 /** 0020 §2's window. The suite plants and counts rows no function would. */
@@ -142,6 +190,22 @@ end
 $$;
 
 -- ===========================================================================
+-- 0b. What was already there
+--
+-- Read once, before this suite writes anything, so every count below can be a
+-- difference rather than a total.
+-- ===========================================================================
+do $$
+declare v_open bigint;
+begin
+  perform pg_temp.be('dev_admin');
+  select c.open into v_open from public.admin_report_counts() c;
+  perform pg_temp.remember('open_before', v_open);
+  perform pg_temp.be(null);
+end
+$$;
+
+-- ===========================================================================
 -- 1. The application cannot reach the table, and CAN reach it through the door
 -- ===========================================================================
 set role foundit_app;
@@ -183,6 +247,7 @@ begin
   if v_id is null then
     perform pg_temp.fail('file_report returned no id for a signed-in reporter');
   end if;
+  perform pg_temp.remember('tool', v_id);
 end
 $$;
 
@@ -197,6 +262,8 @@ begin
 
   perform pg_temp.be(null);
   v_out := public.file_report('tool', 'gimp', 'The summary describes a different program.');
+  perform pg_temp.remember('signed_in', v_signed);
+  perform pg_temp.remember('signed_out', v_out);
   if v_out is null then
     perform pg_temp.fail('a signed-out visitor could not file a report. Reporting behind a '
                          'sign-in wall is a wall in front of the reports most worth having.');
@@ -259,6 +326,7 @@ begin
   v_id := public.file_report('tool', 'anki',
                              'This one has a bell ' || chr(7) ||
                              ' in it and is long enough.');
+  perform pg_temp.remember('cleaned', v_id);
 
   reset role;
   perform pg_temp.owner_window(true);
@@ -302,15 +370,21 @@ begin
     end;
   end loop;
 
-  -- The administrator can, and resolving is once.
+  -- The administrator can. THIS SUITE'S OWN ROWS, by id, out of a call with
+  -- the limit wide open: `admin_reports()` defaults to fifty and orders
+  -- unresolved-first, so on a database with a real backlog the four filed
+  -- above are not necessarily on the default page.
   perform pg_temp.be('dev_admin');
-  select count(*) into n from public.admin_reports();
-  if n < 4 then
-    perform pg_temp.fail(format('admin_reports returned %s rows and this suite filed at '
-                                'least four', n));
+  select count(*) into n from public.admin_reports(10000) r
+   where r.report_id = any (pg_temp.mine());
+  if n <> array_length(pg_temp.mine(), 1) then
+    perform pg_temp.fail(format('admin_reports returned %s of the %s reports this suite '
+                                'filed', n, array_length(pg_temp.mine(), 1)));
   end if;
 
-  select r.report_id into v_id from public.admin_reports() r where r.resolved_at is null limit 1;
+  -- Resolving is once, and it is THIS suite's report that gets resolved
+  -- rather than whichever open one happened to come back first.
+  v_id := pg_temp.filed('tool');
   v_done := public.resolve_report(v_id, 'Checked the link; the maker has moved house.');
   if not v_done then
     perform pg_temp.fail('an administrator could not resolve an open report');
@@ -322,11 +396,30 @@ begin
                          'who closed it and when');
   end if;
 
-  -- The counts the Words panel draws.
+  -- And a report nobody filed is false rather than an error, which is what
+  -- stops the outcome being an oracle over which ids exist.
+  if public.resolve_report(-1, null) then
+    perform pg_temp.fail('resolving a report that does not exist succeeded');
+  end if;
+
+  -- The counts the Words panel draws, as a DELTA. Four filed, one resolved, so
+  -- the open count must be exactly three higher than it was before this suite
+  -- ran, whatever it was.
   select r.open into n from public.admin_report_counts() r;
-  if n < 3 then
-    perform pg_temp.fail(format('admin_report_counts says %s open and this suite left at '
-                                'least three', n));
+  if n - pg_temp.filed('open_before') <> 3 then
+    perform pg_temp.fail(format('the open count moved by %s; this suite filed %s reports '
+                                'and resolved one',
+                                n - pg_temp.filed('open_before'),
+                                array_length(pg_temp.mine(), 1)));
+  end if;
+
+  -- `received` is windowed and `open` is not, which is the whole reason they
+  -- are two columns. Everything this suite filed is inside any window, so
+  -- received must have moved by all four.
+  select r.received into n from public.admin_report_counts(3650) r;
+  if n < array_length(pg_temp.mine(), 1) then
+    perform pg_temp.fail(format('received is %s and this suite filed %s inside the window',
+                                n, array_length(pg_temp.mine(), 1)));
   end if;
 end
 $$;
@@ -357,9 +450,10 @@ begin
 
   perform pg_temp.be('dev_person');
   v_report := public.file_report('review', v_review::text, 'This review is about a different tool.');
+  perform pg_temp.remember('review', v_report);
 
   perform pg_temp.be('dev_admin');
-  select * into r from public.admin_reports() x where x.report_id = v_report;
+  select * into r from public.admin_reports(10000) x where x.report_id = v_report;
 
   if r.review_id is distinct from v_review then
     perform pg_temp.fail('a report about a review did not carry the review');
@@ -371,9 +465,14 @@ begin
     perform pg_temp.fail('the review arrived without its rating');
   end if;
 
-  -- And a report about something that is not a review carries no review.
-  select * into r from public.admin_reports() x where x.kind = 'tool' limit 1;
-  if r.review_id is not null then
+  -- And a report about something that is not a review carries no review. This
+  -- suite's OWN tool report, by id: `where kind = 'tool' limit 1` would have
+  -- read whichever one the database happened to hand back first.
+  select * into r from public.admin_reports(10000) x where x.report_id = pg_temp.filed('tool');
+  if r.report_id is null then
+    perform pg_temp.fail('this suite''s own tool report is not in admin_reports');
+  end if;
+  if r.review_id is not null or r.tool_slug is not null or r.rating is not null then
     perform pg_temp.fail('a report about a tool came back with a review attached to it');
   end if;
 end

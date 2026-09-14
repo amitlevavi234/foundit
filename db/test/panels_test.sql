@@ -20,6 +20,32 @@
 --     without being the join docs/product-decisions.md §10 forbids: there is
 --     nothing in the table to join on.
 --
+-- NOTHING HERE DEPENDS ON WHAT IS ALREADY IN THE LEDGERS, and it did until
+-- 14 September 2026. §2 asserted that two flushes of 7 and 5 "come to 12" and
+-- that two spend rows "come to 3 requests" on `current_date` — which is the
+-- day the RUNNING APPLICATION writes to. Four proof searches made while
+-- checking the spend path left rows on it, and the suite then failed with
+--
+--     PANELS TEST FAILED: two spend rows of 2 and 1 requests came to 5
+--
+-- reading somebody else's arithmetic as its own. That is the same defect CI
+-- caught twice in Phase 7, and it had a second half nobody would have noticed
+-- for longer: §3's assertions only passed BECAUSE §2 had just written rows, so
+-- on a database where nothing had ever been recorded they would have failed
+-- the other way round.
+--
+-- So the two halves are separated on purpose:
+--
+--   §2  the WRITERS, on a sentinel day nothing else can touch. 1999-01-01 is
+--       outside every panel window by construction — `admin_page_views` and
+--       `admin_spend` clamp `p_days` at 3650, which reaches back ten years —
+--       so absolutes there are absolutes about rows this block wrote.
+--   §3  the PANELS, on `current_date`, by DELTA: read, write a known amount,
+--       read again, and assert the difference.
+--   §4  the EMPTY case, by emptying both tables inside the transaction. That
+--       is §10's "nothing draws a 0 where the truth is not recorded", and it
+--       was the one rule on this page with no test under it.
+--
 -- One transaction, always rolled back.
 -- ===========================================================================
 
@@ -134,100 +160,123 @@ end
 $$;
 
 -- ===========================================================================
--- 2. Both writers ADD, and both refuse nonsense quietly or loudly as written
+-- 2. Both writers ADD, on a day nothing else writes to
 -- ===========================================================================
 do $$
-declare v_views bigint; v_usd numeric; v_req bigint;
+declare
+  -- THE SENTINEL. See this file's header for why it is not `current_date`.
+  c_day   constant date := date '1999-01-01';
+  v_views bigint;
+  v_usd   numeric;
+  v_req   bigint;
+  v_in    bigint;
+  v_out   bigint;
 begin
-  perform infra.add_page_views(current_date, 7);
-  perform infra.add_page_views(current_date, 5);
-  select views into v_views from infra.page_views_daily where day = current_date;
-  if v_views < 12 then
+  -- The isolation, proved rather than assumed. If this ever fires, something
+  -- has started writing 1999-01-01 and the rest of this section is worthless.
+  if exists (select 1 from infra.page_views_daily where day = c_day)
+     or exists (select 1 from infra.spend_ledger where day = c_day) then
+    perform pg_temp.fail('the sentinel day already has rows on it, so every absolute below '
+                         'would be measuring somebody else''s arithmetic');
+  end if;
+
+  perform infra.add_page_views(c_day, 7);
+  perform infra.add_page_views(c_day, 5);
+  select views into v_views from infra.page_views_daily where day = c_day;
+  if v_views <> 12 then
     perform pg_temp.fail(format('two flushes of 7 and 5 came to %s; the writer overwrites '
                                 'instead of adding', v_views));
   end if;
 
   -- A quiet minute is a no-op, not an error: this runs every sixty seconds.
-  perform infra.add_page_views(current_date, 0);
-  perform infra.add_page_views(current_date, -3);
+  perform infra.add_page_views(c_day, 0);
+  perform infra.add_page_views(c_day, -3);
   perform infra.add_page_views(null, 9);
-  if (select views from infra.page_views_daily where day = current_date) <> v_views then
-    perform pg_temp.fail('a zero, a negative or a null flush changed the count');
+  select views into v_views from infra.page_views_daily where day = c_day;
+  if v_views <> 12 then
+    perform pg_temp.fail(format('a zero, a negative or a null flush moved the count to %s',
+                                v_views));
   end if;
 
-  perform infra.add_spend(current_date, 'reader', 2, 1000, 300, 0.00016);
-  perform infra.add_spend(current_date, 'reader', 1, 500, 120, 0.00007);
-  select usd, requests into v_usd, v_req
-    from infra.spend_ledger where day = current_date and kind = 'reader';
-  if v_req <> 3 then
-    perform pg_temp.fail(format('two spend rows of 2 and 1 requests came to %s', v_req));
+  perform infra.add_spend(c_day, 'reader', 2, 1000, 300, 0.00016);
+  perform infra.add_spend(c_day, 'reader', 1, 500, 120, 0.00007);
+  select requests, input_tokens, output_tokens, usd into v_req, v_in, v_out, v_usd
+    from infra.spend_ledger where day = c_day and kind = 'reader';
+  if v_req <> 3 or v_in <> 1500 or v_out <> 420 then
+    perform pg_temp.fail(format('two spend rows came to %s requests, %s in, %s out; expected '
+                                '3, 1500 and 420', v_req, v_in, v_out));
   end if;
   if v_usd <> 0.00023 then
     perform pg_temp.fail(format('$0.00016 and $0.00007 came to %s. numeric(14,8) exists so '
                                 'that a fraction of a cent is not rounded to nothing.', v_usd));
   end if;
 
+  -- Four kinds and one day are four rows, not one: the Money panel draws them
+  -- as a stack and a kind that folded into another would be a stack with a
+  -- layer missing.
+  perform infra.add_spend(c_day, 'rerank', 1, 10, 1, 0.00000100);
+  if (select count(*) from infra.spend_ledger where day = c_day) <> 2 then
+    perform pg_temp.fail('two kinds on one day did not make two rows');
+  end if;
+
   -- A kind the ledger does not record is loud, because it is a programming
   -- error at a call site rather than a quiet minute.
   begin
-    perform infra.add_spend(current_date, 'guessing', 1, 1, 1, 1);
+    perform infra.add_spend(c_day, 'guessing', 1, 1, 1, 1);
     perform pg_temp.fail('add_spend accepted a kind that is not one of the four');
   exception when invalid_parameter_value then null;
   end;
 
-  -- A negative bill does not reduce the total.
-  perform infra.add_spend(current_date, 'embed', -5, -5, -5, -5);
-  if (select usd from infra.spend_ledger where day = current_date and kind = 'embed') < 0 then
-    perform pg_temp.fail('a negative amount reduced the recorded spend');
+  -- A negative bill does not reduce the total, and clamps to zero rather than
+  -- to whatever it was given.
+  perform infra.add_spend(c_day, 'embed', -5, -5, -5, -5);
+  select requests, input_tokens, output_tokens, usd into v_req, v_in, v_out, v_usd
+    from infra.spend_ledger where day = c_day and kind = 'embed';
+  if v_req <> 0 or v_in <> 0 or v_out <> 0 or v_usd <> 0 then
+    perform pg_temp.fail(format('a negative call was recorded as %s/%s/%s/%s rather than as '
+                                'nothing', v_req, v_in, v_out, v_usd));
   end if;
 end
 $$;
 
 -- ===========================================================================
--- 3. The panels read them, and say when nothing was recording
+-- 3. The panels read them — by DELTA, because today is a shared day
+--
+-- The panel windows clamp at 3650 days, so §2's sentinel is unreachable from
+-- here and `current_date` is the only day these functions can be tested on. It
+-- is also the day the running application writes to. So nothing below asserts
+-- a total: each one reads, writes a known amount through the same door the
+-- application uses, reads again, and asserts the difference.
 -- ===========================================================================
 set role foundit_app;
 
 do $$
-declare r record; n int;
+declare
+  r  record;
+  n  int;
+  v_views_before bigint;
+  v_views_after  bigint;
+  v_reader_before numeric;
+  v_reader_after  numeric;
+  v_all_before numeric;
+  v_all_after  numeric;
+  v_req_before bigint;
+  v_req_after  bigint;
+  v_first date;
 begin
   perform pg_temp.be('dev_admin');
 
+  -- The spine is every day in the window whether or not anything happened on
+  -- it, which is an absolute that does not depend on any row existing.
   select count(*) into n from public.admin_page_views(30);
   if n <> 30 then
     perform pg_temp.fail(format('admin_page_views(30) returned %s days; the spine is '
                                 'supposed to be every day in the window', n));
   end if;
-
-  -- Today has a row, so today is recording; the day before the first row is
-  -- not, and that is the difference between "no visits" and "no counter".
-  select * into r from public.admin_page_views(30) x where x.day = current_date;
-  if not r.recording or r.views < 12 then
-    perform pg_temp.fail('today is not reported as recording, or lost its count');
-  end if;
-
-  select * into r from public.admin_page_views(30) x order by x.day limit 1;
-  if r.recording and r.day < (select min(p.day) from public.admin_page_views(30) p
-                               where p.recording) then
-    perform pg_temp.fail('a day before the first recorded one claims to be recording');
-  end if;
-
   select count(*) into n from public.admin_spend(30);
   if n <> 30 then
     perform pg_temp.fail(format('admin_spend(30) returned %s days', n));
   end if;
-
-  select * into r from public.admin_spend(30) x where x.day = current_date;
-  if r.reader <= 0 then
-    perform pg_temp.fail('admin_spend lost the reader row written above');
-  end if;
-
-  select * into r from public.admin_spend_totals();
-  if r.all_time <= 0 or r.first_day is null then
-    perform pg_temp.fail('admin_spend_totals reports nothing after a row was written');
-  end if;
-
-  -- The two series panels the owner asked for, which need no new table.
   select count(*) into n from public.admin_active_accounts(30);
   if n <> 30 then
     perform pg_temp.fail(format('admin_active_accounts(30) returned %s days', n));
@@ -235,6 +284,115 @@ begin
   select count(*) into n from public.admin_new_tools(30);
   if n <> 30 then
     perform pg_temp.fail(format('admin_new_tools(30) returned %s days', n));
+  end if;
+
+  -- --- page views, by delta ------------------------------------------------
+  select x.views into v_views_before
+    from public.admin_page_views(30) x where x.day = current_date;
+
+  perform infra.add_page_views(current_date, 9);
+
+  select * into r from public.admin_page_views(30) x where x.day = current_date;
+  v_views_after := r.views;
+  if v_views_after - v_views_before <> 9 then
+    perform pg_temp.fail(format('nine page views moved the panel by %s',
+                                v_views_after - v_views_before));
+  end if;
+  if not r.recording then
+    perform pg_temp.fail('a day with a row on it is not reported as recording');
+  end if;
+
+  -- `recording` is monotone: it is false for every day before the first row
+  -- ever written and true from there on. A false day after a true one would
+  -- mean the flag was about THIS day''s rows rather than about whether
+  -- anything was counting, which is the distinction the panel draws.
+  select min(x.day) into v_first from public.admin_page_views(30) x where x.recording;
+  if v_first is null then
+    perform pg_temp.fail('nothing is recording even though nine views were just written');
+  end if;
+  if exists (select 1 from public.admin_page_views(30) x
+              where x.day >= v_first and not x.recording) then
+    perform pg_temp.fail('a day after the first recorded one says nothing was counting');
+  end if;
+  if exists (select 1 from public.admin_page_views(30) x
+              where x.day < v_first and x.recording) then
+    perform pg_temp.fail('a day before the first recorded one says something was counting');
+  end if;
+
+  -- --- spend, by delta -----------------------------------------------------
+  select x.reader into v_reader_before
+    from public.admin_spend(30) x where x.day = current_date;
+  select t.all_time, t.requests into v_all_before, v_req_before
+    from public.admin_spend_totals() t;
+
+  perform infra.add_spend(current_date, 'reader', 1, 100, 10, 0.00000500);
+
+  select x.reader into v_reader_after
+    from public.admin_spend(30) x where x.day = current_date;
+  if v_reader_after - v_reader_before <> 0.00000500 then
+    perform pg_temp.fail(format('a reader call of $0.000005 moved the panel by %s',
+                                v_reader_after - v_reader_before));
+  end if;
+
+  select t.all_time, t.requests, t.first_day into v_all_after, v_req_after, v_first
+    from public.admin_spend_totals() t;
+  if v_all_after - v_all_before <> 0.00000500 then
+    perform pg_temp.fail(format('the same call moved the all-time total by %s',
+                                v_all_after - v_all_before));
+  end if;
+  if v_req_after - v_req_before <> 1 then
+    perform pg_temp.fail(format('one paid request moved the request count by %s',
+                                v_req_after - v_req_before));
+  end if;
+  if v_first is null then
+    perform pg_temp.fail('first_day is null even though a row was just written');
+  end if;
+end
+$$;
+
+-- ===========================================================================
+-- 3b. And with nothing recorded at all, both panels say so
+--
+-- docs/product-decisions.md §10: nothing draws a 0 where the truth is "nobody
+-- measured this". That rule had no test under it, because every assertion
+-- above needed rows to exist — so the case the rule is ABOUT was the one case
+-- never exercised. Emptying both tables inside a transaction that always rolls
+-- back is the only honest way to reach it.
+-- ===========================================================================
+reset role;
+
+delete from infra.page_views_daily;
+delete from infra.spend_ledger;
+
+set role foundit_app;
+
+do $$
+declare r record; n int;
+begin
+  perform pg_temp.be('dev_admin');
+
+  select count(*) into n from public.admin_page_views(30) x where x.recording;
+  if n <> 0 then
+    perform pg_temp.fail(format('%s days claim to be recording with an empty table', n));
+  end if;
+  select count(*) into n from public.admin_page_views(30) x where x.views <> 0;
+  if n <> 0 then
+    perform pg_temp.fail('a day has views on it with an empty table');
+  end if;
+
+  select count(*) into n from public.admin_spend(30) x
+   where x.reader <> 0 or x.rerank <> 0 or x.embed <> 0 or x.worker <> 0;
+  if n <> 0 then
+    perform pg_temp.fail('a day has spend on it with an empty ledger');
+  end if;
+
+  select * into r from public.admin_spend_totals();
+  if r.first_day is not null then
+    perform pg_temp.fail('first_day is set with an empty ledger, so the Money panel would '
+                         'draw $0.00 where the truth is that nothing was recorded');
+  end if;
+  if r.all_time <> 0 or r.month_to_date <> 0 or r.requests <> 0 then
+    perform pg_temp.fail('an empty ledger did not total to nothing');
   end if;
 end
 $$;
