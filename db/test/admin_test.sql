@@ -409,11 +409,21 @@ returns table (name text, shape text) language sql immutable as $$
     -- fails that section rather than this one.
     ('admin_report_counts',
      'p_days:i received:t open:t'),
+    -- OWNER FEEDBACK, ROUND 1 (0030) added the last five. `p_offset` and
+    -- `total` are F11: the tab was hard-capped at fifty rows with nothing to
+    -- reach the fifty-first with. `removal_reason` and `removed_by` are F12:
+    -- the row component this tab shares with All and Removed was drawing
+    -- "Removed <date>: " and nothing after the colon. `target_resolves` is
+    -- F20 and `target_handle` is F21 — a profile report stores an id, which
+    -- does not move when somebody renames themselves, so the CURRENT handle
+    -- has to come back beside it. Still every person by handle, and still not
+    -- one column from a search table.
     ('admin_reports',
-     'p_limit:i report_id:t kind:t target:t reason:t details:t reporter:t '
+     'p_limit:i p_offset:i report_id:t kind:t target:t reason:t details:t reporter:t '
      'created_at:t resolved_at:t resolved_by:t resolution:t review_id:t '
      'tool_slug:t tool_name:t handle:t rating:t body:t review_created_at:t '
-     'removed_by_admin_at:t author_deleted_at:t'),
+     'removed_by_admin_at:t author_deleted_at:t removal_reason:t removed_by:t '
+     'target_resolves:t target_handle:t total:t'),
     ('admin_reviews',
      'p_limit:i p_offset:i review_id:t tool_slug:t tool_name:t handle:t rating:t '
      'body:t created_at:t removed_by_admin_at:t author_deleted_at:t '
@@ -423,8 +433,11 @@ returns table (name text, shape text) language sql immutable as $$
     -- THE OWNER'S ITEM 10: what the four paid paths cost, by day, and the two
     -- totals beside the chart. Neither names a table in public at all —
     -- infra.spend_ledger is a day, a kind and four numbers.
+    -- `recording` is OWNER FEEDBACK, ROUND 1's F8 (0032): the same flag
+    -- admin_page_views has, so the Money chart can hatch a day nothing was
+    -- being recorded on rather than drawing $0.00 for it.
     ('admin_spend',
-     'p_days:i day:t reader:t rerank:t embed:t worker:t'),
+     'p_days:i day:t reader:t rerank:t embed:t worker:t recording:t'),
     ('admin_spend_totals',
      'p_months:i month_to_date:t all_time:t requests:t first_day:t'),
     ('admin_top_queries',

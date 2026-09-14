@@ -478,6 +478,333 @@ begin
 end
 $$;
 
+-- ===========================================================================
+-- 6. Owner feedback, round 1 — F1, F17, F20 and F21
+--
+-- F1 IS TWO ASSERTIONS AND NOT ONE, because the defect had two halves. A
+-- report about a review whose target was all digits but WIDER THAN A BIGINT
+-- satisfied `reports_target_shaped` (200 characters, `^[0-9]+$`) and satisfied
+-- 0027's CASE guard (the same pattern), and then `target::bigint` raised
+-- 22003 — the failure class 0027 was written to close. `lib/admin.ts` swallows
+-- it, so the operator saw the Reported tab render as though they were not an
+-- administrator, and there is no delete path for `public.reports` anywhere in
+-- the product. So:
+--
+--   (a) a NEW overflow target is refused at the CHECK, and
+--   (b) a row that is ALREADY STORED — planted here with the CHECK dropped
+--       inside this transaction, which is the only way to reproduce a database
+--       that predates 0030 — no longer takes the panel down.
+--
+-- Without (b) the fix would be untested against exactly the state that was
+-- reported.
+-- ===========================================================================
+do $$
+declare
+  v_id     bigint;
+  v_target text;
+  n        int;
+begin
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+
+  -- (a) The magnitude, where only the shape was bounded before.
+  begin
+    perform public.file_report('review', repeat('9', 23),
+                               'A review target that is all digits and wider than a bigint.');
+    perform pg_temp.fail('file_report accepted a review target too wide for a bigint');
+  exception when check_violation then null;
+  end;
+
+  -- Eighteen digits is the widest that always fits, and is accepted: the bound
+  -- must not be "any number nobody has reached yet".
+  v_id := public.file_report('review', repeat('9', 18),
+                             'A review target of eighteen digits, which fits in a bigint.');
+  perform pg_temp.remember('wide_ok', v_id);
+
+  -- F17. Control characters are STRIPPED on the way in, like every other free
+  -- text door in this schema, rather than producing a row that fails a CHECK
+  -- with an error the reporter is then told was "a fault our end".
+  v_id := public.file_report('tool', 'an' || chr(10) || 'ki' || chr(27) || '[31m',
+                             'A target with a newline and an escape in it.');
+  perform pg_temp.remember('ctl_target', v_id);
+
+  perform pg_temp.be('dev_admin');
+  select r.target into v_target from public.admin_reports(10000, 0) r where r.report_id = v_id;
+  if public.has_control_characters(v_target) then
+    perform pg_temp.fail('a control character survived file_report''s target: '
+                         || quote_literal(v_target));
+  end if;
+  -- 0017's `strip_control_characters` replaces rather than deletes — a word
+  -- break is what a newline was — so the expected value is spelled out here
+  -- rather than assumed, and a change to that function fails this line.
+  if v_target <> 'an ki [31m' then
+    perform pg_temp.fail(format('the stripped target is %L; stripping replaces the character '
+                                'with a space and keeps everything else', v_target));
+  end if;
+
+  -- And the CHECK refuses one that arrives by any other door, which is what
+  -- makes the strip defence in depth rather than the only defence.
+  reset role;
+  perform pg_temp.owner_window(true);
+  begin
+    insert into public.reports (kind, target, reason)
+    values ('tool', 'an' || chr(7) || 'ki', 'A target with a bell, straight into the table.');
+    perform pg_temp.fail('the table accepted a target with a control character in it');
+  exception when check_violation then null;
+  end;
+
+  -- (b) A ROW STORED BEFORE 0030. The CHECK comes off for the length of this
+  -- block and goes back on NOT VALID, which is exactly the state a database
+  -- that already holds such a row would be in.
+  alter table public.reports drop constraint reports_target_shaped;
+  insert into public.reports (kind, target, reason)
+  values ('review', repeat('9', 23), 'An overflow target stored before 0030 existed.')
+  returning id into v_id;
+  alter table public.reports add constraint reports_target_shaped
+    check (length(target) between 1 and 200
+           and not public.has_control_characters(target)
+           and (kind <> 'review' or target ~ '^[0-9]{1,18}$'))
+    not valid;
+  perform pg_temp.owner_window(false);
+  set role foundit_app;
+
+  perform pg_temp.be('dev_admin');
+  -- The assertion is that neither of these raises. Before 0030 both did, with
+  -- 22003, and the tab rendered as the not-found page for ever after.
+  select count(*) into n from public.admin_reports(10000, 0) r where r.report_id = v_id;
+  if n <> 1 then
+    perform pg_temp.fail('a stored overflow target is not readable through admin_reports');
+  end if;
+  perform count(*) from public.admin_report_counts(30);
+end
+$$;
+
+-- ===========================================================================
+-- 6b. F20 and F21 — does the thing still exist, and what is it called now
+-- ===========================================================================
+do $$
+declare
+  v_tool_ok   bigint;
+  v_tool_bad  bigint;
+  v_prof_ok   bigint;
+  v_prof_bad  bigint;
+  v_review    bigint;
+  v_report    bigint;
+  r           record;
+begin
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+
+  -- The write stays permissive on purpose: filing must leak no existence, and
+  -- a report has to outlive its target. All four get an id.
+  v_tool_ok  := public.file_report('tool', 'anki', 'A listing that exists right now.');
+  v_tool_bad := public.file_report('tool', 'no-such-tool-anywhere',
+                                   'A listing address that has never existed.');
+  v_prof_ok  := public.file_report('profile', 'dev_person', 'A profile id that exists.');
+  v_prof_bad := public.file_report('profile', 'nobody-at-all-here',
+                                   'A profile id that does not exist.');
+  perform pg_temp.remember('tool_ok', v_tool_ok);
+  perform pg_temp.remember('tool_bad', v_tool_bad);
+  perform pg_temp.remember('prof_ok', v_prof_ok);
+  perform pg_temp.remember('prof_bad', v_prof_bad);
+
+  perform pg_temp.be('dev_admin');
+
+  select * into r from public.admin_reports(10000, 0) x where x.report_id = v_tool_ok;
+  if r.target_resolves is not true then
+    perform pg_temp.fail('a report about a live listing says its target does not resolve');
+  end if;
+  select * into r from public.admin_reports(10000, 0) x where x.report_id = v_tool_bad;
+  if r.target_resolves is not false then
+    perform pg_temp.fail('a report about a listing that does not exist says it resolves');
+  end if;
+
+  -- F21. The id is what is stored; the CURRENT handle is what comes back, so a
+  -- rename cannot re-point an old report at whoever takes the name.
+  select * into r from public.admin_reports(10000, 0) x where x.report_id = v_prof_ok;
+  if r.target_resolves is not true then
+    perform pg_temp.fail('a report about a profile that exists says it does not resolve');
+  end if;
+  if r.target_handle is null then
+    perform pg_temp.fail('a report about a profile came back with no handle to draw');
+  end if;
+
+  reset role;
+  perform pg_temp.owner_window(true);
+  update public.profiles set handle = 'renamed_since' where id = 'dev_person';
+  perform pg_temp.owner_window(false);
+  set role foundit_app;
+  perform pg_temp.be('dev_admin');
+
+  select * into r from public.admin_reports(10000, 0) x where x.report_id = v_prof_ok;
+  if r.target <> 'dev_person' then
+    perform pg_temp.fail(format('the stored target moved with the rename: %L', r.target));
+  end if;
+  if r.target_handle <> 'renamed_since' then
+    perform pg_temp.fail(format('the report still draws the old handle %L after a rename',
+                                r.target_handle));
+  end if;
+
+  select * into r from public.admin_reports(10000, 0) x where x.report_id = v_prof_bad;
+  if r.target_resolves is not false or r.target_handle is not null then
+    perform pg_temp.fail('a profile id that does not exist came back resolving, or with a '
+                         'handle');
+  end if;
+
+  -- A review that has since been deleted outright: the report survives it and
+  -- says so, which is the whole reason there is no foreign key on this column.
+  reset role;
+  perform pg_temp.owner_window(true);
+  select id into v_review from public.reviews order by id desc limit 1;
+  perform pg_temp.owner_window(false);
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+  v_report := public.file_report('review', (v_review + 100000)::text,
+                                 'A review id that has never been used.');
+  perform pg_temp.remember('review_missing', v_report);
+  perform pg_temp.be('dev_admin');
+  select * into r from public.admin_reports(10000, 0) x where x.report_id = v_report;
+  if r.target_resolves is not false then
+    perform pg_temp.fail('a report about a review id that does not exist says it resolves');
+  end if;
+end
+$$;
+
+-- ===========================================================================
+-- 6c. F11 and F12 — the queue drains from the front, it pages, and a removed
+--     review brings its reason with it
+-- ===========================================================================
+do $$
+declare
+  v_first  bigint;
+  v_second bigint;
+  v_review bigint;
+  v_report bigint;
+  r        record;
+  v_total  bigint;
+  n        int;
+begin
+  set role foundit_app;
+  perform pg_temp.be('dev_person');
+
+  -- Two open reports, the first of them older. Times are set explicitly rather
+  -- than relying on `now()` moving between two statements in one transaction,
+  -- where it does not move at all.
+  v_first  := public.file_report('tool', 'anki', 'The older of two open reports in 6c.');
+  v_second := public.file_report('tool', 'anki', 'The newer of two open reports in 6c.');
+  perform pg_temp.remember('older', v_first);
+  perform pg_temp.remember('newer', v_second);
+
+  reset role;
+  perform pg_temp.owner_window(true);
+  update public.reports set created_at = now() - interval '40 days' where id = v_first;
+  update public.reports set created_at = now() - interval '1 minute' where id = v_second;
+  -- Nothing else is touched. Every other open row in this transaction was
+  -- written at `now()`, which inside one transaction does not move, so forty
+  -- days ago is the oldest open report on this database by construction —
+  -- and a real backlog outside the transaction cannot be older than it either,
+  -- because these rows are rolled back and a database that HAS an older open
+  -- report would make this assertion about that row instead, which is the same
+  -- claim. Pushing the others would mean UPDATEing rows planted with the CHECK
+  -- disabled in §6, which re-validates them.
+  perform pg_temp.owner_window(false);
+  set role foundit_app;
+  perform pg_temp.be('dev_admin');
+
+  -- F11a. OPEN FIRST, AND OLDEST FIRST INSIDE THAT. Asserted over the whole
+  -- list rather than by naming a row, so it holds on a database with a real
+  -- backlog on it as well as on an empty one: every open row comes before
+  -- every closed row, and the open segment never goes backwards in time.
+  select count(*) into n
+    from (select x.resolved_at is not null as closed,
+                 x.created_at,
+                 row_number() over () as seat
+            from public.admin_reports(10000, 0) x) t
+   where t.closed and exists (select 1
+                                from (select x2.resolved_at is not null as closed2,
+                                             row_number() over () as seat2
+                                        from public.admin_reports(10000, 0) x2) u
+                               where not u.closed2 and u.seat2 > t.seat);
+  if n > 0 then
+    perform pg_temp.fail('a closed report is above an open one on the Reported tab');
+  end if;
+
+  select count(*) into n
+    from (select x.created_at,
+                 lag(x.created_at) over () as previous
+            from public.admin_reports(10000, 0) x
+           where x.resolved_at is null) t
+   where t.previous is not null and t.created_at < t.previous;
+  if n > 0 then
+    perform pg_temp.fail('the open reports are not oldest-first; a backlog that drains from '
+                         'the back loses its oldest row off the end of the page');
+  end if;
+
+  -- And this suite's own pair, by id, which is the version of the same claim
+  -- that names the rows it planted.
+  select count(*) into n
+    from (select x.report_id, row_number() over () as seat
+            from public.admin_reports(10000, 0) x) t
+   where t.report_id = v_first
+     and t.seat > (select u.seat from (select x2.report_id, row_number() over () as seat
+                                         from public.admin_reports(10000, 0) x2) u
+                    where u.report_id = v_second);
+  if n > 0 then
+    perform pg_temp.fail('the newer of two open reports is above the older one');
+  end if;
+
+  -- F11b. `total` is the count BEFORE the limit, and `p_offset` reaches what
+  -- the limit left behind. One row at a time is the strictest version of that.
+  select x.total into v_total from public.admin_reports(1, 0) x;
+  select count(*) into n from public.admin_reports(10000, 0) x;
+  if v_total <> n then
+    perform pg_temp.fail(format('total says %s on a page of one and the whole list is %s',
+                                v_total, n));
+  end if;
+  select x.report_id into v_report from public.admin_reports(1, 1) x;
+  if v_report = v_first then
+    perform pg_temp.fail('an offset of one returned the first row again, so the Reported tab '
+                         'cannot reach anything past its limit');
+  end if;
+  if v_report is null then
+    perform pg_temp.fail('an offset of one returned nothing, with more than one report filed');
+  end if;
+
+  -- F12. A review an administrator removed arrives with the reason and the
+  -- remover, which the Reported tab renders after "Removed <date>:" and which
+  -- used to be hardcoded null in `toAdminReports`.
+  reset role;
+  perform pg_temp.owner_window(true);
+  select id into v_review from public.reviews where deleted_at is null order by id limit 1;
+  perform pg_temp.owner_window(false);
+  set role foundit_app;
+
+  perform pg_temp.be('dev_person');
+  v_report := public.file_report('review', v_review::text,
+                                 'A review that is about to be taken down.');
+  perform pg_temp.remember('removed_review', v_report);
+
+  -- The removal path the application uses: the reason on the record first,
+  -- which is what makes the update legal (0013 §7).
+  perform pg_temp.be('dev_admin');
+  insert into public.review_removals (review_id, admin_id, reason)
+  values (v_review, auth.uid(), 'Removed in 6c so the Reported tab has a reason to draw.');
+  update public.reviews set deleted_at = now() where id = v_review and deleted_at is null;
+
+  select * into r from public.admin_reports(10000, 0) x where x.report_id = v_report;
+  if r.removed_by_admin_at is null then
+    perform pg_temp.fail('the removal did not reach admin_reports at all');
+  end if;
+  if r.removal_reason is null then
+    perform pg_temp.fail('a removed review came back through admin_reports with no reason, '
+                         'so the tab draws "Removed <date>: " and nothing after the colon');
+  end if;
+  if r.removed_by is null then
+    perform pg_temp.fail('a removed review came back through admin_reports with no remover');
+  end if;
+end
+$$;
+
 reset role;
 
 select 'All report checks passed.' as result;

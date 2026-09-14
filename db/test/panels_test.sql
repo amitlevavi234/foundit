@@ -160,6 +160,115 @@ end
 $$;
 
 -- ===========================================================================
+-- 1b. Every SECURITY DEFINER function in `infra` a non-owner may run is on a
+--     written list, and its search_path names no schema that role can create in
+--
+-- OWNER FEEDBACK, ROUND 1 — F16. `infra.add_page_views` and `infra.add_spend`
+-- are the only definer functions in this range with no caller check in their
+-- bodies: every `public.admin_%` one opens with `if not auth.is_admin() then
+-- raise`, and `file_report` reads `auth.uid()` itself. These two check nothing
+-- and are granted to `foundit_app` and `foundit_embed`.
+--
+-- THAT IS A DECISION AND NOT AN OVERSIGHT, and it is written down here rather
+-- than inferred. Both functions only ADD, negatives are clamped to nothing and
+-- page views are clamped to a billion per call, so the worst an already
+-- compromised application role can do through them is put wrong numbers on two
+-- charts — ledger poisoning rather than escalation. The alternative, an
+-- `auth.is_admin()` check, would make the page-view counter impossible: the
+-- thing calling it is a render for a visitor who is nobody.
+--
+-- SO THE TEST IS THE LIST ITSELF, in the shape db/test/admin_test.sql §11 uses
+-- for the owner's window: exactly these two, by name, with a pinned
+-- `search_path`, and — the half that actually matters — no schema on that path
+-- that either role can CREATE in. A definer function whose search_path names a
+-- schema the calling role may create in is a definer function the calling role
+-- can make execute its own code, and then "it only adds" stops being true.
+-- A third such function appearing without a line in this file is a failure.
+-- ===========================================================================
+do $$
+declare
+  v_expected constant text[] := array[
+    'add_page_views(p_day date, p_views integer)',
+    'add_spend(p_day date, p_kind text, p_requests bigint, p_input_tokens bigint, '
+      || 'p_output_tokens bigint, p_usd numeric)'
+  ];
+  v_found text[];
+  bad     text;
+begin
+  -- Every prosecdef function in `infra` that any role other than the schema
+  -- owner may execute. `foundit_owner` is excluded because it owns them: a
+  -- definer function running as its own owner grants nothing.
+  select coalesce(array_agg(format('%s(%s)', p.proname,
+                                   pg_get_function_identity_arguments(p.oid))
+                            order by p.proname), '{}'::text[])
+    into v_found
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'infra'
+     and p.prosecdef
+     and (has_function_privilege('foundit_app', p.oid, 'execute')
+          or has_function_privilege('foundit_embed', p.oid, 'execute'));
+
+  if v_found <> v_expected then
+    perform pg_temp.fail(format(
+      'the SECURITY DEFINER functions in infra a non-owner may run are {%s}; the written '
+      'list is {%s}. Every one of them is an unchecked door into the owner''s privileges, '
+      'so adding or removing one is a decision that gets a line in db/test/panels_test.sql '
+      'and a paragraph in the migration.',
+      array_to_string(v_found, ', '), array_to_string(v_expected, ', ')));
+  end if;
+
+  -- A pinned search_path on each. Without it the caller chooses which `infra`
+  -- and which `pg_catalog` the body means.
+  select string_agg(p.proname, ', ') into bad
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'infra'
+     and p.prosecdef
+     and (has_function_privilege('foundit_app', p.oid, 'execute')
+          or has_function_privilege('foundit_embed', p.oid, 'execute'))
+     and (p.proconfig is null
+          or not exists (select 1 from unnest(p.proconfig) c where c like 'search\_path=%'));
+  if bad is not null then
+    perform pg_temp.fail('a definer function in infra has no pinned search_path: ' || bad);
+  end if;
+
+  -- AND NOT ONE SCHEMA ON THAT PATH IS ONE THOSE ROLES MAY CREATE IN. This is
+  -- the assertion the pin is for: `search_path=pg_catalog, infra` is only worth
+  -- anything while neither role can create a function called `now` in either of
+  -- them.
+  select string_agg(format('%s -> %s (%s)', p.proname, s.schema_name, s.who), '; ')
+    into bad
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    cross join lateral (
+      select btrim(part) as schema_name,
+             case when has_schema_privilege('foundit_app', btrim(part), 'create')
+                       and has_schema_privilege('foundit_embed', btrim(part), 'create')
+                    then 'both roles'
+                  when has_schema_privilege('foundit_app', btrim(part), 'create')
+                    then 'foundit_app'
+                  else 'foundit_embed' end as who
+        from unnest(p.proconfig) c,
+             lateral unnest(string_to_array(replace(c, 'search_path=', ''), ',')) part
+       where c like 'search\_path=%'
+         and btrim(part) <> ''
+         and exists (select 1 from pg_namespace nn where nn.nspname = btrim(part))
+         and (has_schema_privilege('foundit_app', btrim(part), 'create')
+              or has_schema_privilege('foundit_embed', btrim(part), 'create'))
+    ) s
+   where n.nspname = 'infra'
+     and p.prosecdef
+     and (has_function_privilege('foundit_app', p.oid, 'execute')
+          or has_function_privilege('foundit_embed', p.oid, 'execute'));
+  if bad is not null then
+    perform pg_temp.fail('a definer function in infra resolves names in a schema the calling '
+                         'role can create in, which makes the pin worthless: ' || bad);
+  end if;
+end
+$$;
+
+-- ===========================================================================
 -- 2. Both writers ADD, on a day nothing else writes to
 -- ===========================================================================
 do $$
@@ -347,6 +456,43 @@ begin
   if v_first is null then
     perform pg_temp.fail('first_day is null even though a row was just written');
   end if;
+
+  -- OWNER FEEDBACK, ROUND 1 — F8. `admin_spend` now carries the same
+  -- `recording` flag `admin_page_views` has, so the Money chart can hatch a day
+  -- nothing was being recorded on instead of drawing $0.00 for it. Same three
+  -- assertions as the Visits flag above, because it is the same claim: the day
+  -- with a row on it is recording, and the flag is monotone from the first row
+  -- ever written rather than being about this day's own rows.
+  if not exists (select 1 from public.admin_spend(30) x
+                  where x.day = current_date and x.recording) then
+    perform pg_temp.fail('a day with a ledger row on it is not reported as recording');
+  end if;
+
+  select min(x.day) into v_first from public.admin_spend(30) x where x.recording;
+  if v_first is null then
+    perform pg_temp.fail('no spend day is recording even though a row was just written');
+  end if;
+  if exists (select 1 from public.admin_spend(30) x
+              where x.day >= v_first and not x.recording) then
+    perform pg_temp.fail('a spend day after the first recorded one says nothing was recorded');
+  end if;
+  if exists (select 1 from public.admin_spend(30) x
+              where x.day < v_first and x.recording) then
+    perform pg_temp.fail('a spend day before the ledger started says something was recorded');
+  end if;
+
+  -- And it agrees with `admin_spend_totals().first_day`, which is the figure
+  -- already printed above the chart — the two are the same `min(day)` read
+  -- twice in one transaction and a chart that disagreed with the sentence over
+  -- it would be the F8 defect the other way round.
+  select t.first_day into v_first from public.admin_spend_totals() t;
+  if exists (select 1 from public.admin_spend(30) x
+              where x.day >= v_first and not x.recording)
+     or exists (select 1 from public.admin_spend(30) x
+                 where x.day < v_first and x.recording) then
+    perform pg_temp.fail('the Money chart''s hatching disagrees with the first_day printed '
+                         'above it');
+  end if;
 end
 $$;
 
@@ -384,6 +530,15 @@ begin
    where x.reader <> 0 or x.rerank <> 0 or x.embed <> 0 or x.worker <> 0;
   if n <> 0 then
     perform pg_temp.fail('a day has spend on it with an empty ledger');
+  end if;
+
+  -- F8, the case the flag exists for: with nothing recorded, NO day claims to
+  -- have been recording, so the Money chart hatches all thirty rather than
+  -- drawing thirty columns of $0.00.
+  select count(*) into n from public.admin_spend(30) x where x.recording;
+  if n <> 0 then
+    perform pg_temp.fail(format('%s spend days claim to have been recorded with an empty '
+                                'ledger', n));
   end if;
 
   select * into r from public.admin_spend_totals();

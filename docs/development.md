@@ -312,6 +312,30 @@ permission tests exist to catch.
 `db/apply.sh` does the same thing through `docker exec` and needs the database
 to be a container on the same machine. Keep it for that case.
 
+### Migrations that have been superseded
+
+An applied migration is never edited. That is the right rule and it has one
+cost: a paragraph inside an old file goes on reading as though it were current,
+and a reader following a trail through the SQL hits the oldest statement first.
+When a later migration reverses an earlier one's reasoning, the reversal gets a
+line here as well as a paragraph of its own.
+
+- **`0024_dashboard_panels.sql:445-449` was superseded by `0028_infra_usage.sql`.**
+  0024 ends with `revoke all on schema infra from foundit_app` and a paragraph
+  warning that "a `grant usage on schema infra to foundit_app` added later by
+  somebody tidying up would be the whole boundary gone". 0028 does exactly
+  that, deliberately, and it is not the boundary going anywhere: EXECUTE says
+  "you may run this function" and USAGE on a schema says "you may write its
+  name", so without the second the first can never be exercised — every page
+  view was `permission denied for schema infra`, swallowed by the
+  fire-and-forget writer, and never counted. USAGE grants no SELECT, no INSERT
+  and no reference to any table; the boundary is the TABLE privileges (none)
+  and the two SECURITY DEFINER doors. 0028 amended `comment on schema infra`,
+  which is where the standing statement belongs, and
+  `0032_spend_recording.sql`'s header carries the same pointer in the migration
+  trail. `db/test/panels_test.sql` §1 asserts the arrangement that IS the
+  boundary, in both directions. (Owner feedback, round 1, F22.)
+
 ## Filling the embeddings
 
 ```bash
