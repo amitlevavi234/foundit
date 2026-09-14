@@ -28,6 +28,23 @@
  * IT CANNOT THROW INTO A PAID PATH. `reportSpend` swallows whatever the sink
  * does, because the sink is installed by somebody else and the caller is in
  * the middle of answering a search.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SINK IS PARKED ON `globalThis`, AND A MODULE-LEVEL `let` DID NOT WORK
+ *
+ * Found by running it: an uncached search on a production build made a paid
+ * call, took 2.4 seconds doing it, and wrote no row. `instrumentation.ts` is
+ * compiled into its own bundle by Next — a different layer from the one the
+ * pages are built in — so `onSpend` set a variable in one copy of this module
+ * and `reportSpend` read another copy's. Both ran, neither was wrong, and
+ * nothing was recorded.
+ *
+ * `lib/rate-limit.ts` parks the limiter on `globalThis` and `lib/page-views.ts`
+ * parks the counter there, both with a paragraph saying why. This is a third
+ * instance of the same rule, arrived at the same way: **state that has to be
+ * the same object for two bundles is state that goes on `globalThis`.** In
+ * development it also survives the module being replaced on every edit, which
+ * is the reason the other two give.
  * ======================================================================== */
 
 export type SpendKindName = 'reader' | 'rerank' | 'embed' | 'worker';
@@ -39,7 +56,13 @@ export type SpendSink = (
   tokensOut: number,
 ) => void;
 
-let sink: SpendSink | null = null;
+declare global {
+  var __founditSpendSink: SpendSink | null | undefined;
+}
+
+function sink(): SpendSink | null {
+  return globalThis.__founditSpendSink ?? null;
+}
 
 /**
  * Install the sink. Last one wins; there is only ever one process here.
@@ -48,12 +71,12 @@ let sink: SpendSink | null = null;
  * the next test in the same process is not still writing into its assertions.
  */
 export function onSpend(fn: SpendSink | null): void {
-  sink = fn;
+  globalThis.__founditSpendSink = fn;
 }
 
 /** What is installed, for a test that wants to know. */
 export function spendSinkInstalled(): boolean {
-  return sink !== null;
+  return sink() !== null;
 }
 
 /**
@@ -70,9 +93,10 @@ export function reportSpend(
   tokensIn: number,
   tokensOut: number,
 ): void {
-  if (!sink) return;
+  const installed = sink();
+  if (!installed) return;
   try {
-    sink(kind, requests, tokensIn, tokensOut);
+    installed(kind, requests, tokensIn, tokensOut);
   } catch {
     // A ledger that failed is a number that is too low. It is never a reason
     // for a search to fail, and this is the line that guarantees it.
