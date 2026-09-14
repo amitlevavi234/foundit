@@ -65,7 +65,12 @@ export function SearchField({
   action = '/',
   name = 'q',
   defaultValue = '',
-  placeholder = 'Free way to split expenses with friends on a trip, in Spanish',
+  // SHORTER THAN IT WAS, by three words. A `<textarea>` wrapped a long
+  // placeholder onto a second line and a single-line `<input>` cuts it off
+  // with an ellipsis, so the hint stopped being a hint. It still shows the
+  // three things the box is for: a constraint (free), a real problem, and a
+  // language. The full sentence is in the suggestion chips underneath.
+  placeholder = 'Free way to split expenses on a trip, in Spanish',
   label = 'Describe the problem you want solved',
   size = 'lg',
   autoFocus = false,
