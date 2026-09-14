@@ -1,10 +1,12 @@
 import Link from 'next/link';
+import { Suspense } from 'react';
 
 import { Contraption } from '@/components/Contraption';
 import { ProblemCard } from '@/components/ProblemCard';
 import { SearchField } from '@/components/SearchField';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
+import { SkeletonGrid } from '@/components/SkeletonCard';
 import { TopRow } from '@/components/TopRow';
 import { getHome } from '@/lib/db';
 
@@ -20,6 +22,30 @@ import { getHome } from '@/lib/db';
  *
  * The box submits to /results as a GET, so a search is a URL: shareable,
  * back-button-able, and working with JavaScript switched off.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SEARCH BOX IS IN THE SHELL, WHICH IT WAS NOT — OWNER FEEDBACK, ROUND 1,
+ * F2.
+ *
+ * There was an `app/(home)/loading.tsx`, which Next compiles into a Suspense
+ * boundary around the WHOLE segment. React streams the fallback first and
+ * sends the real subtree later inside a `<div hidden id="S:n">`, followed by an
+ * inline script that swaps it in — so with scripting refused, this page stayed
+ * on its skeleton for ever. Everything the page claims to do without
+ * JavaScript, this box included, was in the document and invisible:
+ *
+ *     Skip to content / Foundit / Browse problems / Add a tool / Saved /
+ *     Sign in / Getting the catalogue ready…
+ *
+ * and nothing else, in a real browser with `script-src 'none'`.
+ *
+ * So the boundary is GONE and the shell — the header, the heading, the search
+ * box, the example prompts — renders synchronously, in the first flush. Only
+ * the two lists that need PostgreSQL sit in a Suspense slot with the skeleton
+ * `loading.tsx` used to draw, which keeps the "something is happening" frame
+ * for a client-side navigation without holding the box hostage to it.
+ * `tests/english.test.mjs` parses the HTML of all five main routes and fails if
+ * a `<form>` comes back inside a hidden Suspense subtree.
  * ======================================================================== */
 
 const EXAMPLE_PROMPTS = [
@@ -54,8 +80,6 @@ const POINTS: Array<[title: string, body: string, colour: string]> = [
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const home = await getHome(6, 3);
-
   return (
     <div className="page">
       <SiteHeader />
@@ -138,59 +162,12 @@ export default async function Home() {
           </div>
         </section>
 
-        <section className="shell" style={{ padding: '40px 56px 72px' }}>
-          <div className="section-head">
-            <h2 className="disp" style={{ fontSize: 'var(--t-section)', margin: 0, fontWeight: 700 }}>
-              Found lately
-            </h2>
-            <Link href="/browse" style={{ fontWeight: 'var(--fw-semibold)' }}>
-              See all problems people solved
-            </Link>
-          </div>
-
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-              gap: 28,
-            }}
-          >
-            {home.found.map((problem, i) => (
-              <ProblemCard key={problem.slug} problem={problem} lead index={i} />
-            ))}
-          </div>
-        </section>
-
-        <section className="shell" style={{ paddingBottom: 80 }}>
-          <div className="section-head">
-            <h2 className="disp" style={{ fontSize: 'var(--t-section)', margin: 0, fontWeight: 700 }}>
-              Top tools
-            </h2>
-            <Link href="/top" style={{ fontWeight: 'var(--fw-semibold)' }}>
-              See all top tools
-            </Link>
-          </div>
-
-          <div
-            className="panel"
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-              overflow: 'hidden',
-            }}
-          >
-            {home.topTools.map((tool, i) => (
-              <TopRow
-                key={tool.slug}
-                tool={tool}
-                rank={i + 1}
-                compact
-                columnRule={i % 2 === 0}
-                index={i}
-              />
-            ))}
-          </div>
-        </section>
+        {/* The only thing on this page that waits on PostgreSQL, and the only
+            thing in a Suspense slot. Neither list holds a form, a fit scale or
+            a star — see F2 in this file's header for why that matters. */}
+        <Suspense fallback={<CatalogueLoading />}>
+          <Catalogue />
+        </Suspense>
 
         <section
           className="shell"
@@ -230,5 +207,84 @@ export default async function Home() {
 
       <SiteFooter />
     </div>
+  );
+}
+
+/**
+ * Both catalogue lists, in one round trip, behind one boundary.
+ *
+ * ONE `getHome` AND NOT TWO Suspense slots: the two sections come out of a
+ * single statement (see this file's header), so splitting them would either
+ * ask PostgreSQL the same question twice or make the second boundary wait on
+ * the first anyway. They arrive together because they were fetched together.
+ */
+async function Catalogue() {
+  const home = await getHome(6, 3);
+
+  return (
+    <>
+      <section className="shell" style={{ padding: '40px 56px 72px' }}>
+        <div className="section-head">
+          <h2 className="disp" style={{ fontSize: 'var(--t-section)', margin: 0, fontWeight: 700 }}>
+            Found lately
+          </h2>
+          <Link href="/browse" style={{ fontWeight: 'var(--fw-semibold)' }}>
+            See all problems people solved
+          </Link>
+        </div>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+            gap: 28,
+          }}
+        >
+          {home.found.map((problem, i) => (
+            <ProblemCard key={problem.slug} problem={problem} lead index={i} />
+          ))}
+        </div>
+      </section>
+
+      <section className="shell" style={{ paddingBottom: 80 }}>
+        <div className="section-head">
+          <h2 className="disp" style={{ fontSize: 'var(--t-section)', margin: 0, fontWeight: 700 }}>
+            Top tools
+          </h2>
+          <Link href="/top" style={{ fontWeight: 'var(--fw-semibold)' }}>
+            See all top tools
+          </Link>
+        </div>
+
+        <div
+          className="panel"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+            overflow: 'hidden',
+          }}
+        >
+          {home.topTools.map((tool, i) => (
+            <TopRow
+              key={tool.slug}
+              tool={tool}
+              rank={i + 1}
+              compact
+              columnRule={i % 2 === 0}
+              index={i}
+            />
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+/** The shape of what is coming, with no word in it. components/SkeletonCard.tsx. */
+function CatalogueLoading() {
+  return (
+    <section className="shell" style={{ padding: '40px 56px 72px' }}>
+      <SkeletonGrid />
+    </section>
   );
 }

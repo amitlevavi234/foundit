@@ -757,11 +757,27 @@ export function relevanceOf(judgement: RerankJudgement | null, slug: string): 0 
  * wide and a legend that showed two of them would be drawing a two-point
  * scale under a three-bar meter. `/ranking` is where the fact that only two
  * appear is spelled out.
+ *
+ * TWO FIELDS AND NOT ONE — OWNER FEEDBACK, ROUND 1, overclaim 8. The third
+ * entry's `means` was `'same area — never shown'`, and `docs/loop-progress.md`
+ * said of all three that "these are his words verbatim". They were not: two of
+ * them were, and the third had four words of ours appended to it. Both halves
+ * are true and they are two different statements — one is what the word means
+ * and the other is a fact about this build's threshold — so they are two
+ * fields, and `components/ToolCard.tsx`'s legend draws the note muted, after
+ * the meaning, where a reader can tell which is which.
  */
-export const FIT_LEGEND: ReadonlyArray<{ steps: 1 | 2 | 3; label: string; means: string }> = [
+export const FIT_LEGEND: ReadonlyArray<{
+  steps: 1 | 2 | 3;
+  label: string;
+  /** The owner's own words for this position, and nothing else. */
+  means: string;
+  /** Ours, about this build rather than about the word. Drawn muted. */
+  note?: string;
+}> = [
   { steps: 3, label: 'Strong', means: 'does exactly this' },
   { steps: 2, label: 'Possible', means: 'does part of it' },
-  { steps: 1, label: 'Loose', means: 'same area — never shown' },
+  { steps: 1, label: 'Loose', means: 'same area', note: 'never shown' },
 ];
 
 export function relevanceBand(

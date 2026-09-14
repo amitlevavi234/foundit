@@ -10,7 +10,9 @@
 // ===========================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 import {
   MAX_REMOVAL_REASON,
@@ -196,6 +198,18 @@ test('the removal action decides admin-ness before it looks at its arguments', (
  * F3 — the /admin segment decides 404 before anything streams
  * ======================================================================== */
 
+/** Every file under a directory, as absolute paths. */
+function walk(dir) {
+  const root = typeof dir === 'string' ? dir : fileURLToPath(dir);
+  const out = [];
+  for (const entry of readdirSync(root)) {
+    const path = join(root, entry);
+    if (statSync(path).isDirectory()) out.push(...walk(path));
+    else out.push(path);
+  }
+  return out;
+}
+
 test('nothing streams above the admin check', () => {
   const layout = readFileSync(new URL('../app/admin/layout.tsx', import.meta.url), 'utf8');
   assert.match(layout, /notFound\(\)/, 'the layout is where the 404 is decided');
@@ -209,26 +223,29 @@ test('nothing streams above the admin check', () => {
   // THIS IS WHAT F3 ACTUALLY WAS, found by taking the fix to `next start`:
   // `app/loading.tsx` wrapped EVERY route in the product, so every not-found
   // page in the application answered 200 — `/tools/<missing>`, `/u/<nobody>`,
-  // `/maker/<not mine>` and `/admin`. It is `app/(home)/loading.tsx` now, in a
-  // route group, where it wraps the homepage and nothing else.
+  // `/maker/<not mine>` and `/admin`.
   //
-  // Two files, then: neither may exist.
-  for (const path of ['../app/loading.tsx', '../app/admin/loading.tsx']) {
-    let exists = true;
-    try {
-      readFileSync(new URL(path, import.meta.url), 'utf8');
-    } catch {
-      exists = false;
-    }
-    assert.equal(
-      exists,
-      false,
-      `${path.replace('../', '')} is a Suspense boundary above the admin check and would put `
-        + 'the 200 back — on every not-found page in the product, not only this one',
-    );
-  }
-
-  // And the homepage keeps its loading state, in the group where it belongs.
-  const home = readFileSync(new URL('../app/(home)/loading.tsx', import.meta.url), 'utf8');
-  assert.match(home, /RouteLoading/, 'the homepage still has a loading state');
+  // THERE IS NO `loading.tsx` ANYWHERE IN THIS APPLICATION NOW, and that is
+  // the round-1 review's F2 rather than a change of mind about this one. A
+  // route-level boundary also hides the page's own shell until a script runs:
+  // with scripting refused, four of the five main routes rendered a header and
+  // one line of text for ever, while the search box, the Save and Like forms,
+  // the review form, the fit scales and the stars sat in the document inside
+  // `<div hidden id="S:n">`. Each of those pages now renders its shell
+  // synchronously and puts its data list in a Suspense slot of its own, which
+  // is a boundary BELOW the page rather than above it — so `notFound()` still
+  // runs first and this section's rule is unchanged.
+  //
+  // Asserted over the whole tree rather than over two names, because the rule
+  // is about the file kind and not about those two paths.
+  const strays = walk(new URL('../app', import.meta.url))
+    .filter((path) => /(^|[\\/])loading\.(tsx?|jsx?|mjs)$/.test(path));
+  assert.deepEqual(
+    strays,
+    [],
+    'a loading.tsx is a Suspense boundary above a page: it puts the 200 back on every '
+      + 'not-found page (F3) and hides the page’s own shell from a browser with no '
+      + 'script (round-1 F2). A page that wants a skeleton renders <Suspense> around its '
+      + 'own data list instead.',
+  );
 });

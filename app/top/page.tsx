@@ -1,10 +1,13 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { Suspense } from 'react';
 
 import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
+import { LoadingLine } from '@/components/RouteLoading';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
+import { SkeletonGrid } from '@/components/SkeletonCard';
 import { TopRow } from '@/components/TopRow';
 import { getTop } from '@/lib/db';
 import type { TopRanking } from '@/lib/types';
@@ -23,6 +26,16 @@ import type { TopRanking } from '@/lib/types';
  * that does not exist yet. The two tabs are therefore the two counters that do
  * exist, which is a real choice a reader can make rather than a label over a
  * number that means something else.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SHELL IS NOT IN A BOUNDARY — OWNER FEEDBACK, ROUND 1, F2.
+ *
+ * `app/top/loading.tsx` wrapped this whole segment in a Suspense boundary, so
+ * with scripting refused the page was the header and "Counting what people
+ * found useful…", for ever. The boundary is gone: the header, the way back,
+ * the heading and the two ranking chips render in the first flush, and the
+ * ranked rows sit in a Suspense slot with the same skeleton the route used to
+ * draw. Nothing in that slot is a form, a fit scale or a star.
  * ======================================================================== */
 
 export const metadata: Metadata = {
@@ -53,9 +66,6 @@ export default async function Top({ searchParams }: TopProps) {
   const rawCategory = one(params.in);
   const category = rawCategory && rawCategory !== 'all' ? rawCategory : null;
   const ranking: TopRanking = one(params.by) === 'saves' ? 'saves' : 'likes';
-
-  const data = await getTop(category, ranking, PAGE_SIZE);
-  const active = data.categories.find((c) => c.slug === category);
 
   const href = (next: { in?: string | null; by?: TopRanking }) => {
     const search = new URLSearchParams();
@@ -108,6 +118,41 @@ export default async function Top({ searchParams }: TopProps) {
           </div>
         </div>
 
+        {/* The one thing on this page that waits on PostgreSQL. See F2 in
+            the header: the shell above renders synchronously and nothing in
+            here is a form, a fit scale or a star. */}
+        <Suspense key={`${category ?? 'all'}|${ranking}`} fallback={<Ranked.Loading />}>
+          <Ranked category={category} ranking={ranking} />
+        </Suspense>
+      </main>
+
+      <SiteFooter />
+    </div>
+  );
+}
+
+async function Ranked({
+  category,
+  ranking,
+}: {
+  category: string | null;
+  ranking: TopRanking;
+}) {
+  const data = await getTop(category, ranking, PAGE_SIZE);
+  const active = data.categories.find((c) => c.slug === category);
+
+  const href = (next: { in?: string | null; by?: TopRanking }) => {
+    const search = new URLSearchParams();
+    const inValue = next.in === undefined ? category : next.in;
+    const byValue = next.by ?? ranking;
+    if (inValue) search.set('in', inValue);
+    if (byValue !== 'likes') search.set('by', byValue);
+    const qs = search.toString();
+    return qs ? `/top?${qs}` : '/top';
+  };
+
+  return (
+    <>
         <div className="filter-row">
           <ChipLink
             href={href({ in: null })}
@@ -149,9 +194,19 @@ export default async function Top({ searchParams }: TopProps) {
           the maker’s own address is — <Link href="/browse">browse by problem</Link> if a name means
           nothing to you, which is rather the point.
         </p>
-      </main>
-
-      <SiteFooter />
-    </div>
+    </>
   );
 }
+
+/** The shape of what is coming, with the line the route used to draw. */
+Ranked.Loading = function RankedLoading() {
+  return (
+    <>
+      <LoadingLine
+        label="Counting what people found useful…"
+        detail="Ranked by likes and saves, nothing bought"
+      />
+      <SkeletonGrid />
+    </>
+  );
+};

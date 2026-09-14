@@ -81,6 +81,15 @@ import { visitorAddress } from '@/lib/visitor';
  *   ResultsLoading    the Suspense fallback below. The shell — the question,
  *                     the chips, the dock — is rendered from the URL alone and
  *                     streams immediately; only the answer waits on Postgres.
+ *                     There is no longer an `app/results/loading.tsx` over the
+ *                     top of it: that wrapped the WHOLE segment in a second
+ *                     boundary, so with scripting refused the page was
+ *                     "Matching against the catalogue…" and nothing else —
+ *                     the question, the chips and the search dock were all in
+ *                     the document, inside `<div hidden id="S:n">`, waiting on
+ *                     an inline script that never ran (OWNER FEEDBACK, ROUND
+ *                     1, F2). The one boundary that remains is the one below,
+ *                     around the answer alone.
  *   Results           the grid.
  *   ResultsEmpty      nothing matched: say so, and offer to loosen exactly one
  *                     of the constraints that were understood.
@@ -977,6 +986,13 @@ async function Answer({
                       {entry.label}
                     </strong>{' '}
                     {entry.means}
+                    {/* The owner's words, then ours — and visibly ours.
+                        Overclaim 8: "same area — never shown" was rendered as
+                        one string and described in the write-up as his words
+                        verbatim. The first half is; the second is a fact about
+                        this build's threshold, and it is drawn muted after it
+                        rather than run together with it. */}
+                    {entry.note ? <span className="faint"> — {entry.note}</span> : null}
                   </span>
                 </span>
               ))}

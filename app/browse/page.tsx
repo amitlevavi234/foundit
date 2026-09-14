@@ -1,12 +1,15 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { Suspense } from 'react';
 
 import { BackLink } from '@/components/BackLink';
 import { ChipLink } from '@/components/Chip';
 import { Icon } from '@/components/Icon';
 import { ProblemCard } from '@/components/ProblemCard';
+import { LoadingLine } from '@/components/RouteLoading';
 import { SiteFooter } from '@/components/SiteFooter';
 import { SiteHeader } from '@/components/SiteHeader';
+import { SkeletonGrid } from '@/components/SkeletonCard';
 import { getBrowse } from '@/lib/db';
 
 /* ===========================================================================
@@ -24,6 +27,21 @@ import { getBrowse } from '@/lib/db';
  * depth order for the sidebar, the page of statements, and the two totals in
  * the standfirst all arrive together (`getBrowse`). Nothing on this page is
  * sorted, filtered or counted after it arrives.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SEARCH BOX IS IN THE SHELL — OWNER FEEDBACK, ROUND 1, F2.
+ *
+ * `app/browse/loading.tsx` wrapped this whole segment in a Suspense boundary,
+ * so with scripting refused the page was three words and a skeleton for ever:
+ *
+ *     Skip to content / Foundit / … / Home / Opening the catalogue… /
+ *     Problems people solve here, one per tool
+ *
+ * The boundary is gone. The header, the way back, the heading and the search
+ * form render in the first flush; the catalogue rows sit in a Suspense slot
+ * with the same skeleton, which is the one thing on the page that waits on
+ * PostgreSQL. Nothing inside that slot is a form, a fit scale or a star —
+ * `tests/english.test.mjs` fails if one ever is.
  * ======================================================================== */
 
 export const metadata: Metadata = {
@@ -44,9 +62,6 @@ export default async function Browse({ searchParams }: BrowseProps) {
   const params = await searchParams;
   const raw = Array.isArray(params.in) ? params.in[0] : params.in;
   const category = raw && raw !== 'all' ? raw : null;
-
-  const data = await getBrowse(category, PAGE_SIZE);
-  const active = data.categories.find((c) => c.slug === category);
 
   return (
     <div className="page">
@@ -71,8 +86,8 @@ export default async function Browse({ searchParams }: BrowseProps) {
               Problems people solve here
             </h1>
             <p className="muted" style={{ fontSize: 'var(--t-body-lg)', margin: 0 }}>
-              {data.toolCount} tools, indexed by {data.problemCount} problems written in plain
-              language. Pick one to see what fits, or describe your own.
+              Every tool here is indexed by the problems it solves, written in plain language. Pick
+              one to see what fits, or describe your own.
             </p>
           </div>
 
@@ -90,25 +105,45 @@ export default async function Browse({ searchParams }: BrowseProps) {
           </form>
         </div>
 
-        <div className="filter-row">
-          <ChipLink
-            href="/browse"
-            label="All"
-            state={category ? 'plain' : 'explicit'}
-            current={!category}
-          />
-          {data.categories.map((c) => (
-            <ChipLink
-              key={c.slug}
-              href={`/browse?in=${encodeURIComponent(c.slug)}`}
-              label={`${c.name} · ${c.toolCount}`}
-              state={c.slug === category ? 'explicit' : 'plain'}
-              current={c.slug === category}
-            />
-          ))}
-        </div>
+        {/* Everything below here comes out of one statement and is the only
+            thing on this page that waits on PostgreSQL. See F2 in the header:
+            the shell above renders synchronously, this does not, and nothing
+            in it is a form, a fit scale or a star. */}
+        <Suspense key={category ?? 'all'} fallback={<Rows.Loading />}>
+          <Rows category={category} />
+        </Suspense>
+      </main>
 
-        <div
+      <SiteFooter />
+    </div>
+  );
+}
+
+async function Rows({ category }: { category: string | null }) {
+  const data = await getBrowse(category, PAGE_SIZE);
+  const active = data.categories.find((c) => c.slug === category);
+
+  return (
+    <>
+      <div className="filter-row">
+        <ChipLink
+          href="/browse"
+          label="All"
+          state={category ? 'plain' : 'explicit'}
+          current={!category}
+        />
+        {data.categories.map((c) => (
+          <ChipLink
+            key={c.slug}
+            href={`/browse?in=${encodeURIComponent(c.slug)}`}
+            label={`${c.name} · ${c.toolCount}`}
+            state={c.slug === category ? 'explicit' : 'plain'}
+            current={c.slug === category}
+          />
+        ))}
+      </div>
+
+      <div
           style={{
             display: 'grid',
             gridTemplateColumns: 'minmax(0, 1fr) 340px',
@@ -196,9 +231,24 @@ export default async function Browse({ searchParams }: BrowseProps) {
             </div>
           </aside>
         </div>
-      </main>
-
-      <SiteFooter />
-    </div>
+    </>
   );
 }
+
+/**
+ * The shape of what is coming, with the same line the route used to draw.
+ *
+ * Hung off `Rows` rather than declared beside it so the two cannot drift apart
+ * in a file this long: the fallback for a component belongs to it.
+ */
+Rows.Loading = function RowsLoading() {
+  return (
+    <>
+      <LoadingLine
+        label="Opening the catalogue…"
+        detail="Problems people solve here, one per tool"
+      />
+      <SkeletonGrid />
+    </>
+  );
+};

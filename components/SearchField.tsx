@@ -9,8 +9,25 @@ import { MAX_QUERY_LENGTH } from '@/lib/sql';
  * The one input the product has: "Say what's bugging you."
  *
  * A slab with the send button parked inside it, from the homepage artboard.
- * It is a plain `<form method="get">`, so it works with JavaScript switched off
- * and the result is a shareable URL.
+ * It is a plain `<form method="get">`, and the result is a shareable URL.
+ *
+ * IT ALSO HAS TO BE IN THE PART OF THE PAGE THAT RENDERS SYNCHRONOUSLY, which
+ * is not a property of this file and is why this sentence has changed — OWNER
+ * FEEDBACK, ROUND 1, F2. It used to say "so it works with JavaScript switched
+ * off", full stop, and the markup really is a plain GET form; but every page
+ * this box sits on had a `loading.tsx`, which Next compiles into a Suspense
+ * boundary around the whole segment. React streams the fallback and sends the
+ * real subtree later inside `<div hidden id="S:n">` with an inline script to
+ * swap it in — so with scripting refused, this form was in the document and
+ * invisible, for ever, on `/`, `/browse`, `/top`, `/results` and
+ * `/tools/[slug]`. The form was right and the page was not.
+ *
+ * Those five files are gone and each page renders its shell — this box
+ * included — in the first flush, with only its data list in a Suspense slot.
+ * `tests/english.test.mjs` parses the HTML of all five routes and fails if a
+ * shell form comes back inside a hidden Suspense subtree, which is the only
+ * kind of assertion that could have caught it: the markup was never the
+ * problem.
  *
  * IT IS A SINGLE-LINE `<input>` AND IT USED TO BE A `<textarea>` — the owner's
  * item 7, 14 September 2026. A `<textarea>` does not submit on Enter; a script
@@ -27,8 +44,11 @@ import { MAX_QUERY_LENGTH } from '@/lib/sql';
  *
  * The sentence is capped at 200 characters and has never needed a newline, so
  * the element that submits on Enter by itself is the right one. There is no
- * `onKeyDown` any more, and Enter works before hydration, after hydration, and
- * with JavaScript switched off entirely.
+ * `onKeyDown` any more: Enter is the browser's own implicit submission, which
+ * needs nothing of ours before hydration, after hydration, or with JavaScript
+ * switched off entirely — and, since F2 took the `loading.tsx` boundaries off
+ * the five routes this box appears on, the form is now actually on screen in
+ * the third of those three cases as well as in the first two.
  *
  * The counter stays, and it is the only thing left that needs script: a count
  * that has not appeared yet is a missing courtesy, not a broken control, and
